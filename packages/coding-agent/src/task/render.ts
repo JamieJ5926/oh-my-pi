@@ -82,6 +82,8 @@ function getStatusIcon(status: AgentProgress["status"], theme: Theme, spinnerFra
 			return formatStatusIcon("error", theme);
 		case "aborted":
 			return formatStatusIcon("aborted", theme);
+		case "missing":
+			return formatStatusIcon("error", theme);
 	}
 }
 
@@ -903,7 +905,7 @@ function renderAgentProgress(
 	const iconColor =
 		progress.status === "completed"
 			? "success"
-			: progress.status === "failed" || progress.status === "aborted"
+			: progress.status === "failed" || progress.status === "aborted" || progress.status === "missing"
 				? "error"
 				: "accent";
 
@@ -946,6 +948,8 @@ function renderAgentProgress(
 	} else if (progress.status === "failed" || progress.status === "aborted") {
 		const statusLabel = progress.status === "failed" ? "failed" : "aborted";
 		statusLine += ` ${formatBadge(statusLabel, iconColor, theme)}`;
+	} else if (progress.status === "missing") {
+		statusLine += ` ${formatBadge("missing", iconColor, theme)}`;
 	}
 
 	const showBadge = settings.get("task.showResolvedModelBadge");
@@ -1441,6 +1445,7 @@ function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme
 		completed: 0,
 		failed: 0,
 		aborted: 0,
+		missing: 0,
 	};
 	for (const p of hidden) counts[p.status]++;
 	const parts: string[] = [];
@@ -1449,6 +1454,7 @@ function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme
 	if (counts.pending > 0) parts.push(theme.fg("dim", `${counts.pending} pending`));
 	if (counts.failed > 0) parts.push(theme.fg("error", `${counts.failed} failed`));
 	if (counts.aborted > 0) parts.push(theme.fg("error", `${counts.aborted} aborted`));
+	if (counts.missing > 0) parts.push(theme.fg("error", `${counts.missing} missing`));
 	const breakdown =
 		parts.length > 0
 			? `${theme.fg("dim", " (")}${parts.join(theme.fg("dim", theme.sep.dot))}${theme.fg("dim", ")")}`

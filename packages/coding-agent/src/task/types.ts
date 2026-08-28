@@ -110,10 +110,27 @@ export const LABEL_MAX = 80;
 const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
+/** Work classification used to select straggler handling. */
+export type TaskClass = "local-read" | "grep" | "web-research" | "build-test";
+
+/** Optional retry behavior for tasks that outlive the parent deadline. */
+export interface StragglerPolicy {
+	retryLimit?: number;
+	classifyExhaustedAsMissing?: boolean;
+}
+
+const taskClassRule = '"local-read" | "grep" | "web-research" | "build-test"' as const;
+const stragglerPolicySchema = type({
+	"retryLimit?": "number",
+	"classifyExhaustedAsMissing?": "boolean",
+	"+": "delete",
+});
 
 export const taskItemSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
+	"taskClass?": taskClassRule,
+	"stragglerPolicy?": stragglerPolicySchema,
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
@@ -122,6 +139,8 @@ export const taskItemSchema = type({
 const taskItemSchemaIsolated = type({
 	"name?": "string",
 	agent: "string = 'task'",
+	"taskClass?": taskClassRule,
+	"stragglerPolicy?": stragglerPolicySchema,
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
@@ -137,6 +156,10 @@ export interface TaskItem {
 	agent?: string;
 	/** The work; required by the schema. */
 	task?: string;
+	/** Work classification used to select straggler handling. */
+	taskClass?: TaskClass;
+	/** Optional retry behavior for stragglers. */
+	stragglerPolicy?: StragglerPolicy;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
 	effort?: TaskEffort;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
@@ -151,6 +174,8 @@ export const taskSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	"taskClass?": taskClassRule,
+	"stragglerPolicy?": stragglerPolicySchema,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
@@ -160,6 +185,8 @@ const taskSchemaNoIsolation = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	"taskClass?": taskClassRule,
+	"stragglerPolicy?": stragglerPolicySchema,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"+": "delete",
@@ -206,6 +233,8 @@ function createTaskSchema(options: {
 				"name?": "string",
 				agent,
 				task: "string",
+				"taskClass?": taskClassRule,
+				"stragglerPolicy?": stragglerPolicySchema,
 				...effortField,
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
@@ -222,6 +251,8 @@ function createTaskSchema(options: {
 			"name?": "string",
 			agent,
 			task: "string",
+			"taskClass?": taskClassRule,
+			"stragglerPolicy?": stragglerPolicySchema,
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
@@ -238,6 +269,8 @@ function createTaskSchema(options: {
 			"name?": "string",
 			agent,
 			task: "string",
+			"taskClass?": taskClassRule,
+			"stragglerPolicy?": stragglerPolicySchema,
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
@@ -249,6 +282,8 @@ function createTaskSchema(options: {
 		"name?": "string",
 		agent,
 		task: "string",
+		"taskClass?": taskClassRule,
+		"stragglerPolicy?": stragglerPolicySchema,
 		...effortField,
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
@@ -290,6 +325,10 @@ export interface TaskParams {
 	agent?: string;
 	/** The work (flat form). */
 	task?: string;
+	/** Work classification used to select straggler handling. */
+	taskClass?: TaskClass;
+	/** Optional retry behavior for stragglers. */
+	stragglerPolicy?: StragglerPolicy;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
 	effort?: TaskEffort;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
@@ -400,7 +439,7 @@ export interface AgentProgress {
 	id: string;
 	agent: string;
 	agentSource: AgentSource;
-	status: "pending" | "running" | "completed" | "failed" | "aborted";
+	status: "pending" | "running" | "completed" | "failed" | "aborted" | "missing";
 	task: string;
 	assignment?: string;
 	description?: string;

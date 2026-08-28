@@ -5,6 +5,26 @@ const DELIVERY_RETRY_MAX_MS = 30_000;
 const DELIVERY_RETRY_JITTER_MS = 200;
 const DEFAULT_RETENTION_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_RUNNING_JOBS = 15;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+export const TASK_CLASS_FLOORS = {
+	"local-read": 20_000,
+	grep: 25_000,
+	default: 30_000,
+	"web-research": 180_000,
+	"build-test": 300_000,
+} as const;
+
+const DEFAULT_STRAGGLER_FLOOR_MS = TASK_CLASS_FLOORS.default;
+
+function normalizeStragglerFloorMs(value: number | undefined): number {
+	if (value === undefined || !Number.isFinite(value) || value <= 0) {
+		return DEFAULT_STRAGGLER_FLOOR_MS;
+	}
+	return Math.floor(value);
+}
+
+/** Abort reason used only when the manager cancels an overdue batch sibling. */
+export const STRAGGLER_CANCEL_REASON = Symbol("AsyncJobManager straggler cancellation");
 /** Abort reason used only when the owning session shuts down the entire manager. */
 export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdown");
 
@@ -37,6 +57,8 @@ export interface AsyncJob {
 	type: AsyncJobType;
 	status: "running" | "completed" | "failed" | "cancelled";
 	startTime: number;
+	/** Time this job left its caller-managed queue and began active work. */
+	actualStartedAt?: number;
 	label: string;
 	abortController: AbortController;
 	promise: Promise<void>;
@@ -51,6 +73,14 @@ export interface AsyncJob {
 	 * supply an id (e.g. legacy tests, SDK consumers without an agent context).
 	 */
 	ownerId?: string;
+	/** Unique identity of one task-tool call. Meaningful only together with ownerId. */
+	batchId?: string;
+	/** Stable caller-defined identity shared by attempts of the same logical item. */
+	logicalItemId?: string;
+	/** Caller-defined attempt number for this logical item. */
+	attempt?: number;
+	/** Normalized minimum active-runtime budget used by this job's batch tracker. */
+	stragglerFloorMs?: number;
 	/**
 	 * Registry id of the subagent this job runs (task/tan/vibe jobs). Lets
 	 * job-view code link a job row to its AgentRegistry ref even when the job
@@ -109,6 +139,14 @@ export interface AsyncJobRegisterOptions {
 	id?: string;
 	/** Registry id of the agent that owns this job; used to scope cancelAll. */
 	ownerId?: string;
+	/** Unique identity of one caller batch. The tracker also scopes it by ownerId. */
+	batchId?: string;
+	/** Stable caller-defined identity shared by attempts of the same logical item. */
+	logicalItemId?: string;
+	/** Caller-defined attempt number for this logical item. */
+	attempt?: number;
+	/** Minimum active-runtime budget. Defaults to 30 seconds for tracked task batches. */
+	stragglerFloorMs?: number;
 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
 	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
@@ -123,6 +161,164 @@ export interface AsyncJobRegisterOptions {
  */
 export interface AsyncJobFilter {
 	ownerId?: string;
+}
+
+
+interface BatchStragglerState {
+	readonly ownerId: string;
+	readonly batchId: string;
+	/** The set size is the number of jobs that registered successfully in this batch. */
+	readonly jobIds: Set<string>;
+	floorMs: number;
+	firstCompletedAt?: number;
+	firstCompletionDurationMs?: number;
+	timer?: NodeJS.Timeout;
+}
+
+type GetAsyncJob = (jobId: string) => AsyncJob | undefined;
+type CancelAsyncJob = (jobId: string, filter: AsyncJobFilter, reason?: unknown) => boolean;
+
+class BatchStragglerTracker {
+	/** Two-level key prevents collisions between arbitrary owner and batch strings. */
+	readonly #batchesByOwner = new Map<string, Map<string, BatchStragglerState>>();
+	readonly #getJob: GetAsyncJob;
+	readonly #cancelJob: CancelAsyncJob;
+
+	constructor(getJob: GetAsyncJob, cancelJob: CancelAsyncJob) {
+		this.#getJob = getJob;
+		this.#cancelJob = cancelJob;
+	}
+
+	register(job: AsyncJob): void {
+		if (job.type !== "task" || job.ownerId === undefined || job.batchId === undefined) return;
+
+		let batches = this.#batchesByOwner.get(job.ownerId);
+		if (!batches) {
+			batches = new Map<string, BatchStragglerState>();
+			this.#batchesByOwner.set(job.ownerId, batches);
+		}
+
+		let state = batches.get(job.batchId);
+		if (!state) {
+			state = {
+				ownerId: job.ownerId,
+				batchId: job.batchId,
+				jobIds: new Set<string>(),
+				floorMs: job.stragglerFloorMs ?? DEFAULT_STRAGGLER_FLOOR_MS,
+			};
+			batches.set(job.batchId, state);
+		}
+
+		state.jobIds.add(job.id);
+		state.floorMs = Math.max(state.floorMs, job.stragglerFloorMs ?? DEFAULT_STRAGGLER_FLOOR_MS);
+		if (job.status !== "running") {
+			this.onTerminal(job);
+			return;
+		}
+		this.#reschedule(state, Date.now());
+	}
+
+	onStarted(job: AsyncJob, startedAt: number = Date.now()): void {
+		if (job.ownerId === undefined || job.batchId === undefined) return;
+		const state = this.#batchesByOwner.get(job.ownerId)?.get(job.batchId);
+		if (!state || !state.jobIds.has(job.id)) return;
+		job.actualStartedAt ??= startedAt;
+		this.#reschedule(state, startedAt);
+	}
+
+	onTerminal(job: AsyncJob, settledAt: number = Date.now()): void {
+		if (job.ownerId === undefined || job.batchId === undefined) return;
+		const state = this.#batchesByOwner.get(job.ownerId)?.get(job.batchId);
+		if (!state || !state.jobIds.has(job.id)) return;
+
+		if (job.status === "completed" && state.firstCompletedAt === undefined) {
+			const startedAt = job.actualStartedAt ?? job.startTime;
+			state.firstCompletedAt = settledAt;
+			state.firstCompletionDurationMs = Math.max(0, settledAt - startedAt);
+		}
+
+		if (this.#allTerminal(state)) {
+			this.#deleteState(state);
+			return;
+		}
+		this.#reschedule(state, settledAt);
+	}
+
+	dispose(): void {
+		for (const batches of this.#batchesByOwner.values()) {
+			for (const state of batches.values()) {
+				clearTimeout(state.timer);
+			}
+		}
+		this.#batchesByOwner.clear();
+	}
+
+	#reschedule(state: BatchStragglerState, now: number): void {
+		if (state.timer) {
+			clearTimeout(state.timer);
+			state.timer = undefined;
+		}
+		if (state.jobIds.size < 2 || state.firstCompletionDurationMs === undefined) return;
+
+		const budgetMs = Math.max(state.floorMs, 2 * state.firstCompletionDurationMs);
+		let nextDeadline = Number.POSITIVE_INFINITY;
+		for (const jobId of state.jobIds) {
+			const sibling = this.#getJob(jobId);
+			if (
+				!sibling ||
+				sibling.ownerId !== state.ownerId ||
+				sibling.batchId !== state.batchId ||
+				sibling.status !== "running" ||
+				sibling.queued === true ||
+				sibling.actualStartedAt === undefined
+			) {
+				continue;
+			}
+			nextDeadline = Math.min(nextDeadline, sibling.actualStartedAt + budgetMs);
+		}
+		if (!Number.isFinite(nextDeadline)) return;
+
+		const timer = setTimeout(() => {
+			state.timer = undefined;
+			if (this.#batchesByOwner.get(state.ownerId)?.get(state.batchId) !== state) return;
+			const firedAt = Date.now();
+			for (const jobId of state.jobIds) {
+				const sibling = this.#getJob(jobId);
+				if (
+					!sibling ||
+					sibling.ownerId !== state.ownerId ||
+					sibling.batchId !== state.batchId ||
+					sibling.status !== "running" ||
+					sibling.queued === true ||
+					sibling.actualStartedAt === undefined ||
+					firedAt - sibling.actualStartedAt < budgetMs
+				) {
+					continue;
+				}
+				this.#cancelJob(sibling.id, { ownerId: state.ownerId }, STRAGGLER_CANCEL_REASON);
+			}
+
+			if (this.#allTerminal(state)) this.#deleteState(state);
+			else this.#reschedule(state, firedAt);
+		}, Math.min(MAX_TIMER_DELAY_MS, Math.max(0, nextDeadline - now)));
+		timer.unref();
+		state.timer = timer;
+	}
+
+	#allTerminal(state: BatchStragglerState): boolean {
+		for (const jobId of state.jobIds) {
+			if (this.#getJob(jobId)?.status === "running") return false;
+		}
+		return true;
+	}
+
+	#deleteState(state: BatchStragglerState): void {
+		const batches = this.#batchesByOwner.get(state.ownerId);
+		if (batches?.get(state.batchId) !== state) return;
+		clearTimeout(state.timer);
+		batches.delete(state.batchId);
+		if (batches.size === 0) this.#batchesByOwner.delete(state.ownerId);
+	}
 }
 
 export class AsyncJobManager {
@@ -144,6 +340,10 @@ export class AsyncJobManager {
 	}
 
 	readonly #jobs = new Map<string, AsyncJob>();
+	readonly #batchStragglerTracker = new BatchStragglerTracker(
+		jobId => this.#jobs.get(jobId),
+		(jobId, filter, reason) => this.cancel(jobId, filter, reason),
+	);
 	readonly #deliveries: AsyncJobDelivery[] = [];
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #suppressedDeliveries = new Set<string>();
@@ -218,16 +418,24 @@ export class AsyncJobManager {
 		this.#consumedJobResults.delete(id);
 		const abortController = new AbortController();
 		const startTime = Date.now();
+		const batchId = options?.batchId?.trim() || undefined;
+		const stragglerFloorMs =
+			batchId === undefined ? undefined : normalizeStragglerFloorMs(options?.stragglerFloorMs);
 
 		const job: AsyncJob = {
 			id,
 			type,
 			status: "running",
 			startTime,
+			actualStartedAt: options?.queued === true ? undefined : startTime,
 			label,
 			abortController,
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
+			batchId,
+			logicalItemId: options?.logicalItemId,
+			attempt: options?.attempt,
+			stragglerFloorMs,
 			agentId: options?.agentId,
 			queued: options?.queued === true,
 		};
@@ -252,32 +460,41 @@ export class AsyncJobManager {
 					reportProgress,
 					markRunning: () => {
 						job.queued = false;
+						if (job.actualStartedAt === undefined) {
+							job.actualStartedAt = Date.now();
+							this.#batchStragglerTracker.onStarted(job, job.actualStartedAt);
+						}
 					},
 				});
 				if (job.status === "cancelled") {
 					job.resultText = text;
+					this.#batchStragglerTracker.onTerminal(job);
 					this.#scheduleEviction(id);
 					return;
 				}
 				job.status = "completed";
 				job.resultText = text;
+				this.#batchStragglerTracker.onTerminal(job);
 				this.#enqueueDelivery(id, text);
 				this.#scheduleEviction(id);
 			} catch (error) {
 				if (job.status === "cancelled") {
 					job.errorText = error instanceof Error ? error.message : String(error);
+					this.#batchStragglerTracker.onTerminal(job);
 					this.#scheduleEviction(id);
 					return;
 				}
 				const errorText = error instanceof Error ? error.message : String(error);
 				job.status = "failed";
 				job.errorText = errorText;
+				this.#batchStragglerTracker.onTerminal(job);
 				this.#enqueueDelivery(id, errorText);
 				this.#scheduleEviction(id);
 			}
 		})();
 
 		this.#jobs.set(id, job);
+		this.#batchStragglerTracker.register(job);
 		return id;
 	}
 
@@ -286,13 +503,15 @@ export class AsyncJobManager {
 	 * match the job's owner, the call is treated as not-found (returns false)
 	 * so cross-agent cancellation is rejected at the manager level.
 	 */
-	cancel(id: string, filter?: AsyncJobFilter): boolean {
+	cancel(id: string, filter?: AsyncJobFilter, reason?: unknown): boolean {
 		const job = this.#jobs.get(id);
 		if (!job) return false;
 		if (filter?.ownerId && job.ownerId !== filter.ownerId) return false;
 		if (job.status !== "running") return false;
 		job.status = "cancelled";
-		job.abortController.abort();
+		this.#batchStragglerTracker.onTerminal(job);
+		if (reason === undefined) job.abortController.abort();
+		else job.abortController.abort(reason);
 		this.#scheduleEviction(id);
 		return true;
 	}
@@ -458,7 +677,9 @@ export class AsyncJobManager {
 	#cancelJobs(filter?: AsyncJobFilter, reason?: unknown): void {
 		for (const job of this.getRunningJobs(filter)) {
 			job.status = "cancelled";
-			job.abortController.abort(reason);
+			this.#batchStragglerTracker.onTerminal(job);
+			if (reason === undefined) job.abortController.abort();
+			else job.abortController.abort(reason);
 			this.#scheduleEviction(job.id);
 		}
 	}
@@ -623,6 +844,7 @@ export class AsyncJobManager {
 
 	async dispose(options?: { timeoutMs?: number }): Promise<boolean> {
 		this.#disposed = true;
+		this.#batchStragglerTracker.dispose();
 		this.#clearEvictionTimers();
 		this.#cancelJobs(undefined, ASYNC_JOB_MANAGER_SHUTDOWN_REASON);
 		const timeoutMs = Math.max(options?.timeoutMs ?? 3_000, 0);

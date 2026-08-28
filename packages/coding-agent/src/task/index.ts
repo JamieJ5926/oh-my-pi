@@ -14,6 +14,7 @@
  *   - Session artifacts for debugging
  */
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -36,11 +37,13 @@ import {
 	canSpawnAtDepth,
 	getTaskSchema,
 	type SingleResult,
+	type TaskClass,
 	type TaskItem,
 	type TaskParams,
 	type TaskToolDetails,
 	type TaskToolSchemaInstance,
 } from "./types";
+import { STRAGGLER_CANCEL_REASON, TASK_CLASS_FLOORS } from "../async/job-manager";
 // Import review tools for side effects (registers subagent tool handlers)
 import "../tools/review";
 import type { AsyncJobManager } from "../async";
@@ -112,6 +115,7 @@ export type {
 	SubagentEventPayload,
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
+	TaskClass,
 	TaskParams,
 	TaskToolDetails,
 } from "./types";
@@ -275,12 +279,14 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
 		return params.tasks;
 	}
-	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
-	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
-	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
-	if ("effort" in params) item.effort = params.effort;
-	if ("isolated" in params) item.isolated = params.isolated;
-	return [item];
+const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
+if ("taskClass" in params) item.taskClass = params.taskClass;
+if ("stragglerPolicy" in params) item.stragglerPolicy = params.stragglerPolicy;
+if ("outputSchema" in params) item.outputSchema = params.outputSchema;
+if ("schemaMode" in params) item.schemaMode = params.schemaMode;
+if ("effort" in params) item.effort = params.effort;
+if ("isolated" in params) item.isolated = params.isolated;
+return [item];
 }
 
 /**
@@ -297,6 +303,8 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if (item.name !== undefined) spawn.name = item.name;
 	if (item.task !== undefined) spawn.task = item.task;
 	if (params.context !== undefined) spawn.context = params.context;
+	if ("taskClass" in item) spawn.taskClass = item.taskClass;
+	if ("stragglerPolicy" in item) spawn.stragglerPolicy = item.stragglerPolicy;
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("effort" in item) spawn.effort = item.effort;
@@ -827,6 +835,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				),
 			);
 		}
+		const batchId = toolCallId;
 
 		// Async IDs are claimed before job registration, so retain the fallback
 		// manager on the session rather than recreating it for every call.
@@ -839,6 +848,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const spawns: Array<{
 			agentId: string;
 			item: TaskItem;
+			spawnParams: TaskParams;
+			logicalItemId: string;
+			attemptState: { current: number };
 			index: number;
 			blocking: boolean;
 			progress: AgentProgress;
@@ -849,9 +861,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const agentSource = policy.agent.source;
 			const agentId = await outputManager.allocate(item.name?.trim() || generateTaskName());
 			const assignment = (item.task ?? "").trim();
+			const spawnParams = normalizedSpawnParams[index]!;
 			spawns.push({
 				agentId,
 				item,
+				spawnParams,
+				logicalItemId: agentId,
+				attemptState: { current: 0 },
 				index,
 				blocking: itemBlocking[index],
 				progress: {
@@ -909,8 +925,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			try {
 				const jobId = this.#registerSpawnJob({
 					manager,
+					batchId,
+					logicalItemId: spawn.logicalItemId,
+					attempt: 0,
+					retryLimit: Math.min(1, Math.max(0, Math.floor(spawn.spawnParams.stragglerPolicy?.retryLimit ?? 0))),
+					attemptState: spawn.attemptState,
 					toolCallId,
-					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
+					spawnParams: spawn.spawnParams,
 					agentId: spawn.agentId,
 					progress: spawn.progress,
 					ircEnabled,
@@ -1068,6 +1089,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 */
 	#registerSpawnJob(options: {
 		manager: AsyncJobManager;
+		batchId: string;
+		logicalItemId: string;
+		attempt: number;
+		retryLimit: number;
+		attemptState: { current: number };
 		toolCallId: string;
 		spawnParams: TaskParams;
 		agentId: string;
@@ -1077,8 +1103,31 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
 		onSettled?: (failed: boolean) => void;
 	}): string {
-		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
-			options;
+		const {
+			manager,
+			batchId,
+			logicalItemId,
+			attempt,
+			retryLimit,
+			attemptState,
+			toolCallId,
+			spawnParams,
+			agentId,
+			progress,
+			ircEnabled,
+			buildDetails,
+			onUpdate,
+			onSettled,
+		} = options;
+		const settleLogical = (() => {
+			let settled = false;
+			return (failed: boolean): void => {
+				if (settled) return;
+				settled = true;
+				onSettled?.(failed);
+			};
+		})();
+		let replacementPromise: Promise<boolean> | undefined;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			if (aborted) {
 				const ref = AgentRegistry.global().get(agentId);
@@ -1124,10 +1173,50 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				const acquiredAt = Date.now();
 				if (!semaphoreHeld || runSignal.aborted) {
 					releasePermit();
-					progress.status = "aborted";
-					onSettled?.(true);
+					settleLogical(true);
 					throw new Error("Aborted before execution");
 				}
+				const launchReplacement = (): Promise<boolean> => {
+					if (replacementPromise) return replacementPromise;
+					replacementPromise = (async () => {
+						if (attemptState.current !== attempt || attempt >= retryLimit) return false;
+						const nextAttempt = attempt + 1;
+						const retryOutputManager = this.session.agentOutputManager ?? new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
+						this.session.agentOutputManager ??= retryOutputManager;
+						const replacementId = await retryOutputManager.allocate(agentId);
+						try {
+							this.#registerSpawnJob({
+								manager,
+								batchId,
+								logicalItemId,
+								attempt: nextAttempt,
+								retryLimit: 0,
+								attemptState,
+								toolCallId,
+								spawnParams,
+								agentId: replacementId,
+								progress,
+								ircEnabled,
+								buildDetails,
+								onUpdate,
+								onSettled: settleLogical,
+							});
+							attemptState.current = nextAttempt;
+							progress.id = replacementId;
+							return true;
+						} catch {
+							return false;
+						}
+					})();
+					return replacementPromise;
+				};
+				runSignal.addEventListener(
+					"abort",
+					() => {
+						if (runSignal.reason === STRAGGLER_CANCEL_REASON) void launchReplacement();
+					},
+					{ once: true },
+				);
 				try {
 					markRunning();
 					progress.status = "running";
@@ -1156,8 +1245,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 							progress.currentTool = nextProgress.currentTool;
 							progress.lastIntent = nextProgress.lastIntent;
 							progress.recentTools = nextProgress.recentTools.slice();
-							progress.recentOutput = nextProgress.recentOutput.slice();
-							progress.retryState = nextProgress.retryState;
 							progress.retryFailure = nextProgress.retryFailure;
 						}
 						const updateText =
@@ -1176,10 +1263,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					);
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
+					if (attemptState.current !== attempt) return "Superseded attempt.";
 					// A missing result means the sync path failed at the tool level
 					// (results: []) — treat it as a failure, not success.
 					const resultFailed = !singleResult || (singleResult.aborted ?? false) || singleResult.exitCode !== 0;
-					progress.status = singleResult?.aborted ? "aborted" : resultFailed ? "failed" : "completed";
+					progress.status =
+						(singleResult?.aborted && runSignal.reason === STRAGGLER_CANCEL_REASON && attempt >= retryLimit &&
+						spawnParams.stragglerPolicy?.classifyExhaustedAsMissing === true)
+							? "missing"
+							: singleResult?.aborted
+								? "aborted"
+								: resultFailed
+									? "failed"
+									: "completed";
 					progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
 					progress.tokens = singleResult?.tokens ?? 0;
 					progress.requests = singleResult?.requests ?? 0;
@@ -1198,25 +1294,33 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						delete progress.resolvedModel;
 						delete progress.resolvedModelIsFallback;
 					}
-					onSettled?.(resultFailed);
+					settleLogical(resultFailed);
+					const missing = progress.status === "missing";
 					const statusText = resultFailed
-						? `Background task ${agentId} failed.`
+						? missing
+							? `Background task ${agentId} missing after straggler retry.`
+							: `Background task ${agentId} failed.`
 						: `Background task ${agentId} complete.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true)}`;
 					if (resultFailed) {
-						// Mark the job itself failed; the failed agent stays interrogable.
 						throw new TaskJobError(deliveryText);
 					}
 					return deliveryText;
 				} catch (error) {
-					if (error instanceof TaskJobError) {
-						throw error;
+					const isStraggler = runSignal.reason === STRAGGLER_CANCEL_REASON;
+					if (attemptState.current !== attempt) return "Superseded attempt.";
+					if (isStraggler && await launchReplacement()) return "Straggler attempt replaced.";
+					if (isStraggler && attemptState.current !== attempt) return "Straggler attempt replaced.";
+					if (isStraggler && spawnParams.stragglerPolicy?.classifyExhaustedAsMissing) {
+						progress.status = "missing";
+					} else {
+						progress.status = "failed";
 					}
-					progress.status = "failed";
-					progress.durationMs = Math.max(0, Date.now() - startedAt);
-					onSettled?.(true);
-					const statusText = `Background task ${agentId} failed.`;
+					settleLogical(true);
+					const statusText = progress.status === "missing"
+						? `Background task ${agentId} missing after straggler retry.`
+						: `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
 					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
@@ -1230,10 +1334,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				agentId,
 				queued: true,
 				ownerId: this.session.getAgentId?.() ?? undefined,
+				batchId,
+				logicalItemId,
+				attempt,
+				stragglerFloorMs:
+					spawnParams.taskClass === undefined ? undefined : TASK_CLASS_FLOORS[spawnParams.taskClass],
 				onProgress: text => {
 					onUpdate?.({ content: [{ type: "text", text }], details: buildDetails() });
 				},
-			},
+			}
 		);
 	}
 
