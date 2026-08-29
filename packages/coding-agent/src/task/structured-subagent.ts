@@ -9,6 +9,8 @@ import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { resolveAgentModelSelection } from "../config/model-resolver";
+import type { RoleProfileConfig } from "../config/settings-schema";
+import type { ExecutionBackendRegistry } from "../bridge/index";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -114,6 +116,10 @@ export interface StructuredSubagentRequest {
 	maxRuntimeMs?: number;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
+	/** Execution backend selector; defaults to local. */
+	executionBackend?: "local" | "pi" | "jcode";
+	/** Optional backend registry supplied by the caller. */
+	executionBackendRegistry?: ExecutionBackendRegistry;
 }
 
 /** A normalized preflight result, reusable by tests and adapters. */
@@ -133,6 +139,12 @@ export interface EffectiveSubagentPolicy {
 	applyChanges: boolean;
 	enableLsp: boolean;
 	enableIrc: boolean;
+	/** True when this agent uses the stripped subagent prompt. */
+	minimalPrompt: boolean;
+	/** Profile-level soft request budget; undefined keeps executor fallback. */
+	softRequestBudget?: number;
+	/** Profile-level opt-in to suppress auto-added tools. */
+	restrictToolNames?: boolean;
 }
 
 /** Settled child execution plus data needed by the frontends' own rendering. */
@@ -196,6 +208,46 @@ function createPlanModeAgent(agent: AgentDefinition): AgentDefinition {
 		spawns: undefined,
 		prewalk: undefined,
 	};
+}
+
+/**
+ * Agents that receive a minimal system prompt: no skills catalog, no rules,
+ * no workspace tree, no extra context files (AGENTS.md etc). Keeps tool
+ * schemas, role brief, yield schema. SYSTEM.md and APPEND_SYSTEM.md are
+ * preserved because they load through customSystemPrompt/resolvedCustomPrompt,
+ * not contextFiles. Scoped to read-only leaf roles only; managers/synthesizers/
+ * reviewers keep the full prompt. Vibe mode is unaffected (separate builder).
+ */
+const MINIMAL_PROMPT_AGENTS: Record<string, true> = {
+	explorer: true,
+	researcher: true,
+	watcher: true,
+	"research-gemini": true,
+	"research-grok": true,
+	"research-luna": true,
+};
+
+export function findRoleProfile(
+	profiles: Record<string, RoleProfileConfig> | undefined,
+	agentName: string,
+): RoleProfileConfig | undefined {
+	if (!profiles) return undefined;
+	for (const profile of Object.values(profiles)) {
+		if (profile?.agents?.includes(agentName)) return profile;
+	}
+	return undefined;
+}
+
+export function applyRoleProfile(agent: AgentDefinition, profile: RoleProfileConfig): AgentDefinition {
+	const modelRole = profile.model_role?.trim();
+	const profiled: AgentDefinition & { restrictToolNames: boolean } = {
+		...agent,
+		tools: [...profile.tools],
+		...(modelRole ? { model: [`@${modelRole.replace(/^@/, "")}`] } : {}),
+		spawns: profile.tools.includes("task") ? agent.spawns : undefined,
+		restrictToolNames: profile.restrictToolNames ?? false,
+	};
+	return profiled;
 }
 
 function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode: boolean): void {
@@ -269,7 +321,10 @@ export async function resolveEffectiveSubagentPolicy(
 		);
 	}
 
-	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	const roleProfiles = request.session.settings.get("roleProfiles") as Record<string, RoleProfileConfig> | undefined;
+	const roleProfile = findRoleProfile(roleProfiles, agentName);
+	const profiledAgent = roleProfile ? applyRoleProfile(agent, roleProfile) : agent;
+	const effectiveAgent = planMode ? createPlanModeAgent(profiledAgent) : profiledAgent;
 	const schema = resolveSchema(request, effectiveAgent);
 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
 		const { error } = buildOutputValidator(schema.schema);
@@ -324,6 +379,9 @@ export async function resolveEffectiveSubagentPolicy(
 			(request.enableIrc ??
 				(request.session.enableIrc !== false &&
 					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
+		minimalPrompt: roleProfile?.minimalPrompt ?? MINIMAL_PROMPT_AGENTS[agentName] === true,
+		softRequestBudget: roleProfile?.softRequestBudget,
+		restrictToolNames: roleProfile?.restrictToolNames === true,
 	};
 }
 
@@ -371,6 +429,7 @@ function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
 	return { skills, autoloadSkills };
 }
 
+
 function buildExecutorOptions(
 	request: StructuredSubagentRequest,
 	policy: EffectiveSubagentPolicy,
@@ -378,12 +437,16 @@ function buildExecutorOptions(
 	id: string,
 ): ExecutorOptions {
 	const { session } = request;
-	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
+	const minimal = policy.minimalPrompt;
+	const { skills, autoloadSkills } = minimal
+		? { skills: [], autoloadSkills: [] }
+		: resolveAutoloadSkills(session, policy.agent);
 	const localProtocolOptions: LocalProtocolOptions = session.localProtocolOptions ?? {
 		getArtifactsDir: session.getArtifactsDir ?? (() => null),
 		getSessionId: session.getSessionId ?? (() => null),
 	};
-	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
+	const restrictToolNames =
+		policy.planMode || session.restrictToolNames === true || policy.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	return {
 		cwd: session.cwd,
@@ -433,12 +496,14 @@ function buildExecutorOptions(
 		settings: session.settings,
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 		enableMCP,
-		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
+		contextFiles: minimal
+			? []
+			: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
 		skills,
 		autoloadSkills,
-		workspaceTree: session.workspaceTree,
+		workspaceTree: minimal ? undefined : session.workspaceTree,
 		promptTemplates: session.promptTemplates,
-		rules: session.rules,
+		rules: minimal ? [] : session.rules,
 		// Root policy and module paths have separate jobs: the live policy drives
 		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
 		// parent-bound extension instances while constructing the child.
@@ -450,10 +515,13 @@ function buildExecutorOptions(
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
+		executionBackend: request.executionBackend ?? "local",
+		executionBackendRegistry: request.executionBackendRegistry,
 		parentTelemetry: session.getTelemetry?.(),
 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+		softRequestBudget: policy.softRequestBudget,
 	};
 }
 

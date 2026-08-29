@@ -1069,6 +1069,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
+		if (typeof params?.path !== "string" || params.path.trim().length === 0) {
+			throw new ToolError("Missing required parameter 'path'. Provide a local path, internal URI, or URL.");
+		}
 		const result = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
 		appendRepeatReadHint(this.session, params.path, result);
 		return result;

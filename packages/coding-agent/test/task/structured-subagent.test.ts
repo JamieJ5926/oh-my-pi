@@ -167,6 +167,27 @@ describe("structured subagent primitive", () => {
 		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
 		expect(discover).not.toHaveBeenCalled();
 	});
+
+	it("reads restrictToolNames from the matching roleProfiles setting at the policy layer", async () => {
+		mockDiscovery();
+		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
+		childSession.settings.override("roleProfiles", {
+			restricted_worker: {
+				agents: ["worker"],
+				tools: ["read", "yield"],
+				model_role: "reviewer",
+				minimalPrompt: true,
+				softRequestBudget: 4,
+				restrictToolNames: true,
+			},
+		});
+
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+
+		expect(policy.restrictToolNames).toBe(true);
+		expect(policy.effectiveAgent.tools).toEqual(["read", "yield"]);
+		expect(policy.effectiveAgent.spawns).toBeUndefined();
+	});
 	it("reloads model roles before resolving an agent added during the session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
 		const projectDir = path.join(root, "project");

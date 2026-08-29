@@ -86,6 +86,17 @@ import {
 
 export type ModelRoleStorage = "global" | "project";
 
+/** Per-role runtime profile: tools, model role, prompt/budget overrides. */
+export interface RoleProfileConfig {
+	agents: string[];
+	tools: string[];
+	model_role: string;
+	minimalPrompt: boolean;
+	softRequestBudget: number;
+	restrictToolNames?: boolean;
+}
+
+
 const BUILTIN_BLOB_DESTINATION_METADATA: readonly BlobDestinationMetadata<BlobDestinationId>[] =
 	Object.values(BUILTIN_BLOB_DESTINATIONS);
 
@@ -398,6 +409,7 @@ const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
+const EMPTY_ROLE_PROFILES: Record<string, RoleProfileConfig> = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
@@ -663,6 +675,8 @@ export const SETTINGS_SCHEMA = {
 	modelRoles: { type: "record", default: EMPTY_STRING_RECORD },
 
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
+
+	roleProfiles: { type: "record", default: EMPTY_ROLE_PROFILES },
 
 	modelProviderOrder: { type: "array", default: EMPTY_STRING_ARRAY },
 
