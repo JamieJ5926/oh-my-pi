@@ -33,6 +33,7 @@ import {
 	prepareIsolationContext,
 	runIsolatedSubprocess,
 } from "./isolation-runner";
+import { isReadOnlyAgent } from "./read-only-policy";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
@@ -349,7 +350,9 @@ export async function resolveEffectiveSubagentPolicy(
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
 	const isolationMode = request.session.settings.get("task.isolation.mode");
-	const isIsolated = request.isolation?.requested === true;
+	const isIsolated =
+		request.isolation?.requested === true ||
+		(request.invocationKind === "task" && !isReadOnlyAgent(effectiveAgent));
 	if (isIsolated && isolationMode === "none") {
 		throw new StructuredSubagentError(
 			"preflight",

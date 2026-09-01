@@ -659,6 +659,37 @@ describe("structured subagent primitive", () => {
 		expect(evalPolicy.applyChanges).toBe(true);
 	});
 
+	it("isolates writer tasks even without an isolation request", async () => {
+		mockDiscovery();
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: session({ isolationMode: "worktree" }) }),
+		);
+		expect(policy.isIsolated).toBe(true);
+	});
+
+	it("does not auto-isolate read-only task agents", async () => {
+		mockDiscovery({ ...AGENT, tools: ["read", "grep"] });
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: session({ isolationMode: "worktree" }) }),
+		);
+		expect(policy.isIsolated).toBe(false);
+	});
+
+	it("does not auto-isolate writer evals", async () => {
+		mockDiscovery();
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ invocationKind: "eval", session: session({ isolationMode: "worktree" }) }),
+		);
+		expect(policy.isIsolated).toBe(false);
+	});
+
+	it("fails closed when a writer task needs isolation and mode is none", async () => {
+		mockDiscovery();
+		await expect(resolveEffectiveSubagentPolicy(request())).rejects.toThrow(
+			'Subagent isolated execution requires task.isolation.mode to be set; current mode is "none".',
+		);
+	});
+
 	it("retains successful isolated task artifacts when auto-apply is disabled", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;
