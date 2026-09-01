@@ -38,10 +38,11 @@ function session(
 		isolationMode?: "none" | "worktree";
 		isolationApply?: boolean;
 		modelRoles?: Record<string, string>;
+		cwd?: string;
 	} = {},
 ): ToolSession {
 	return {
-		cwd: "/tmp",
+		cwd: options.cwd ?? "/tmp",
 		hasUI: false,
 		outputSchema: options.outputSchema,
 		settings: Settings.isolated({
@@ -187,6 +188,39 @@ describe("structured subagent primitive", () => {
 		expect(policy.restrictToolNames).toBe(true);
 		expect(policy.effectiveAgent.tools).toEqual(["read", "yield"]);
 		expect(policy.effectiveAgent.spawns).toBeUndefined();
+	});
+	it("threads roleProfile toolCallLoopGuard through policy, child Settings, and ExecutorOptions", async () => {
+		mockDiscovery();
+		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
+		childSession.settings.override("model.toolCallLoopGuard.enabled", true);
+		childSession.settings.override("model.toolCallLoopGuard.threshold", 5);
+		childSession.settings.override("roleProfiles", {
+			loop_guard_worker: {
+				agents: ["worker"],
+				tools: ["read", "yield"],
+				model_role: "reviewer",
+				minimalPrompt: true,
+				softRequestBudget: 4,
+				toolCallLoopGuard: { threshold: 2 },
+			},
+		});
+
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		expect(policy.toolCallLoopGuard?.threshold).toBe(2);
+
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(
+			request({ session: childSession, agent: "worker", retainArtifacts: true }),
+		);
+		expect(settled.policy.toolCallLoopGuard?.threshold).toBe(2);
+		expect(dispatched[0]?.toolCallLoopGuard?.threshold).toBe(2);
+        expect(dispatched[0]?.settings?.get("model.toolCallLoopGuard.threshold")).toBe(5);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 	it("reloads model roles before resolving an agent added during the session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
@@ -661,10 +695,16 @@ describe("structured subagent primitive", () => {
 
 	it("isolates writer tasks even without an isolation request", async () => {
 		mockDiscovery();
-		const policy = await resolveEffectiveSubagentPolicy(
-			request({ session: session({ isolationMode: "worktree" }) }),
-		);
-		expect(policy.isIsolated).toBe(true);
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auto-iso-policy-"));
+		try {
+			await Bun.$`git init`.cwd(repo);
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({ session: session({ isolationMode: "worktree", cwd: repo }) }),
+			);
+			expect(policy.isIsolated).toBe(true);
+		} finally {
+			await fs.rm(repo, { recursive: true, force: true });
+		}
 	});
 
 	it("does not auto-isolate read-only task agents", async () => {
@@ -683,10 +723,60 @@ describe("structured subagent primitive", () => {
 		expect(policy.isIsolated).toBe(false);
 	});
 
-	it("fails closed when a writer task needs isolation and mode is none", async () => {
+	it("does not auto-isolate writer tasks when cwd is not a git repo", async () => {
 		mockDiscovery();
-		await expect(resolveEffectiveSubagentPolicy(request())).rejects.toThrow(
-			'Subagent isolated execution requires task.isolation.mode to be set; current mode is "none".',
+		const policy = await resolveEffectiveSubagentPolicy(request());
+		expect(policy.isIsolated).toBe(false);
+
+		const prepare = vi.spyOn(isolationRunner, "prepareIsolationContext");
+		const isolatedRun = vi.spyOn(isolationRunner, "runIsolatedSubprocess");
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(request({ retainArtifacts: true }));
+		expect(settled.policy.isIsolated).toBe(false);
+		expect(prepare).not.toHaveBeenCalled();
+		expect(isolatedRun).not.toHaveBeenCalled();
+		expect(dispatched).toHaveLength(1);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("auto-isolates writer tasks when mode is none without throwing", async () => {
+		mockDiscovery();
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auto-iso-git-"));
+		try {
+			await Bun.$`git init`.cwd(repo);
+			await Bun.$`git -c user.email=t@t -c user.name=t commit --allow-empty -m init`.cwd(repo);
+			const gitSession = session({ cwd: repo, isolationApply: false });
+			const policy = await resolveEffectiveSubagentPolicy(request({ session: gitSession }));
+			expect(policy.isIsolated).toBe(true);
+
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				return { ...result(), cwd: options.worktree ?? options.cwd };
+			});
+
+			const settled = await runStructuredSubagent(
+				request({ session: gitSession, retainArtifacts: true }),
+			);
+			expect(settled.policy.isIsolated).toBe(true);
+			const cwdOrWorktree = settled.result.cwd;
+			expect(cwdOrWorktree).toBeDefined();
+			expect(String(cwdOrWorktree)).toContain(`${process.env.HOME}/.omp/wt`);
+			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+		} finally {
+			await fs.rm(repo, { recursive: true, force: true });
+		}
+	});
+
+	it("still throws when isolation is explicitly requested and mode is none", async () => {
+		mockDiscovery();
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ isolation: { requested: true } })),
+		).rejects.toThrow(
+			'Subagent isolated execution requires task.isolation.mode to be set or a worktree to be passed; current mode is "none".',
 		);
 	});
 

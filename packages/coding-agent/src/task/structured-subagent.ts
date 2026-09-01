@@ -33,9 +33,9 @@ import {
 	prepareIsolationContext,
 	runIsolatedSubprocess,
 } from "./isolation-runner";
-import { isReadOnlyAgent } from "./read-only-policy";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
+import { isReadOnlyAgent } from "./read-only-policy";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
@@ -44,6 +44,8 @@ import {
 	type SingleResult,
 	type StructuredSubagentOutput,
 } from "./types";
+import * as natives from "@oh-my-pi/pi-natives";
+import * as git from "../utils/git";
 import { type NestedRepoPatch, parseIsolationMode } from "./worktree";
 
 /** Validation behavior requested for an effective output schema. */
@@ -146,6 +148,13 @@ export interface EffectiveSubagentPolicy {
 	softRequestBudget?: number;
 	/** Profile-level opt-in to suppress auto-added tools. */
 	restrictToolNames?: boolean;
+	/** Profile-level tool-call loop guard; undefined keeps global settings. */
+	toolCallLoopGuard?: RoleProfileConfig["toolCallLoopGuard"];
+	/** Structural execution backend from the matching role profile. Defaults local. */
+	executionBackend: "local" | "pi" | "jcode";
+	/** Required for jcode so factory options are not guessed. */
+	jcodeProviderProfile?: string;
+
 }
 
 /** Settled child execution plus data needed by the frontends' own rendering. */
@@ -295,6 +304,22 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
  * dispatching work. Callers translate {@link StructuredSubagentError} into
  * their own wire-level error surface.
  */
+
+function resolvePreferredIsolationBackend(
+	mode: Parameters<typeof parseIsolationMode>[0],
+	isIsolated: boolean,
+	explicitlyRequested: boolean,
+): natives.IsoBackendKind | undefined {
+	const parsed = parseIsolationMode(mode);
+	if (parsed !== undefined) return parsed;
+	// parseIsolationMode maps none/auto to undefined. Auto writers still isolate
+	// via ensureIsolation; pin the worktree (rcopy) backend so PAL does not skip.
+	if (isIsolated && !explicitlyRequested && (mode === "none" || mode === "auto")) {
+		return natives.IsoBackendKind.Rcopy;
+	}
+	return undefined;
+}
+
 export async function resolveEffectiveSubagentPolicy(
 	request: StructuredSubagentRequest,
 ): Promise<EffectiveSubagentPolicy> {
@@ -350,13 +375,15 @@ export async function resolveEffectiveSubagentPolicy(
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
 	const isolationMode = request.session.settings.get("task.isolation.mode");
-	const isIsolated =
-		request.isolation?.requested === true ||
-		(request.invocationKind === "task" && !isReadOnlyAgent(effectiveAgent));
-	if (isIsolated && isolationMode === "none") {
+	const isolationRequested = request.isolation?.requested === true;
+	const wantsAutoIsolation =
+		!isolationRequested && request.invocationKind === "task" && !isReadOnlyAgent(effectiveAgent);
+	const canAutoIsolate = wantsAutoIsolation && (await git.repo.root(request.session.cwd)) !== null;
+	const isIsolated = isolationRequested || canAutoIsolate;
+	if (isolationRequested && isolationMode === "none") {
 		throw new StructuredSubagentError(
 			"preflight",
-			`Subagent isolated execution requires task.isolation.mode to be set; current mode is "none".`,
+			`Subagent isolated execution requires task.isolation.mode to be set or a worktree to be passed; current mode is "none".`,
 		);
 	}
 	return {
@@ -385,6 +412,10 @@ export async function resolveEffectiveSubagentPolicy(
 		minimalPrompt: roleProfile?.minimalPrompt ?? MINIMAL_PROMPT_AGENTS[agentName] === true,
 		softRequestBudget: roleProfile?.softRequestBudget,
 		restrictToolNames: roleProfile?.restrictToolNames === true,
+		toolCallLoopGuard: roleProfile?.toolCallLoopGuard,
+		executionBackend: roleProfile?.execution_backend ?? "local",
+		jcodeProviderProfile: roleProfile?.jcode_provider_profile,
+
 	};
 }
 
@@ -441,9 +472,7 @@ function buildExecutorOptions(
 ): ExecutorOptions {
 	const { session } = request;
 	const minimal = policy.minimalPrompt;
-	const { skills, autoloadSkills } = minimal
-		? { skills: [], autoloadSkills: [] }
-		: resolveAutoloadSkills(session, policy.agent);
+	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
 	const localProtocolOptions: LocalProtocolOptions = session.localProtocolOptions ?? {
 		getArtifactsDir: session.getArtifactsDir ?? (() => null),
 		getSessionId: session.getSessionId ?? (() => null),
@@ -518,13 +547,16 @@ function buildExecutorOptions(
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
-		executionBackend: request.executionBackend ?? "local",
+		executionBackend: request.executionBackend ?? policy.executionBackend ?? "local",
 		executionBackendRegistry: request.executionBackendRegistry,
+		ownerSession: session.externalExecutionOwner,
+
 		parentTelemetry: session.getTelemetry?.(),
 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 		softRequestBudget: policy.softRequestBudget,
+		toolCallLoopGuard: policy.toolCallLoopGuard,
 	};
 }
 
@@ -666,7 +698,11 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			result = await runIsolatedSubprocess({
 				baseOptions,
 				context: isolationContext,
-				preferredBackend: parseIsolationMode(request.session.settings.get("task.isolation.mode")),
+				preferredBackend: resolvePreferredIsolationBackend(
+					request.session.settings.get("task.isolation.mode"),
+					policy.isIsolated,
+					request.isolation?.requested === true,
+				),
 				agentId: id,
 				mergeMode: policy.mergeMode,
 				artifactsDir: lease.artifactsDir,
