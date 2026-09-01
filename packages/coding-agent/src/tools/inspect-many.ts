@@ -9,15 +9,13 @@ import inspectManyDescription from "../prompts/tools/inspect_many.md" with { typ
 
 const inspectManySchema = type({
 	objective: type("string").describe("What you're investigating (e.g., 'map all API endpoints')"),
-	repositoryRoot: type("string").optional().describe("Repository root (defaults to project directory)"),
-	selectors: type("array")
-		.optional()
-		.describe("Scope: repository (all), path, or glob pattern (omit for full repo)"),
-	exclusions: type("array").optional().describe("Exclusion patterns"),
-	maxFilesPerChunk: type("number").optional().describe("Max files per reader chunk"),
-	targetSourceTokensPerChunk: type("number").optional().describe("Target tokens per chunk"),
-	maxConcurrency: type("number").optional().describe("Max concurrent reader jobs (default: 4)"),
-	requireCompleteCoverage: type("boolean").optional().describe("Fail if any entries unreachable (default: true)"),
+	"repositoryRoot?": type("string").describe("Repository root (defaults to project directory)"),
+	"selectors?": type("string[]").describe("Scope: repository (all), path, or glob pattern (omit for full repo)"),
+	"exclusions?": type("string[]").describe("Exclusion patterns"),
+	"maxFilesPerChunk?": type("number").describe("Max files per reader chunk"),
+	"targetSourceTokensPerChunk?": type("number").describe("Target tokens per chunk"),
+	"maxConcurrency?": type("number").describe("Max concurrent reader jobs (default: 4)"),
+	"requireCompleteCoverage?": type("boolean").describe("Fail if any entries unreachable (default: true)"),
 });
 
 interface InspectManyToolDetails {
