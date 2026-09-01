@@ -50,6 +50,8 @@ import {
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
+import { createImageUrlServiceFromSettings } from "./blob-broker/service";
+import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
@@ -76,9 +78,7 @@ import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
-import "./discovery";
-import { createImageUrlServiceFromSettings } from "./blob-broker/service";
-import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
+import type { SessionAddress } from "./bridge/index";
 import { initializeWithSettings } from "./discovery";
 import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
 import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
@@ -120,6 +120,7 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
+import { IrcBus } from "./irc/bus";
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
@@ -253,6 +254,56 @@ type McpNotificationEntry = {
 type LateDiagnosticsDetails = {
 	files: Array<{ path: string; summary: string; errored: boolean; messages: string[] }>;
 };
+export type RuleMarker = {
+	name: string;
+	contentDigest: string;
+	rendered: boolean;
+};
+
+export type RulesMarkerData = {
+	v: 1;
+	promptDigest: string;
+	rulesSetDigest: string;
+	rules: RuleMarker[];
+};
+
+export function buildRulesMarkerData(
+	renderedPrompt: string,
+	rules: ReadonlyArray<{ name: string; content: string }>,
+): RulesMarkerData | undefined {
+	if (rules.length === 0) return undefined;
+
+	const markerRules = rules.map(rule => {
+		const contentDigest = Bun.SHA256.hash(rule.content, "hex");
+		return {
+			name: rule.name,
+			contentDigest,
+			rendered: renderedPrompt.includes(rule.content),
+		};
+	});
+
+	return {
+		v: 1,
+		promptDigest: Bun.SHA256.hash(renderedPrompt, "hex"),
+		rulesSetDigest: Bun.SHA256.hash(
+			markerRules.map(rule => `${rule.name}\0${rule.contentDigest}\0${rule.rendered ? "1" : "0"}`).join("\n"),
+			"hex",
+		),
+		rules: markerRules,
+	};
+}
+export function createRulesMarkerObserver(
+	appendCustomEntry: (customType: string, data: RulesMarkerData) => void,
+	rules: ReadonlyArray<{ name: string; content: string }>,
+): (context: { systemPrompt?: string[] }) => void {
+	return context => {
+		const data = buildRulesMarkerData((context.systemPrompt ?? []).join("\n\n"), rules);
+		if (data !== undefined) {
+			appendCustomEntry("omp:rules-marker", data);
+		}
+	};
+}
+
 
 function buildLateDiagnosticsBatchMessage(
 	entries: DeferredDiagnosticsEntry[],
@@ -947,6 +998,8 @@ function isLegacyBuiltinToolDefinition(tool: CustomTool | ToolDefinition): boole
 const TOOL_DEFINITION_MARKER = Symbol("__isToolDefinition");
 /** Matches the truncation applied to per-server instructions inside `rebuildSystemPrompt`. */
 const MAX_MCP_INSTRUCTIONS_LENGTH = 4000;
+/** Heartbeat cadence for published SDK sessions; the registry default lease is substantially longer. */
+const PUBLICATION_HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000;
 
 let sshCleanupRegistered = false;
 
@@ -1698,11 +1751,56 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
+	// A null expectation is a fresh CAS only when the local id is absent. If a
+	// parked ref exists, retain the synchronous revival path; there is no frozen
+	// publish-existing API for attaching that generation to the directory.
+	const freshExpectedRegistration =
+		options.expectedAgentRef === undefined ||
+		(options.expectedAgentRef === null && agentRegistry.get(options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID) === undefined);
+	const productionPublication =
+		(options.agentRegistry === undefined || agentRegistry === AgentRegistry.global()) && freshExpectedRegistration;
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
 	const resolvedAgentDisplayName =
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
 	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
 	let registeredAgentRef: AgentRef | undefined;
+	let publishedAddress: SessionAddress | undefined;
+	let publicationAddressBound = false;
+	let publicationHeartbeat: ReturnType<typeof setInterval> | undefined;
+	let publicationHeartbeatActive = false;
+	let publicationCleanupPromise: Promise<void> | undefined;
+	/** Tear down publication in order, retaining exact-address ownership guards. */
+	const cleanupPublication = (): Promise<void> => {
+		if (!publishedAddress) return Promise.resolve();
+		if (publicationCleanupPromise) return publicationCleanupPromise;
+		const address = publishedAddress;
+		publicationCleanupPromise = (async () => {
+			let cleanupError: unknown;
+			publicationHeartbeatActive = false;
+			if (publicationHeartbeat) {
+				clearInterval(publicationHeartbeat);
+				publicationHeartbeat = undefined;
+			}
+			if (publicationAddressBound) {
+				try {
+					await IrcBus.global().unregisterAddress(address);
+				} catch (error) {
+					cleanupError = error;
+				}
+				publicationAddressBound = false;
+			}
+			try {
+				const removed = await agentRegistry.unregisterPublished(resolvedAgentId, address);
+				if (!removed && registeredAgentRef && agentRegistry.get(resolvedAgentId) === registeredAgentRef && registeredAgentRef.address === address) {
+					agentRegistry.unregister(resolvedAgentId, registeredAgentRef);
+				}
+			} catch (error) {
+				cleanupError = cleanupError === undefined ? error : new AggregateError([cleanupError, error], "SDK publication cleanup failed");
+			}
+			if (cleanupError !== undefined) throw cleanupError;
+		})();
+		return publicationCleanupPromise;
+	};
 	/**
 	 * Forget the agent ref on teardown — unless it is a retained terminal ref.
 	 * Parking disposes the session but keeps the ref addressable (history://,
@@ -1715,12 +1813,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	 */
 	const unregisterUnlessParked = (): void => {
 		const ref = registeredAgentRef;
+		if (productionPublication && publishedAddress) return;
 		if (!ref || agentRegistry.get(resolvedAgentId) !== ref) return;
 		if (ref.status === "parked" || (ref.status === "aborted" && !ref.session)) return;
 		if (AgentLifecycleManager.global().isParking(resolvedAgentId, ref)) return;
 		agentRegistry.unregister(resolvedAgentId, ref);
 	};
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
+
+
 
 	try {
 		const getActiveModelString = (): string | undefined => {
@@ -1795,6 +1896,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getToolByName: name => session?.getToolByName(name),
 			getToolForEvalBridge: name => session?.getToolForEvalBridge(name),
 			getEvalBridgeToolNames: () => session?.getEvalBridgeToolNames() ?? [],
+			dispatchExternalToolCall: call =>
+				session?.dispatchExternalToolCall(call) ?? Promise.resolve({ ok: false, error: "session unavailable" }),
+			externalExecutionOwner: session,
 			getCodeModeDirectToolNames: () => session?.getCodeModeDirectToolNames(),
 			agentRegistry,
 			// The global lifecycle releases through AgentRegistry.global(); wiring it
@@ -3221,10 +3325,31 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			sessionFile: sessionManager.getSessionFile() ?? null,
 			status: "running" as const,
 		};
-		registeredAgentRef =
-			options.expectedAgentRef === undefined
+		registeredAgentRef = productionPublication
+			? await agentRegistry.registerPublished(registrationInput)
+			: options.expectedAgentRef === undefined
 				? agentRegistry.register(registrationInput)
 				: agentRegistry.registerIfAvailable(registrationInput, options.expectedAgentRef);
+		if (productionPublication && registeredAgentRef) {
+			publishedAddress = registeredAgentRef.address;
+			try {
+				await IrcBus.global().registerAddress(publishedAddress);
+				publicationAddressBound = true;
+				publicationHeartbeat = setInterval(() => {
+					if (!publicationHeartbeatActive || !publishedAddress) return;
+					void agentRegistry.heartbeatPublished(resolvedAgentId, publishedAddress).catch(error => {
+						logger.warn("SDK publication heartbeat failed", { error: String(error) });
+					});
+				}, PUBLICATION_HEARTBEAT_INTERVAL_MS);
+				publicationHeartbeat.unref?.();
+				publicationHeartbeatActive = true;
+			} catch (error) {
+				await cleanupPublication().catch(cleanupError => {
+					logger.warn("Failed to clean up SDK publication after startup error", { error: String(cleanupError) });
+				});
+				throw error;
+			}
+		}
 		if (!registeredAgentRef && options.expectedAgentRef === null) {
 			// A fresh spawn collided with an existing id. If that id is held by a
 			// provably-dead parked corpse — no live session, no reviver — reclaim it
@@ -3441,6 +3566,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			convertToLlm: convertToLlmFinal,
 			onPayload,
 			onResponse,
+			onProviderContextReady: createRulesMarkerObserver(
+				(customType, data) => sessionManager.appendCustomEntry(customType, data),
+				alwaysApplyRules,
+			),
 			sessionId: providerSessionId,
 			promptCacheKey: providerPromptCacheKey,
 			deadline: options.deadline,
@@ -3868,16 +3997,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		{
 			const originalDispose = session.dispose.bind(session);
 			session.dispose = async () => {
+				let disposeError: unknown;
 				try {
-					// Reject new session work (eval starts) the moment disposal
-					// begins — the lifecycle await below opens an async gap before
-					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
 					if (agentKind === "main") {
-						// Top-level teardown owns the global agent lifecycle: park timers,
-						// adopted subagent sessions, revivers. Tear it down while shared
-						// resources (kernels, MCP, LSP) are still live. Subagent disposal
-						// must NOT touch the global lifecycle.
 						const vibeRegistry = VibeSessionRegistry.global();
 						const vibeParentSession = {
 							getAgentId: () => resolvedAgentId,
@@ -3892,18 +4015,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						await AgentLifecycleManager.global().dispose();
 					}
 					await originalDispose();
-				} finally {
-					unregisterUnlessParked();
-					unsubscribeCredentialDisabled?.();
-					unsubscribeMcpNotifications?.();
-					unregisterMcpPostmortem?.();
-					for (const callback of disposeCallbacks) callback();
-					disposeCallbacks.clear();
-					// Drop refs so the process-global postmortem list doesn't retain
-					// the bridge closure past explicit dispose.
-					unsubscribeMcpNotifications = undefined;
-					unregisterMcpPostmortem = undefined;
+				} catch (error) {
+					disposeError = error;
 				}
+				try {
+					await cleanupPublication();
+					unregisterUnlessParked();
+				} catch (cleanupError) {
+					disposeError =
+						disposeError === undefined
+							? cleanupError
+							: new AggregateError([disposeError, cleanupError], "SDK session disposal failed");
+				}
+				unsubscribeCredentialDisabled?.();
+				unsubscribeMcpNotifications?.();
+				unregisterMcpPostmortem?.();
+				for (const callback of disposeCallbacks) callback();
+				disposeCallbacks.clear();
+				unsubscribeMcpNotifications = undefined;
+				unregisterMcpPostmortem = undefined;
+				if (disposeError !== undefined) throw disposeError;
 			};
 		}
 
@@ -4199,6 +4330,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				await session.dispose();
 				if (hasRegistered) unregisterUnlessParked();
 			} else {
+				await cleanupPublication();
 				if (hasRegistered) unregisterUnlessParked();
 				if (asyncJobManager) {
 					if (AsyncJobManager.instance() === asyncJobManager) {

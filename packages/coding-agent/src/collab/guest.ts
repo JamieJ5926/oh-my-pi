@@ -37,7 +37,6 @@ import {
 	parseCollabLink,
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
-
 /** Commands a guest may run locally; everything else is host-only. */
 export const COLLAB_GUEST_ALLOWED_COMMANDS: Record<string, true> = {
 	dump: true,
@@ -187,8 +186,7 @@ export class CollabGuestLink {
 	#readOnly = false;
 	/** False until the first assistant message_start (real or synthesized) since (re)sync. */
 	#assistantStreamSynced = false;
-	state: CollabSessionState | null = null;
-	/** Local mirror of the host's agent ecosystem (refs carry `session: null`). */
+    state: CollabSessionState | null = null;
 	readonly agentRegistry = new AgentRegistry();
 	/** Per-agent `hasSessionFile` from the last snapshot; gates remote transcript fetches. */
 	#agentHasTranscript = new Map<string, boolean>();

@@ -13,6 +13,8 @@ export type ChangeUnitId = Brand<string, "ChangeUnitId">;
 export type WriteWaveId = Brand<string, "WriteWaveId">;
 export type PatchId = Brand<string, "PatchId">;
 export type IntegrationRunId = Brand<string, "IntegrationRunId">;
+export type WriteManifestId = Brand<string, "WriteManifestId">;
+export type BatchWriteReceiptId = Brand<string, "BatchWriteReceiptId">;
 
 const OPERATION_PREFIX = "op_";
 const MANIFEST_PREFIX = "manifest_";
@@ -27,6 +29,8 @@ const CHANGE_UNIT_PREFIX = "change_unit_";
 const WRITE_WAVE_PREFIX = "wave_";
 const PATCH_PREFIX = "patch_";
 const INTEGRATION_RUN_PREFIX = "integration_";
+const WRITE_MANIFEST_PREFIX = "write_manifest_";
+const BATCH_WRITE_RECEIPT_PREFIX = "write_receipt_";
 
 function createBrandedId<Id extends string>(value: string, prefix: string): Id {
 	if (!value.startsWith(prefix) || value.slice(prefix.length).trim().length === 0) {
@@ -149,6 +153,22 @@ export function parseIntegrationRunId(value: unknown): IntegrationRunId | undefi
 	return parseBrandedId<IntegrationRunId>(value, INTEGRATION_RUN_PREFIX);
 }
 
+export function createWriteManifestId(value: string): WriteManifestId {
+	return createBrandedId<WriteManifestId>(value, WRITE_MANIFEST_PREFIX);
+}
+
+export function parseWriteManifestId(value: unknown): WriteManifestId | undefined {
+	return parseBrandedId<WriteManifestId>(value, WRITE_MANIFEST_PREFIX);
+}
+
+export function createBatchWriteReceiptId(value: string): BatchWriteReceiptId {
+	return createBrandedId<BatchWriteReceiptId>(value, BATCH_WRITE_RECEIPT_PREFIX);
+}
+
+export function parseBatchWriteReceiptId(value: unknown): BatchWriteReceiptId | undefined {
+	return parseBrandedId<BatchWriteReceiptId>(value, BATCH_WRITE_RECEIPT_PREFIX);
+}
+
 export interface ArtifactMeta {
 	readonly schemaVersion: "1";
 	readonly createdAt: string;
@@ -163,6 +183,7 @@ function isRfc3339Timestamp(value: unknown): value is string {
 
 export function parseArtifactMeta(value: unknown): ArtifactMeta | undefined {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	if (Object.keys(value).sort().join(",") !== "createdAt,operationId,schemaVersion") return undefined;
 	if (
 		!("schemaVersion" in value) ||
 		value.schemaVersion !== "1" ||

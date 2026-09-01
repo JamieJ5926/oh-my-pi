@@ -388,15 +388,12 @@ export class LoopGuards {
 	}
 
 	#activeToolCallLoopGuard(): ToolCallLoopGuard | undefined {
-		if (this.#host.settings.get("model.toolCallLoopGuard.enabled") !== true) {
+		const { enabled, threshold, exemptTools } = resolveToolCallLoopGuardSettings(this.#host.settings);
+		if (enabled !== true) {
 			this.#toolCallLoopGuard = undefined;
 			this.#toolCallLoopGuardSettingsKey = undefined;
 			return undefined;
 		}
-		const threshold = this.#host.settings.get("model.toolCallLoopGuard.threshold");
-		const exemptTools = this.#host.settings
-			.get("model.toolCallLoopGuard.exemptTools")
-			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
 		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
 			this.#toolCallLoopGuard = new ToolCallLoopGuard({ threshold, exemptTools });
@@ -488,4 +485,14 @@ export class LoopGuards {
 			}
 		});
 	}
+}
+
+export function resolveToolCallLoopGuardSettings(
+	settings: Settings,
+): { enabled: boolean; threshold: number; exemptTools: string[] } {
+	const enabled = settings.get("model.toolCallLoopGuard.enabled");
+	const threshold = settings.get("model.toolCallLoopGuard.threshold");
+	const rawExempt = settings.get("model.toolCallLoopGuard.exemptTools");
+	const exemptTools = rawExempt.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
+	return { enabled, threshold, exemptTools };
 }

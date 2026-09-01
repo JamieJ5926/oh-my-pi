@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	type ArtifactMeta,
 	createAttemptId,
+	createBatchWriteReceiptId,
 	createChangePlanId,
 	createChangeUnitId,
 	createChunkId,
@@ -13,9 +14,11 @@ import {
 	createOperationId,
 	createPatchId,
 	createSynthesisNodeId,
+	createWriteManifestId,
 	createWriteWaveId,
 	parseArtifactMeta,
 	parseAttemptId,
+	parseBatchWriteReceiptId,
 	parseChangePlanId,
 	parseChangeUnitId,
 	parseChunkId,
@@ -27,6 +30,7 @@ import {
 	parseOperationId,
 	parsePatchId,
 	parseSynthesisNodeId,
+	parseWriteManifestId,
 	parseWriteWaveId,
 } from "../../../src/capability/contracts/ids";
 
@@ -45,6 +49,8 @@ const idCases: readonly IdCase[] = [
 	["WriteWaveId", "wave_", createWriteWaveId, parseWriteWaveId],
 	["PatchId", "patch_", createPatchId, parsePatchId],
 	["IntegrationRunId", "integration_", createIntegrationRunId, parseIntegrationRunId],
+	["WriteManifestId", "write_manifest_", createWriteManifestId, parseWriteManifestId],
+	["BatchWriteReceiptId", "write_receipt_", createBatchWriteReceiptId, parseBatchWriteReceiptId],
 ];
 
 describe("capability contract identifiers", () => {

@@ -1,5 +1,13 @@
-import type { ArtifactMeta, ChangePlanId, ChangeUnitId, WriteWaveId } from "./ids";
-import { createWriteWaveId } from "./ids";
+import {
+	type ArtifactMeta,
+	type ChangePlanId,
+	type ChangeUnitId,
+	type WriteWaveId,
+	createWriteWaveId,
+	parseArtifactMeta,
+	parseChangePlanId,
+	parseChangeUnitId,
+} from "./ids";
 
 export type ChangeIsolation = "worktree" | "patch";
 
@@ -15,6 +23,7 @@ export interface ChangeUnit {
 export interface ChangePlan {
 	readonly meta: ArtifactMeta;
 	readonly changePlanId: ChangePlanId;
+	readonly objective?: string;
 	readonly units: readonly [ChangeUnit, ...ChangeUnit[]];
 }
 
@@ -213,4 +222,89 @@ export function createWriteWaves(plan: ChangePlan): readonly WriteWave[] {
 		}
 	}
 	return waves;
+}
+
+type UnknownObject = Readonly<Record<string, unknown>>;
+const MAX_PLAN_UNITS = 128;
+const MAX_UNIT_PATHS = 64;
+const MAX_VALIDATION_COMMANDS = 32;
+const MAX_PLAN_TEXT_LENGTH = 16 * 1024;
+
+export function parseChangePlan(value: unknown): ChangePlan {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) invalid("must be an object");
+	const input = value as UnknownObject;
+	const allowedPlanKeys = new Set(["meta", "changePlanId", "objective", "units"]);
+	const unexpectedPlanKeys = Object.keys(input).filter(key => !allowedPlanKeys.has(key));
+	if (unexpectedPlanKeys.length > 0) invalid(`has unsupported fields: ${unexpectedPlanKeys.sort().join(", ")}`);
+	const meta = parseArtifactMeta(input.meta);
+	if (meta === undefined) invalid("meta is invalid");
+	const changePlanId = parseChangePlanId(input.changePlanId);
+	if (changePlanId === undefined) invalid("changePlanId is invalid");
+	if (input.objective !== undefined && (typeof input.objective !== "string" || input.objective.length > MAX_PLAN_TEXT_LENGTH)) invalid("objective must be a bounded string");
+	if (!Array.isArray(input.units) || input.units.length === 0 || input.units.length > MAX_PLAN_UNITS) invalid(`units must contain between 1 and ${MAX_PLAN_UNITS} entries`);
+	const units: ChangeUnit[] = input.units.map((rawUnit, index) => {
+		if (typeof rawUnit !== "object" || rawUnit === null || Array.isArray(rawUnit)) invalid(`unit ${index} must be an object`);
+		const unit = rawUnit as UnknownObject;
+		const allowedUnitKeys = new Set(["unitId", "objective", "ownedPaths", "dependencyIds", "validationCommands", "isolation"]);
+		const unexpectedUnitKeys = Object.keys(unit).filter(key => !allowedUnitKeys.has(key));
+		if (unexpectedUnitKeys.length > 0) invalid(`unit ${index} has unsupported fields: ${unexpectedUnitKeys.sort().join(", ")}`);
+		const unitId = parseChangeUnitId(unit.unitId);
+		if (unitId === undefined || String(unit.unitId).length > MAX_PLAN_TEXT_LENGTH) invalid(`unit ${index} unitId is invalid`);
+		if (typeof unit.objective !== "string" || unit.objective.length > MAX_PLAN_TEXT_LENGTH) invalid(`unit ${index} objective must be a bounded string`);
+		if (!Array.isArray(unit.ownedPaths) || unit.ownedPaths.length === 0 || unit.ownedPaths.length > MAX_UNIT_PATHS || unit.ownedPaths.some(item => typeof item !== "string" || item.length > MAX_PLAN_TEXT_LENGTH)) {
+			invalid(`unit ${index} ownedPaths must be a bounded non-empty string array`);
+		}
+		if (!Array.isArray(unit.dependencyIds) || unit.dependencyIds.length > MAX_PLAN_UNITS) invalid(`unit ${index} dependencyIds must be a bounded array`);
+		const dependencyIds: ChangeUnitId[] = [];
+		for (const dependencyId of unit.dependencyIds) {
+			const parsedDependencyId = parseChangeUnitId(dependencyId);
+			if (parsedDependencyId === undefined) invalid(`unit ${index} dependencyIds must contain change_unit_ identifiers`);
+			dependencyIds.push(parsedDependencyId);
+		}
+		if (!Array.isArray(unit.validationCommands) || unit.validationCommands.length === 0 || unit.validationCommands.length > MAX_VALIDATION_COMMANDS || unit.validationCommands.some(item => typeof item !== "string" || item.length > MAX_PLAN_TEXT_LENGTH)) {
+			invalid(`unit ${index} validationCommands must be a bounded non-empty string array`);
+		}
+		if (unit.isolation !== "patch" && unit.isolation !== "worktree") invalid(`unit ${index} isolation is invalid`);
+		const [firstOwnedPath, ...ownedPaths] = unit.ownedPaths;
+		const [firstCommand, ...validationCommands] = unit.validationCommands;
+		if (typeof firstOwnedPath !== "string" || typeof firstCommand !== "string") invalid(`unit ${index} arrays must not be empty`);
+		return {
+			unitId,
+			objective: unit.objective,
+			ownedPaths: [firstOwnedPath, ...ownedPaths] as readonly [string, ...string[]],
+			dependencyIds,
+			validationCommands: [firstCommand, ...validationCommands] as readonly [string, ...string[]],
+			isolation: unit.isolation,
+		};
+	});
+	const [firstUnit, ...remainingUnits] = units;
+	if (firstUnit === undefined) invalid("units must not be empty");
+	return validateChangePlan({
+		meta,
+		changePlanId,
+		...(input.objective === undefined ? {} : { objective: input.objective }),
+		units: [firstUnit, ...remainingUnits],
+	});
+}
+
+export function canonicalChangePlanJson(plan: ChangePlan): string {
+	validateChangePlan(plan);
+	const units = [...plan.units]
+		.sort((left, right) => left.unitId < right.unitId ? -1 : left.unitId > right.unitId ? 1 : 0)
+		.map(unit => ({
+			unitId: unit.unitId,
+			objective: unit.objective,
+			ownedPaths: [...unit.ownedPaths].sort(),
+			dependencyIds: [...unit.dependencyIds].sort(),
+			validationCommands: [...unit.validationCommands],
+			isolation: unit.isolation,
+		}));
+	return JSON.stringify({
+		schemaVersion: "1",
+		createdAt: plan.meta.createdAt,
+		operationId: plan.meta.operationId,
+		changePlanId: plan.changePlanId,
+		objective: plan.objective ?? null,
+		units,
+	});
 }

@@ -1,5 +1,7 @@
+import type { ExecutionBackendName, ExecutionEvent, ExecutionUsage, ModelAttribution } from "../bridge/runtime";
 import type { AgentProgress, SubagentLifecyclePayload, SubagentProgressPayload } from "../task";
-import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task";
+import { TASK_SUBAGENT_EVENT_CHANNEL, TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task";
+import { TRUNCATE_LENGTHS } from "../tools/render-utils";
 import type { EventBus } from "../utils/event-bus";
 
 export interface ObservableSession {
@@ -22,6 +24,16 @@ export interface ObservableSession {
 	lastUpdate: number;
 	/** Latest progress snapshot from the subagent executor */
 	progress?: AgentProgress;
+	/** Structured external-backend state used by the live HUD. */
+	execution?: {
+		backend?: ExecutionBackendName;
+		attribution?: ModelAttribution;
+		currentTool?: string;
+		usage?: ExecutionUsage;
+		textPreview?: string;
+		error?: string;
+		lastSequence: number;
+	};
 }
 
 /** Coarse source of an observer change; callers use it to separate lifecycle work from high-frequency progress. */
@@ -33,6 +45,12 @@ const STATUS_MAP: Record<string, ObservableSession["status"]> = {
 	failed: "failed",
 	aborted: "aborted",
 };
+
+interface ExternalSubagentEventPayload {
+	id: string;
+	backend?: ExecutionBackendName;
+	event: ExecutionEvent;
+}
 
 export class SessionObserverRegistry {
 	#sessions = new Map<string, ObservableSession>();
@@ -216,6 +234,39 @@ export class SessionObserverRegistry {
 						progress,
 					});
 				}
+				this.#notifyListeners("progress");
+			}),
+		);
+
+		this.#eventBusUnsubscribers.push(
+			eventBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
+				const payload = data as ExternalSubagentEventPayload;
+				const event = payload.event;
+				if (!("kind" in event) || typeof event.sequence !== "number") return;
+				const existing = this.#sessions.get(payload.id);
+				if (existing?.kind !== "subagent") return;
+				if (existing.execution && event.sequence <= existing.execution.lastSequence) return;
+
+				const execution = {
+					...existing.execution,
+					backend: payload.backend ?? existing.execution?.backend,
+					lastSequence: event.sequence,
+				};
+				if ("attribution" in event) execution.attribution = event.attribution;
+				if (event.kind === "tool-call") execution.currentTool = event.name;
+				if (event.kind === "usage") execution.usage = event.usage;
+				if (event.kind === "text-delta") {
+					const preview = `${execution.textPreview ?? ""}${event.text}`;
+					execution.textPreview = preview.slice(-TRUNCATE_LENGTHS.RECAP);
+				}
+				if (event.kind === "error") execution.error = event.message;
+				if (event.kind === "terminal") {
+					execution.attribution = event.result.attribution;
+					execution.usage = event.result.usage ?? execution.usage;
+					execution.error = event.result.error?.message;
+				}
+				existing.execution = execution;
+				existing.lastUpdate = Date.now();
 				this.#notifyListeners("progress");
 			}),
 		);

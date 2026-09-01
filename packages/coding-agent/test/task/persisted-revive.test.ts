@@ -14,6 +14,7 @@ import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
+import { createSessionAddress } from "@oh-my-pi/pi-coding-agent/bridge/core/address";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -34,10 +35,19 @@ function createRef(sessionFile: string): AgentRef {
 		status: "parked",
 		session: null,
 		sessionFile,
+		address: createSessionAddress({
+			namespace: "omp",
+			host: "test",
+			process: "persisted-revive-test",
+			backend: "coding-agent",
+			session: "persisted-restricted",
+			generation: 1,
+		}),
 		createdAt: 0,
 		lastActivity: 0,
 	};
 }
+
 
 type IrcWakeObserver = (records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined;
 

@@ -22,6 +22,8 @@ import {
 	setProjectDir,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
+import { createSessionAddress } from "./bridge/core/address";
+import { BrokerBackedTransportAdapter } from "./bridge/transport";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
@@ -59,7 +61,9 @@ import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
+import { daemonClientForProject } from "./launch/client";
 import { registerDaemonProjectPresence } from "./launch/presence";
+import { daemonBridgeTransportClientJournalPath, daemonBridgeTransportEndpoint, daemonRuntimeDir } from "./launch/paths";
 import { discoverStartupLspServers } from "./lsp/servers";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
@@ -79,6 +83,8 @@ import { ensureTheme, initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
+import { IrcBus } from "./irc/bus";
+import { AgentRegistry } from "./registry/agent-registry";
 import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
@@ -450,6 +456,41 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			eventBus,
 			preloadedExtensions: trustedExtensions,
 		});
+		const lifecycle = AgentLifecycleManager.global();
+		const ownerAddress = createSessionAddress({
+			namespace: "omp",
+			host: process.env.HOSTNAME ?? "localhost",
+			process: String(process.pid),
+			backend: "coding-agent",
+			session: nextSessionManager.getSessionId(),
+			generation: 1,
+		});
+		const unregisterOwner = lifecycle.registerPersistedSubagentReviverOwner({
+			address: ownerAddress,
+			ownerAgentId: agentId,
+			factory: createPersistedSubagentReviverFactory({
+				session: nextSession,
+				authStorage: args.authStorage,
+				modelRegistry: args.modelRegistry,
+				settings: nextSettings,
+				enableLsp: args.baseOptions.enableLsp ?? true,
+				eventBus,
+			}),
+			idleTtlMs: Math.trunc(Number(nextSettings.get("task.agentIdleTtlMs") ?? 420_000) || 0),
+			scope: "session",
+		});
+		if (typeof nextSession.dispose === "function") {
+			let unregisterCall: Promise<void> | undefined;
+			const originalDispose = nextSession.dispose.bind(nextSession);
+			nextSession.dispose = async options => {
+				try {
+					return await originalDispose(options);
+				} finally {
+					unregisterCall ??= unregisterOwner();
+					await unregisterCall;
+				}
+			};
+		}
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
 			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
@@ -1381,6 +1422,45 @@ interface RunRootCommandDependencies {
 }
 const DEFAULT_RUN_ROOT_DEPENDENCIES: RunRootCommandDependencies = {};
 
+interface ProductionIrcTransportState {
+	projectDir: string;
+	runtimeDir: string;
+	transport: BrokerBackedTransportAdapter;
+}
+
+let productionIrcTransport: ProductionIrcTransportState | undefined;
+let productionIrcTransportCleanupRegistered = false;
+
+async function attachProductionIrcTransport(cwd: string): Promise<void> {
+	const daemonClient = await daemonClientForProject(cwd);
+	await daemonClient.request({ op: "ping" });
+	const projectDir = daemonClient.projectDir;
+	const runtimeDir = daemonRuntimeDir(projectDir);
+	const existingTransport =
+		productionIrcTransport?.projectDir === projectDir && productionIrcTransport.runtimeDir === runtimeDir
+			? productionIrcTransport.transport
+			: undefined;
+	const transport =
+		existingTransport ??
+		new BrokerBackedTransportAdapter({
+			socketPath: daemonBridgeTransportEndpoint(projectDir, runtimeDir),
+			journalPath: daemonBridgeTransportClientJournalPath(runtimeDir),
+		});
+	try {
+		await IrcBus.global().attachTransport({ transport, localAddress: AgentRegistry.global().localAddress });
+	} catch (error) {
+		if (!existingTransport) await transport.close();
+		throw error;
+	}
+	if (!existingTransport) {
+		productionIrcTransport = { projectDir, runtimeDir, transport };
+	}
+	if (!productionIrcTransportCleanupRegistered) {
+		productionIrcTransportCleanupRegistered = true;
+		postmortem.register("irc-transport", () => IrcBus.global().closeTransport());
+	}
+}
+
 export async function runRootCommand(
 	parsed: Args,
 	rawArgs: string[],
@@ -1795,6 +1875,7 @@ export async function runRootCommand(
 		await pluginPreloadPromise;
 		if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES) {
 			await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
+			await logger.time("attachProductionIrcTransport", attachProductionIrcTransport, cwd);
 		}
 
 		scheduleMarketplaceAutoUpdate({
@@ -1973,17 +2054,37 @@ export async function runRootCommand(
 			// its persisted JSONL (see persisted-revive.ts). Scoped to the non-ACP
 			// bootstrap: ACP keeps several concurrent top-level sessions and a single
 			// process-global factory must not be clobbered by the most recent one.
-			AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
-				createPersistedSubagentReviverFactory({
-					session,
-					authStorage,
-					modelRegistry,
-					settings: settingsInstance,
-					enableLsp: sessionOptions.enableLsp ?? true,
-					eventBus,
-				}),
-				Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
-			);
+ 			const lifecycle = AgentLifecycleManager.global();
+ 			const ownerAddress = createSessionAddress({
+ 				namespace: "omp",
+ 				host: process.env.HOSTNAME ?? "localhost",
+ 				process: String(process.pid),
+ 				backend: "coding-agent",
+ 				session: session.sessionManager.getSessionId(),
+ 				generation: 1,
+ 			});
+ 			const unregisterOwner = lifecycle.registerPersistedSubagentReviverOwner({
+ 				address: ownerAddress,
+ 				ownerAgentId: "Main",
+ 				factory: createPersistedSubagentReviverFactory({
+ 					session,
+ 					authStorage,
+ 					modelRegistry,
+ 					settings: settingsInstance,
+ 					enableLsp: sessionOptions.enableLsp ?? true,
+ 					eventBus,
+ 				}),
+ 				idleTtlMs: Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
+ 				scope: "global",
+ 			});
+ 		const originalDispose = session.dispose.bind(session);
+ 		session.dispose = async options => {
+ 			try {
+ 				await originalDispose(options);
+ 			} finally {
+ 				await unregisterOwner();
+ 			}
+ 		};
 			if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
 				authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
 			}

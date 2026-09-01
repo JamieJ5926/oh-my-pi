@@ -2,17 +2,19 @@ import { describe, expect, test } from "bun:test";
 import { createChangePlanId, createChangeUnitId, createOperationId, createPatchId } from "../../../src/capability/contracts/ids";
 import type { ChangePlan, ChangeUnit } from "../../../src/capability/contracts/change";
 import { executeChangeSet } from "../../../src/capability/change-set";
-
-function unit(name: string, dependencies: string[] = [], paths = [`${name}.ts`]): ChangeUnit {
+import { validateChangePlan } from "../../../src/capability/contracts/change";
+function unit(name: string, dependencies: string[] = [], paths: [string, ...string[]] = [`${name}.ts`]): ChangeUnit {
 	return {
-		unitId: createChangeUnitId(`change_unit_${name}`), objective: name,
-		ownedPaths: [paths[0]!, ...paths.slice(1)],
+		unitId: createChangeUnitId(`change_unit_${name}`),
+		objective: name,
+		ownedPaths: paths,
 		dependencyIds: dependencies.map(value => createChangeUnitId(`change_unit_${value}`)),
-		validationCommands: [`test ${name}`], isolation: "worktree",
+		validationCommands: [`test ${name}`],
+		isolation: "worktree",
 	};
 }
-function plan(units: ChangeUnit[]): ChangePlan {
-	return { meta: { schemaVersion: "1", createdAt: "2026-08-29T12:00:00Z", operationId: createOperationId("op_change") }, changePlanId: createChangePlanId("change_plan_change"), units: [units[0]!, ...units.slice(1)] };
+function plan(units: [ChangeUnit, ...ChangeUnit[]]): ChangePlan {
+	return { meta: { schemaVersion: "1", createdAt: "2026-08-29T12:00:00Z", operationId: createOperationId("op_change") }, changePlanId: createChangePlanId("change_plan_change"), units };
 }
 
 describe("executeChangeSet", () => {
@@ -32,5 +34,9 @@ describe("executeChangeSet", () => {
 			write: async value => ({ patch: { meta: plan([unit("a")]).meta, patchId: createPatchId("patch_bad"), unitId: value.unitId, baseRevision: "r0", touchedPaths: ["other.ts"], patchPath: "bad.diff", validation: { kind: "accepted" } } }),
 			apply: async () => ({ revision: "r1" }),
 		})).rejects.toThrow("patch_path_not_owned");
+	});
+	test("accepts an optional plan objective", () => {
+		const planWithObjective: ChangePlan = { ...plan([unit("test")]), objective: "test objective" };
+		expect(() => validateChangePlan(planWithObjective)).not.toThrow();
 	});
 });

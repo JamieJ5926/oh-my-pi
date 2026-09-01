@@ -16,7 +16,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, prompt, Snowflake, toError } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -1438,7 +1438,7 @@ export class VibeSessionRegistry {
 				} catch (error) {
 					if (error instanceof VibeTurnError) throw error;
 					await this.#finishTurn(session, manager, record, ownJobId);
-					const reason = error instanceof Error ? error.message : String(error);
+					const reason = toError(error).message;
 					record.lastActivity = firstLine(`turn failed: ${reason}`);
 					throw new VibeTurnError(
 						`[vibe:${record.id} cli=${record.cli} turn=${turnIndex}] turn failed: ${reason}`,

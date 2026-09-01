@@ -1,4 +1,10 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, toError } from "@oh-my-pi/pi-utils";
+import {
+	ResourceAdmissionController,
+	type ResourcePolicy,
+	type ResourceSnapshot,
+	type ResourceTransition,
+} from "../bridge/runtime/resource-policy";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
@@ -52,6 +58,15 @@ interface PollEscalationState {
 /** Kind of work a managed job runs; drives job-row badges and delivery labels. */
 export type AsyncJobType = "bash" | "task" | "eval";
 
+export type AsyncJobResourceState =
+	| "queued"
+	| "admitted"
+	| "running"
+	| "terminal"
+	| "cancelled"
+	| "backpressure"
+	| "overflow";
+
 export interface AsyncJob {
 	id: string;
 	type: AsyncJobType;
@@ -87,73 +102,81 @@ export interface AsyncJob {
 	 * id differs from the agent id (vibe turn jobs, tan clones).
 	 */
 	agentId?: string;
-	/**
-	 * Job is registered but parked behind a caller-managed gate (e.g. a task
-	 * batch semaphore). Queued jobs do not count toward the running-job limit
-	 * until the caller invokes `markRunning()` from the run context.
-	 */
+	/** Job is registered but parked behind a caller-managed gate. */
 	queued?: boolean;
+	/** ResourcePolicy lifecycle state, present only when a policy is configured. */
+	resourceState?: AsyncJobResourceState;
+	/** Logical model/backend attribution retained with resource observations. */
+	model?: string;
+	backend?: string;
+}
+
+export interface AsyncJobResourceTransition {
+	readonly kind: AsyncJobResourceState;
+	readonly jobId: string;
+	readonly model?: string;
+	readonly backend?: string;
+	readonly requestBytes?: number;
+	readonly resultBytes?: number;
+	readonly droppedBytes?: number;
+	readonly reason?: string;
 }
 
 /** Delivery callback for a settled job's result text. */
 export type AsyncJobDeliverySink = (jobId: string, text: string, job?: AsyncJob) => void | Promise<void>;
-
-export interface AsyncJobManagerOptions {
-	/**
-	 * Delivery sink for UNOWNED completions (jobs registered without an
-	 * `ownerId`). Owned deliveries route exclusively through
-	 * {@link AsyncJobManager.registerDeliverySink}; when the owner has no live
-	 * sink they are dead-lettered (dropped with a warning; the job row keeps
-	 * the result text until retention eviction) — never routed here, which
-	 * would leak one agent's result into another session.
-	 */
-	onJobComplete?: AsyncJobDeliverySink;
-	maxRunningJobs?: number;
-	retentionMs?: number;
-}
-
-interface AsyncJobDelivery {
-	jobId: string;
-	text: string;
-	attempt: number;
-	nextAttemptAt: number;
-	lastError?: string;
-	ownerId?: string;
-	promise?: Promise<void>;
-}
-
 export interface AsyncJobDeliveryState {
-	queued: number;
-	delivering: boolean;
-	nextRetryAt?: number;
-	pendingJobIds: string[];
+	readonly queued: number;
+	readonly delivering: boolean;
+	readonly nextRetryAt?: number;
+	readonly pendingJobIds: string[];
 }
 
 export interface AsyncJobReapResult {
-	settled: boolean;
-	pendingJobIds: string[];
-	completion: Promise<void>;
+	readonly settled: boolean;
+	readonly pendingJobIds: string[];
+	readonly completion: Promise<void>;
+}
+
+interface AsyncJobDelivery {
+	readonly jobId: string;
+	readonly text: string;
+	readonly ownerId?: string;
+	attempt: number;
+	lastError?: string;
+	nextAttemptAt: number;
+	promise: Promise<void>;
+}
+interface AdmissionQueueEntry {
+	readonly jobId: string;
+	readonly start: () => void;
+	readonly settle: () => void;
+}
+
+export interface AsyncJobManagerOptions {
+	/** Delivery sink for unowned completions. */
+	onJobComplete?: AsyncJobDeliverySink;
+	maxRunningJobs?: number;
+	retentionMs?: number;
+	/** Optional OMP-owned admission and resource accounting policy. */
+	resourceAdmission?: ResourcePolicy;
+	/** Receives explicit policy lifecycle transitions. */
+	onResourceTransition?: (transition: AsyncJobResourceTransition) => void;
 }
 
 export interface AsyncJobRegisterOptions {
 	id?: string;
-	/** Registry id of the agent that owns this job; used to scope cancelAll. */
 	ownerId?: string;
-	/** Unique identity of one caller batch. The tracker also scopes it by ownerId. */
 	batchId?: string;
-	/** Stable caller-defined identity shared by attempts of the same logical item. */
 	logicalItemId?: string;
-	/** Caller-defined attempt number for this logical item. */
 	attempt?: number;
-	/** Minimum active-runtime budget. Defaults to 30 seconds for tracked task batches. */
 	stragglerFloorMs?: number;
-	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
 	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
-	/** Register the job in queued state; see {@link AsyncJob.queued}. */
 	queued?: boolean;
+	requestBytes?: number;
+	model?: string;
+	backend?: string;
 }
-
 /**
  * Filter applied to job query/cancel APIs. With `ownerId`, results are
  * restricted to jobs registered by that agent (registry id from
@@ -162,7 +185,6 @@ export interface AsyncJobRegisterOptions {
 export interface AsyncJobFilter {
 	ownerId?: string;
 }
-
 
 interface BatchStragglerState {
 	readonly ownerId: string;
@@ -221,7 +243,7 @@ class BatchStragglerTracker {
 	onStarted(job: AsyncJob, startedAt: number = Date.now()): void {
 		if (job.ownerId === undefined || job.batchId === undefined) return;
 		const state = this.#batchesByOwner.get(job.ownerId)?.get(job.batchId);
-		if (!state || !state.jobIds.has(job.id)) return;
+		if (!state?.jobIds.has(job.id)) return;
 		job.actualStartedAt ??= startedAt;
 		this.#reschedule(state, startedAt);
 	}
@@ -229,7 +251,7 @@ class BatchStragglerTracker {
 	onTerminal(job: AsyncJob, settledAt: number = Date.now()): void {
 		if (job.ownerId === undefined || job.batchId === undefined) return;
 		const state = this.#batchesByOwner.get(job.ownerId)?.get(job.batchId);
-		if (!state || !state.jobIds.has(job.id)) return;
+		if (!state?.jobIds.has(job.id)) return;
 
 		if (job.status === "completed" && state.firstCompletedAt === undefined) {
 			const startedAt = job.actualStartedAt ?? job.startTime;
@@ -278,29 +300,32 @@ class BatchStragglerTracker {
 		}
 		if (!Number.isFinite(nextDeadline)) return;
 
-		const timer = setTimeout(() => {
-			state.timer = undefined;
-			if (this.#batchesByOwner.get(state.ownerId)?.get(state.batchId) !== state) return;
-			const firedAt = Date.now();
-			for (const jobId of state.jobIds) {
-				const sibling = this.#getJob(jobId);
-				if (
-					!sibling ||
-					sibling.ownerId !== state.ownerId ||
-					sibling.batchId !== state.batchId ||
-					sibling.status !== "running" ||
-					sibling.queued === true ||
-					sibling.actualStartedAt === undefined ||
-					firedAt - sibling.actualStartedAt < budgetMs
-				) {
-					continue;
+		const timer = setTimeout(
+			() => {
+				state.timer = undefined;
+				if (this.#batchesByOwner.get(state.ownerId)?.get(state.batchId) !== state) return;
+				const firedAt = Date.now();
+				for (const jobId of state.jobIds) {
+					const sibling = this.#getJob(jobId);
+					if (
+						!sibling ||
+						sibling.ownerId !== state.ownerId ||
+						sibling.batchId !== state.batchId ||
+						sibling.status !== "running" ||
+						sibling.queued === true ||
+						sibling.actualStartedAt === undefined ||
+						firedAt - sibling.actualStartedAt < budgetMs
+					) {
+						continue;
+					}
+					this.#cancelJob(sibling.id, { ownerId: state.ownerId }, STRAGGLER_CANCEL_REASON);
 				}
-				this.#cancelJob(sibling.id, { ownerId: state.ownerId }, STRAGGLER_CANCEL_REASON);
-			}
 
-			if (this.#allTerminal(state)) this.#deleteState(state);
-			else this.#reschedule(state, firedAt);
-		}, Math.min(MAX_TIMER_DELAY_MS, Math.max(0, nextDeadline - now)));
+				if (this.#allTerminal(state)) this.#deleteState(state);
+				else this.#reschedule(state, firedAt);
+			},
+			Math.min(MAX_TIMER_DELAY_MS, Math.max(0, nextDeadline - now)),
+		);
 		timer.unref();
 		state.timer = timer;
 	}
@@ -339,6 +364,8 @@ export class AsyncJobManager {
 		AsyncJobManager.#instance = undefined;
 	}
 
+	readonly #resourceController: ResourceAdmissionController | undefined;
+	readonly #onResourceTransition: AsyncJobManagerOptions["onResourceTransition"];
 	readonly #jobs = new Map<string, AsyncJob>();
 	readonly #batchStragglerTracker = new BatchStragglerTracker(
 		jobId => this.#jobs.get(jobId),
@@ -355,6 +382,9 @@ export class AsyncJobManager {
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
 	readonly #maxRunningJobs: number;
 	readonly #retentionMs: number;
+	readonly #admissionReservations = new Set<string>();
+	readonly #admissionQueue: AdmissionQueueEntry[] = [];
+
 	#deliveryLoop: Promise<void> | undefined;
 	#deliveryQueueChanged = Promise.withResolvers<void>();
 	#disposed = false;
@@ -373,17 +403,52 @@ export class AsyncJobManager {
 		this.#onJobComplete = options.onJobComplete;
 		this.#maxRunningJobs = Math.max(1, Math.floor(options.maxRunningJobs ?? DEFAULT_MAX_RUNNING_JOBS));
 		this.#retentionMs = Math.max(0, Math.floor(options.retentionMs ?? DEFAULT_RETENTION_MS));
+		this.#resourceController = options.resourceAdmission
+			? new ResourceAdmissionController(options.resourceAdmission)
+			: undefined;
+		this.#onResourceTransition = options.onResourceTransition;
+	}
+
+	/** Current ResourcePolicy accounting, or undefined when disabled. */
+	resourceSnapshot(): ResourceSnapshot | undefined {
+		return this.#resourceController?.snapshot();
+	}
+
+	/** Update the RSS sample used by ResourcePolicy admission. */
+	setResourceRssBytes(rssBytes: number | undefined): void {
+		this.#resourceController?.setRssBytes(rssBytes);
+	}
+
+	#emitResourceTransition(transition: AsyncJobResourceTransition): void {
+		try {
+			this.#onResourceTransition?.(transition);
+		} catch (error) {
+			logger.warn("Async job resource transition callback failed", {
+				jobId: transition.jobId,
+				error: toError(error).message,
+			});
+		}
+	}
+
+	#transitionResource(job: AsyncJob, transition: ResourceTransition): void {
+		if (!this.#resourceController) return;
+		this.#resourceController.transition(transition);
+		job.resourceState = transition.kind;
+		this.#emitResourceTransition({
+			kind: transition.kind,
+			jobId: job.id,
+			model: job.model,
+			backend: job.backend,
+			...(transition.kind === "queued" ? { requestBytes: transition.bytes } : {}),
+			...(transition.kind === "terminal" ? { resultBytes: transition.resultBytes } : {}),
+			...(transition.kind === "overflow" ? { droppedBytes: transition.droppedBytes } : {}),
+		});
 	}
 
 	/** True when the running-job count has reached the configured cap. */
 	get atCapacity(): boolean {
 		if (this.#disposed) return true;
-		// Mirror register(): queued jobs hold no execution slot.
-		let activeCount = 0;
-		for (const job of this.#jobs.values()) {
-			if (job.status === "running" && !job.queued) activeCount++;
-		}
-		return activeCount >= this.#maxRunningJobs;
+		return this.#admissionReservations.size >= this.#maxRunningJobs;
 	}
 
 	register(
@@ -401,33 +466,23 @@ export class AsyncJobManager {
 		if (this.#disposed) {
 			throw new Error("Async job manager is disposed");
 		}
-		// Queued jobs hold no execution slot yet — only count jobs that are
-		// actually running so a large parked batch cannot starve registration.
-		let activeCount = 0;
-		for (const existing of this.#jobs.values()) {
-			if (existing.status === "running" && !existing.queued) activeCount++;
-		}
-		if (activeCount >= this.#maxRunningJobs) {
-			throw new Error(
-				`Background job limit reached (${this.#maxRunningJobs}). Wait for running jobs to finish or cancel one.`,
-			);
-		}
 
 		const id = this.#resolveJobId(options?.id);
 		this.#suppressedDeliveries.delete(id);
 		this.#consumedJobResults.delete(id);
 		const abortController = new AbortController();
 		const startTime = Date.now();
+		const admissionReserved = options?.queued !== true && this.#reserveAdmission(id);
+		let admissionQueued = options?.queued !== true && !admissionReserved;
 		const batchId = options?.batchId?.trim() || undefined;
-		const stragglerFloorMs =
-			batchId === undefined ? undefined : normalizeStragglerFloorMs(options?.stragglerFloorMs);
+		const stragglerFloorMs = batchId === undefined ? undefined : normalizeStragglerFloorMs(options?.stragglerFloorMs);
 
 		const job: AsyncJob = {
 			id,
 			type,
 			status: "running",
 			startTime,
-			actualStartedAt: options?.queued === true ? undefined : startTime,
+			actualStartedAt: options?.queued === true || admissionQueued ? undefined : startTime,
 			label,
 			abortController,
 			promise: Promise.resolve(),
@@ -437,8 +492,38 @@ export class AsyncJobManager {
 			attempt: options?.attempt,
 			stragglerFloorMs,
 			agentId: options?.agentId,
-			queued: options?.queued === true,
+			queued: options?.queued === true || admissionQueued,
+			model: options?.model,
+			backend: options?.backend,
 		};
+		const reservation = this.#resourceController?.admit(id, options?.requestBytes ?? 0);
+		if (reservation?.kind === "rejected") {
+			if (admissionReserved) this.#releaseAdmission(id);
+			this.#emitResourceTransition({
+				kind: "backpressure",
+				jobId: id,
+				model: job.model,
+				backend: job.backend,
+				reason: reservation.reason,
+			});
+			throw new Error(`Resource admission rejected: ${reservation.reason}`);
+		}
+		if (reservation?.kind === "queued") {
+			admissionQueued = options?.queued !== true;
+			job.queued = options?.queued === true || admissionQueued;
+			job.resourceState = "queued";
+			this.#emitResourceTransition({
+				kind: "queued",
+				jobId: id,
+				model: job.model,
+				backend: job.backend,
+				requestBytes: options?.requestBytes ?? 0,
+			});
+		} else if (reservation?.kind === "admitted") {
+			this.#emitResourceTransition({ kind: "admitted", jobId: id, model: job.model, backend: job.backend });
+			job.resourceState = "admitted";
+		}
+		if (admissionQueued) job.actualStartedAt = undefined;
 
 		const reportProgress = async (text: string, details?: Record<string, unknown>): Promise<void> => {
 			if (details) job.latestDetails = details;
@@ -448,53 +533,86 @@ export class AsyncJobManager {
 			} catch (error) {
 				logger.warn("Async job progress callback failed", {
 					jobId: id,
-					error: error instanceof Error ? error.message : String(error),
+					error: toError(error).message,
 				});
 			}
 		};
-		job.promise = (async () => {
-			try {
-				const text = await run({
-					jobId: id,
-					signal: abortController.signal,
-					reportProgress,
-					markRunning: () => {
-						job.queued = false;
-						if (job.actualStartedAt === undefined) {
-							job.actualStartedAt = Date.now();
-							this.#batchStragglerTracker.onStarted(job, job.actualStartedAt);
-						}
-					},
-				});
-				if (job.status === "cancelled") {
-					job.resultText = text;
-					this.#batchStragglerTracker.onTerminal(job);
-					this.#scheduleEviction(id);
-					return;
-				}
-				job.status = "completed";
-				job.resultText = text;
-				this.#batchStragglerTracker.onTerminal(job);
-				this.#enqueueDelivery(id, text);
-				this.#scheduleEviction(id);
-			} catch (error) {
-				if (job.status === "cancelled") {
-					job.errorText = error instanceof Error ? error.message : String(error);
-					this.#batchStragglerTracker.onTerminal(job);
-					this.#scheduleEviction(id);
-					return;
-				}
-				const errorText = error instanceof Error ? error.message : String(error);
-				job.status = "failed";
-				job.errorText = errorText;
-				this.#batchStragglerTracker.onTerminal(job);
-				this.#enqueueDelivery(id, errorText);
-				this.#scheduleEviction(id);
-			}
-		})();
 
+		let settle: () => void = () => {};
+		job.promise = new Promise<void>(resolve => {
+			settle = resolve;
+		});
+		const start = (): void => {
+			void (async () => {
+				try {
+					if (!job.queued && job.resourceState === "admitted")
+						this.#transitionResource(job, { kind: "running", id });
+					const text = await run({
+						jobId: id,
+						signal: abortController.signal,
+						reportProgress,
+						markRunning: () => {
+							job.queued = false;
+							if (job.resourceState === "queued") this.#transitionResource(job, { kind: "admitted", id });
+							if (job.resourceState === "admitted") this.#transitionResource(job, { kind: "running", id });
+							if (job.actualStartedAt === undefined) {
+								job.actualStartedAt = Date.now();
+								this.#batchStragglerTracker.onStarted(job, job.actualStartedAt);
+							}
+						},
+					});
+					if (job.status === "cancelled") {
+						job.resultText = text;
+						if (job.resourceState !== undefined) this.#transitionResource(job, { kind: "cancelled", id });
+						this.#batchStragglerTracker.onTerminal(job);
+						this.#scheduleEviction(id);
+						return;
+					}
+					job.status = "completed";
+					if (this.#resourceController && job.resourceState !== undefined) {
+						const bounded = this.#resourceController.boundResult(text);
+						job.resultText = bounded.output;
+						if (bounded.overflow)
+							this.#transitionResource(job, {
+								kind: "overflow",
+								id,
+								droppedBytes: Math.max(0, text.length - bounded.output.length),
+							});
+						else this.#transitionResource(job, { kind: "terminal", id, resultBytes: bounded.bytes });
+					} else {
+						job.resultText = text;
+					}
+					this.#batchStragglerTracker.onTerminal(job);
+					this.#enqueueDelivery(id, job.resultText);
+					this.#scheduleEviction(id);
+				} catch (error) {
+					if (job.status === "cancelled") {
+						job.errorText = toError(error).message;
+						if (job.resourceState !== undefined) this.#transitionResource(job, { kind: "cancelled", id });
+						this.#batchStragglerTracker.onTerminal(job);
+						this.#scheduleEviction(id);
+						return;
+					}
+					const errorText = toError(error).message;
+					job.status = "failed";
+					job.errorText = errorText;
+					if (job.resourceState !== undefined)
+						this.#transitionResource(job, { kind: "terminal", id, resultBytes: 0 });
+					this.#batchStragglerTracker.onTerminal(job);
+					this.#enqueueDelivery(id, errorText);
+					this.#scheduleEviction(id);
+				} finally {
+					this.#releaseAdmission(id);
+				}
+			})().then(settle, settle);
+		};
 		this.#jobs.set(id, job);
 		this.#batchStragglerTracker.register(job);
+		if (options?.queued === true || !admissionQueued) {
+			start();
+		} else {
+			this.#admissionQueue.push({ jobId: id, start, settle });
+		}
 		return id;
 	}
 
@@ -512,6 +630,12 @@ export class AsyncJobManager {
 		this.#batchStragglerTracker.onTerminal(job);
 		if (reason === undefined) job.abortController.abort();
 		else job.abortController.abort(reason);
+		if (this.#cancelAdmission(id)) {
+			if (job.resourceState !== undefined) this.#transitionResource(job, { kind: "cancelled", id });
+		} else {
+			// Keep the manager reservation until the run body settles and its resource
+			// transition has released the underlying worker slot.
+		}
 		this.#scheduleEviction(id);
 		return true;
 	}
@@ -673,14 +797,53 @@ export class AsyncJobManager {
 	cancelAll(filter?: AsyncJobFilter, reason?: unknown): void {
 		this.#cancelJobs(filter, reason);
 	}
-
 	#cancelJobs(filter?: AsyncJobFilter, reason?: unknown): void {
 		for (const job of this.getRunningJobs(filter)) {
 			job.status = "cancelled";
 			this.#batchStragglerTracker.onTerminal(job);
 			if (reason === undefined) job.abortController.abort();
 			else job.abortController.abort(reason);
+			if (this.#cancelAdmission(job.id)) {
+				if (job.resourceState !== undefined) this.#transitionResource(job, { kind: "cancelled", id: job.id });
+			}
 			this.#scheduleEviction(job.id);
+		}
+	}
+
+	#reserveAdmission(jobId: string): boolean {
+		if (this.#admissionReservations.size >= this.#maxRunningJobs) return false;
+		this.#admissionReservations.add(jobId);
+		return true;
+	}
+
+	#releaseAdmission(jobId: string): void {
+		if (!this.#admissionReservations.delete(jobId)) return;
+		this.#drainAdmissionQueue();
+	}
+
+	#cancelAdmission(jobId: string): boolean {
+		const index = this.#admissionQueue.findIndex(entry => entry.jobId === jobId);
+		if (index === -1) return false;
+		const [entry] = this.#admissionQueue.splice(index, 1);
+		entry?.settle();
+		return true;
+	}
+
+	#drainAdmissionQueue(): void {
+		while (this.#admissionReservations.size < this.#maxRunningJobs) {
+			const entry = this.#admissionQueue.shift();
+			if (!entry) return;
+			const job = this.#jobs.get(entry.jobId);
+			if (job?.status !== "running") {
+				entry.settle();
+				continue;
+			}
+			if (job.resourceState === "queued") this.#transitionResource(job, { kind: "admitted", id: job.id });
+			this.#admissionReservations.add(entry.jobId);
+			job.queued = false;
+			job.actualStartedAt ??= Date.now();
+			this.#batchStragglerTracker.onStarted(job, job.actualStartedAt);
+			entry.start();
 		}
 	}
 
@@ -994,6 +1157,7 @@ export class AsyncJobManager {
 			text,
 			attempt: 0,
 			nextAttemptAt: Date.now(),
+			promise: Promise.resolve(),
 			ownerId: this.#jobs.get(jobId)?.ownerId,
 		});
 		this.#ensureDeliveryLoop();
@@ -1006,7 +1170,7 @@ export class AsyncJobManager {
 
 		this.#deliveryLoop = this.#runDeliveryLoop()
 			.catch(error => {
-				logger.error("Async job delivery loop crashed", { error: String(error) });
+				logger.error("Async job delivery loop crashed", { error: toError(error).message });
 			})
 			.finally(() => {
 				this.#deliveryLoop = undefined;
@@ -1075,7 +1239,7 @@ export class AsyncJobManager {
 				this.#consumeJobResult(delivery.jobId);
 			} catch (error) {
 				delivery.attempt += 1;
-				delivery.lastError = error instanceof Error ? error.message : String(error);
+				delivery.lastError = toError(error).message;
 				delivery.nextAttemptAt = Date.now() + this.#getRetryDelay(delivery.attempt);
 				if (!this.isDeliverySuppressed(delivery.jobId) && this.#jobs.has(delivery.jobId)) {
 					this.#queueDelivery(delivery);

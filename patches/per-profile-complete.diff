@@ -1,0 +1,92 @@
+diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
+index 6f8a400..9d49dc8 100644
+--- a/packages/coding-agent/src/config/settings-schema.ts
++++ b/packages/coding-agent/src/config/settings-schema.ts
+@@ -94,6 +94,11 @@ export interface RoleProfileConfig {
+ 	minimalPrompt: boolean;
+ 	softRequestBudget: number;
+ 	restrictToolNames?: boolean;
++	toolCallLoopGuard?: {
++		enabled?: boolean;
++		threshold?: number;
++		exemptTools?: string[];
++	};
+ }
+ 
+ 
+diff --git a/packages/coding-agent/src/session/stream-guards.ts b/packages/coding-agent/src/session/stream-guards.ts
+index 11bd7fb..56fd982 100644
+--- a/packages/coding-agent/src/session/stream-guards.ts
++++ b/packages/coding-agent/src/session/stream-guards.ts
+@@ -388,15 +388,12 @@ export class LoopGuards {
+ 	}
+ 
+ 	#activeToolCallLoopGuard(): ToolCallLoopGuard | undefined {
+-		if (this.#host.settings.get("model.toolCallLoopGuard.enabled") !== true) {
++		const { enabled, threshold, exemptTools } = resolveToolCallLoopGuardSettings(this.#host.settings);
++		if (enabled !== true) {
+ 			this.#toolCallLoopGuard = undefined;
+ 			this.#toolCallLoopGuardSettingsKey = undefined;
+ 			return undefined;
+ 		}
+-		const threshold = this.#host.settings.get("model.toolCallLoopGuard.threshold");
+-		const exemptTools = this.#host.settings
+-			.get("model.toolCallLoopGuard.exemptTools")
+-			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
+ 		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
+ 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
+ 			this.#toolCallLoopGuard = new ToolCallLoopGuard({ threshold, exemptTools });
+@@ -489,3 +486,13 @@ export class LoopGuards {
+ 		});
+ 	}
+ }
++
++export function resolveToolCallLoopGuardSettings(
++	settings: Settings,
++): { enabled: boolean; threshold: number; exemptTools: string[] } {
++	const enabled = settings.get("model.toolCallLoopGuard.enabled");
++	const threshold = settings.get("model.toolCallLoopGuard.threshold");
++	const rawExempt = settings.get("model.toolCallLoopGuard.exemptTools");
++	const exemptTools = rawExempt.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
++	return { enabled, threshold, exemptTools };
++}
+diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
+index 4ca7fe4..7907a32 100644
+--- a/packages/coding-agent/src/task/structured-subagent.ts
++++ b/packages/coding-agent/src/task/structured-subagent.ts
+@@ -145,6 +145,8 @@ export interface EffectiveSubagentPolicy {
+ 	softRequestBudget?: number;
+ 	/** Profile-level opt-in to suppress auto-added tools. */
+ 	restrictToolNames?: boolean;
++	/** Profile-level tool-call loop guard; undefined keeps global settings. */
++	toolCallLoopGuard?: RoleProfileConfig["toolCallLoopGuard"];
+ }
+ 
+ /** Settled child execution plus data needed by the frontends' own rendering. */
+@@ -382,6 +384,7 @@ export async function resolveEffectiveSubagentPolicy(
+ 		minimalPrompt: roleProfile?.minimalPrompt ?? MINIMAL_PROMPT_AGENTS[agentName] === true,
+ 		softRequestBudget: roleProfile?.softRequestBudget,
+ 		restrictToolNames: roleProfile?.restrictToolNames === true,
++		toolCallLoopGuard: roleProfile?.toolCallLoopGuard,
+ 	};
+ }
+ 
+@@ -438,9 +441,7 @@ function buildExecutorOptions(
+ ): ExecutorOptions {
+ 	const { session } = request;
+ 	const minimal = policy.minimalPrompt;
+-	const { skills, autoloadSkills } = minimal
+-		? { skills: [], autoloadSkills: [] }
+-		: resolveAutoloadSkills(session, policy.agent);
++	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
+ 	const localProtocolOptions: LocalProtocolOptions = session.localProtocolOptions ?? {
+ 		getArtifactsDir: session.getArtifactsDir ?? (() => null),
+ 		getSessionId: session.getSessionId ?? (() => null),
+@@ -522,6 +523,7 @@ function buildExecutorOptions(
+ 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
+ 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+ 		softRequestBudget: policy.softRequestBudget,
++		toolCallLoopGuard: policy.toolCallLoopGuard,
+ 	};
+ }
+ 

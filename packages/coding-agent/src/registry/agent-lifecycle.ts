@@ -22,6 +22,7 @@
 
 import * as fs from "node:fs/promises";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { formatSessionAddress, type SessionAddress } from "../bridge/core/address";
 import type { AgentSession } from "../session/agent-session";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
@@ -54,6 +55,33 @@ async function persistAgentTombstone(sessionFile: string): Promise<void> {
  */
 export type PersistedSubagentReviverFactory = (ref: AgentRef) => Promise<AgentReviver | undefined>;
 
+export type PersistedSubagentReviverOwnerScope = "global" | "session";
+
+export interface PersistedSubagentReviverOwnerRegistration {
+	/** Exact top-level session generation that owns this reviver factory. */
+	address: SessionAddress;
+	/** Registry id of the owning top-level session; children resolve through their parent chain. */
+	ownerAgentId?: string;
+	factory: PersistedSubagentReviverFactory;
+	idleTtlMs: number;
+	/** `global` preserves the single top-level CLI lifecycle; `session` is for concurrent ACP owners. */
+	scope?: PersistedSubagentReviverOwnerScope;
+}
+
+export interface EnsureLiveOptions {
+	/** Optional exact owner generation. A stale generation is refused before a reviver runs. */
+	ownerAddress?: SessionAddress;
+}
+
+interface PersistedSubagentReviverOwner {
+	key: string;
+	address: SessionAddress;
+	ownerAgentId?: string;
+	factory: PersistedSubagentReviverFactory;
+	idleTtlMs: number;
+	scope: PersistedSubagentReviverOwnerScope;
+}
+
 export interface AdoptOptions {
 	/** TTL before an idle agent is parked. <= 0 disables parking. */
 	idleTtlMs: number;
@@ -65,6 +93,8 @@ interface AdoptedAgent {
 	ref: AgentRef;
 	idleTtlMs: number;
 	revive?: AgentReviver;
+	/** Present for cold-adopted refs; unregistering that top-level owner releases them. */
+	persistedOwnerKey?: string;
 	timer?: NodeJS.Timeout;
 }
 
@@ -108,7 +138,9 @@ export class AgentLifecycleManager {
 			current.#adopted.clear();
 			current.#revivals.clear();
 			current.#parks.clear();
-			current.#persistedReviverFactory = undefined;
+			current.#persistedReviverOwners.clear();
+ 			current.#persistedOwnerAgentReleases.clear();
+			current.#persistedReviverOwnerByAgentId.clear();
 		}
 		AgentLifecycleManager.#global = undefined;
 	}
@@ -124,9 +156,10 @@ export class AgentLifecycleManager {
 	/** In-flight revives, bound to the parked ref that initiated them, so concurrent {@link ensureLive} calls coalesce. */
 	readonly #revivals = new Map<string, RevivingAgent>();
 	#unsubscribe: (() => void) | undefined;
-	#persistedReviverFactory: PersistedSubagentReviverFactory | undefined;
-	/** TTL applied when a cold-revived ref is adopted on demand. */
-	#persistedReviveTtlMs = 0;
+	readonly #persistedReviverOwners = new Map<string, PersistedSubagentReviverOwner>();
+	readonly #persistedReviverOwnerByAgentId = new Map<string, string>();
+ 	/** Child releases started while replacing a persisted owner; callers wait before using those refs. */
+ 	readonly #persistedOwnerAgentReleases = new Map<string, Promise<boolean>>();
 	/** Set once {@link dispose} runs; blocks late revivals from adopting into a torn-down manager. */
 	#disposed = false;
 
@@ -135,16 +168,85 @@ export class AgentLifecycleManager {
 		this.#unsubscribe = registry.onChange(event => this.#onRegistryEvent(event));
 	}
 
-	/**
-	 * Install the factory used to cold-revive `parked` refs restored from disk
-	 * (Agent Hub scan, collab mirror, resumed process) — they carry a sessionFile
-	 * but no adoption. Set by the top-level session, which owns the ambient deps
-	 * (auth, models, MCP, artifacts) the factory needs at revive time.
-	 */
-	setPersistedSubagentReviverFactory(factory: PersistedSubagentReviverFactory, idleTtlMs: number): void {
-		this.#persistedReviverFactory = factory;
-		this.#persistedReviveTtlMs = idleTtlMs;
-	}
+ 	/**
+ 	 * Register the top-level session generation that owns persisted subagent
+ 	 * revival. Concurrent protocol sessions each install their own owner; cold
+ 	 * revival resolves the owner from the subagent's parent chain and refuses stale
+ 	 * generations.
+ 	 */
+ 	registerPersistedSubagentReviverOwner(registration: PersistedSubagentReviverOwnerRegistration): () => Promise<void> {
+ 		const key = formatSessionAddress(registration.address);
+ 		const priorKey = registration.ownerAgentId
+ 			? this.#persistedReviverOwnerByAgentId.get(registration.ownerAgentId)
+ 			: undefined;
+ 		if (priorKey && priorKey !== key) {
+ 			const prior = this.#persistedReviverOwners.get(priorKey);
+ 			if (prior) {
+ 				this.#persistedReviverOwners.delete(priorKey);
+ 				void Promise.all(this.#retirePersistedOwnerAgents(prior)).catch(error => {
+ 					logger.warn("AgentLifecycleManager: persisted owner replacement release failed", { error: String(error) });
+ 				});
+ 			}
+ 		}
+ 		const owner: PersistedSubagentReviverOwner = {
+ 			key,
+ 			address: registration.address,
+ 			ownerAgentId: registration.ownerAgentId,
+ 			factory: registration.factory,
+ 			idleTtlMs: registration.idleTtlMs,
+ 			scope: registration.scope ?? "session",
+ 		};
+ 		this.#persistedReviverOwners.set(key, owner);
+ 		if (owner.ownerAgentId) {
+ 			this.#persistedReviverOwnerByAgentId.set(owner.ownerAgentId, key);
+ 		}
+ 		return () => this.unregisterPersistedSubagentReviverOwner(registration.address);
+ 	}
+
+ 	/** Drop one top-level owner's factory and release adopted children bound to it. */
+ 	async unregisterPersistedSubagentReviverOwner(address: SessionAddress): Promise<void> {
+ 		const key = formatSessionAddress(address);
+ 		const owner = this.#persistedReviverOwners.get(key);
+ 		if (!owner) return;
+ 		this.#persistedReviverOwners.delete(key);
+ 		if (owner.ownerAgentId && this.#persistedReviverOwnerByAgentId.get(owner.ownerAgentId) === key) {
+ 			this.#persistedReviverOwnerByAgentId.delete(owner.ownerAgentId);
+ 		}
+ 		await Promise.all(this.#retirePersistedOwnerAgents(owner));
+ 	}
+
+ 	#retirePersistedOwnerAgents(owner: PersistedSubagentReviverOwner): Promise<boolean>[] {
+ 		const ids = [...this.#adopted.entries()]
+ 			.filter(([, adopted]) => adopted.persistedOwnerKey === owner.key)
+ 			.map(([id]) => id);
+ 		return ids.map(id => {
+ 			const release = this.release(id).finally(() => {
+ 				if (this.#persistedOwnerAgentReleases.get(id) === release) this.#persistedOwnerAgentReleases.delete(id);
+ 			});
+ 			this.#persistedOwnerAgentReleases.set(id, release);
+ 			return release;
+ 		});
+ 	}
+ 
+ 	#findPersistedOwner(ref: AgentRef, expectedAddress?: SessionAddress): PersistedSubagentReviverOwner | undefined {
+ 		let parentId = ref.parentId;
+ 		const seen = new Set<string>();
+ 		while (parentId && !seen.has(parentId)) {
+ 			seen.add(parentId);
+ 			const key = this.#persistedReviverOwnerByAgentId.get(parentId);
+ 			const owner = key ? this.#persistedReviverOwners.get(key) : undefined;
+ 			if (owner) {
+ 				if (expectedAddress && owner.key !== formatSessionAddress(expectedAddress)) {
+ 					throw new Error(`Agent "${ref.id}" has a stale persisted revival owner generation.`);
+ 				}
+ 				return owner;
+ 			}
+ 			parentId = this.#registry.get(parentId)?.parentId;
+ 		}
+ 		if (expectedAddress) throw new Error(`Agent "${ref.id}" has no active persisted revival owner.`);
+ 		return undefined;
+ 	}
+ 
 
 	/**
 	 * Take ownership of a finished subagent. Caller has already set registry
@@ -174,39 +276,38 @@ export class AgentLifecycleManager {
 		);
 	}
 
-	/**
-	 * Reclaim a provably-dead parked corpse so a fresh spawn can reuse its id.
-	 * Refuses live, adopted, in-flight, or cold-revivable refs. For a parked ref
-	 * restored from disk, the persisted factory is consulted before removal
-	 * because cold revivers are created lazily by {@link ensureLive}.
-	 *
-	 * Only refs in the registry this manager owns are touched; the transcript
-	 * stays readable at `history://<id>`. Returns true when the corpse was
-	 * unregistered.
-	 */
-	async reclaimDeadCorpse(id: string, expected: AgentRef): Promise<boolean> {
-		const ref = this.#registry.get(id);
-		if (ref !== expected || ref.status !== "parked" || ref.session) return false;
-		if (this.#adopted.has(id) || this.#parks.has(id) || this.#revivals.has(id)) return false;
+ 	/**
+ 	 * Reclaim a provably-dead parked corpse so a fresh spawn can reuse its id.
+ 	 * Refuses live, adopted, in-flight, or cold-revivable refs. For a parked ref
+ 	 * restored from disk, the persisted factory is consulted before removal
+ 	 * because cold revivers are created lazily by {@link ensureLive}.
+ 	 *
+ 	 * Only refs in the registry this manager owns are touched; the transcript
+ 	 * stays readable at `history://<id>`. Returns true when the corpse was
+ 	 * unregistered.
+ 	 */
+ 	async reclaimDeadCorpse(id: string, expected: AgentRef): Promise<boolean> {
+ 		const ref = this.#registry.get(id);
+ 		if (ref !== expected || ref.status !== "parked" || ref.session) return false;
+ 		if (this.#adopted.has(id) || this.#parks.has(id) || this.#revivals.has(id)) return false;
 
-		const persistedFactory = ref.sessionFile ? this.#persistedReviverFactory : undefined;
-		if (persistedFactory) {
-			try {
-				if (await persistedFactory(ref)) return false;
-			} catch (error) {
-				logger.warn("AgentLifecycleManager.reclaimDeadCorpse: persisted reviver probe failed", {
-					id,
-					error: error instanceof Error ? error.message : String(error),
-				});
-				return false;
-			}
-			// The factory awaited I/O; another lifecycle operation may now own or
-			// have replaced this ref. Revalidate every reclaim invariant.
-			if (this.#registry.get(id) !== ref || ref.status !== "parked" || ref.session) return false;
-			if (this.#adopted.has(id) || this.#parks.has(id) || this.#revivals.has(id)) return false;
-		}
-		return this.#registry.unregister(id, ref);
-	}
+ 		const persistedOwner = ref.sessionFile ? this.#findPersistedOwner(ref) : undefined;
+ 		if (persistedOwner) {
+ 			try {
+ 				if (await persistedOwner.factory(ref)) return false;
+ 			} catch (error) {
+ 				logger.warn("AgentLifecycleManager.reclaimDeadCorpse: persisted reviver probe failed", {
+ 					id,
+ 					error: error instanceof Error ? error.message : String(error),
+ 				});
+ 				return false;
+ 			}
+ 			if (this.#registry.get(id) !== ref || ref.status !== "parked" || ref.session) return false;
+ 			if (this.#adopted.has(id) || this.#parks.has(id) || this.#revivals.has(id)) return false;
+ 		}
+ 		return this.#registry.unregister(id, ref);
+ 	}
+
 
 	/**
 	 * True when this manager owns `registry` — i.e. its adopt/park/revive state
@@ -301,10 +402,9 @@ export class AgentLifecycleManager {
 				if (this.#parks.get(id) === park) this.#parks.delete(id);
 			}
 		})();
-
-		this.#parks.set(id, park);
-		return park.promise;
-	}
+ 		this.#parks.set(id, park);
+ 		return park.promise;
+ 	}
 
 	/**
 	 * Return the live session, reviving from the sessionFile if parked.
@@ -314,7 +414,9 @@ export class AgentLifecycleManager {
 	 * Never returns a session that is mid-dispose: an in-flight park is either
 	 * cancelled (session still live) or awaited to completion before revive.
 	 */
-	async ensureLive(id: string): Promise<AgentSession> {
+ 	async ensureLive(id: string, options: EnsureLiveOptions = {}): Promise<AgentSession> {
+ 		const retiredRelease = this.#persistedOwnerAgentReleases.get(id);
+ 		if (retiredRelease) await retiredRelease;
 		const park = this.#parks.get(id);
 		if (park) {
 			const parked = this.#registry.get(id);
@@ -345,7 +447,7 @@ export class AgentLifecycleManager {
 		if (ref.session) return ref.session;
 		const inflight = this.#revivals.get(id);
 		if (inflight?.ref === ref) return inflight.promise;
-		const revival = this.#resolveAndRevive(id, ref);
+ 		const revival = this.#resolveAndRevive(id, ref, options.ownerAddress);
 		const pending: RevivingAgent = { ref, promise: revival };
 		this.#revivals.set(id, pending);
 		try {
@@ -362,26 +464,27 @@ export class AgentLifecycleManager {
 	 * adopt it so the agent rejoins the normal idle↔parked lifecycle. Throws
 	 * when the agent is not revivable or no reviver can be produced.
 	 */
-	async #resolveAndRevive(id: string, ref: AgentRef): Promise<AgentSession> {
+ 	async #resolveAndRevive(id: string, ref: AgentRef, expectedOwnerAddress?: SessionAddress): Promise<AgentSession> {
 		let adoption = this.#adopted.get(id);
 		let revive = adoption?.ref === ref ? adoption.revive : undefined;
 		let coldAdopted = false;
-		if (!revive && ref.status === "parked" && ref.sessionFile && this.#persistedReviverFactory) {
-			revive = await this.#persistedReviverFactory(ref);
-			// Teardown can complete during the factory await. A late cold revive must
-			// not cold-adopt (and later attach a live session + TTL) into a disposed
-			// manager — reject deterministically before creating any session.
-			if (this.#disposed) {
-				throw new Error(
-					`Agent "${id}" revival aborted: its lifecycle was disposed while its persisted session was being prepared.`,
-				);
-			}
-			if (revive) {
-				adoption = { ref, idleTtlMs: this.#persistedReviveTtlMs, revive };
-				this.#adopted.set(id, adoption);
-				coldAdopted = true;
-			}
-		}
+ 		const persistedOwner = ref.sessionFile ? this.#findPersistedOwner(ref, expectedOwnerAddress) : undefined;
+ 		if (!revive && ref.status === "parked" && ref.sessionFile && persistedOwner) {
+ 			revive = await persistedOwner.factory(ref);
+ 			const ownerStillActive =
+ 				!this.#disposed &&
+ 				this.#persistedReviverOwners.get(persistedOwner.key) === persistedOwner &&
+ 				(!persistedOwner.ownerAgentId ||
+ 					this.#persistedReviverOwnerByAgentId.get(persistedOwner.ownerAgentId) === persistedOwner.key);
+ 			if (!ownerStillActive) {
+ 				throw new Error(`Agent "${id}" revival aborted: its persisted session owner was disposed while its session was being prepared.`);
+ 			}
+ 			if (revive) {
+ 				adoption = { ref, idleTtlMs: persistedOwner.idleTtlMs, revive, persistedOwnerKey: persistedOwner.key };
+ 				this.#adopted.set(id, adoption);
+ 				coldAdopted = true;
+ 			}
+ 		}
 		if (this.#registry.get(id) !== ref) {
 			throw new Error(`Agent "${id}" changed while its persisted session was being prepared.`);
 		}
@@ -479,8 +582,8 @@ export class AgentLifecycleManager {
 		);
 		this.#revivals.clear();
 		this.#parks.clear();
-		this.#persistedReviverFactory = undefined;
-		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
+ 		this.#persistedReviverOwners.clear();
+ 		this.#persistedReviverOwnerByAgentId.clear();
 	}
 
 	async #revive(id: string, revive: AgentReviver, ref: AgentRef, adopted: AdoptedAgent): Promise<AgentSession> {

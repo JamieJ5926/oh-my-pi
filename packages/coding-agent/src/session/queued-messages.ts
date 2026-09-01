@@ -86,7 +86,7 @@ export function isHiddenUserCompanion(message: AgentMessage): boolean {
 /** Human-readable text shown for a queued-message chip. */
 export function queueChipText(message: AgentMessage): string {
 	if (message.role === "custom") {
-		return readQueueChipText(message.details) ?? queuedTextContent(message) ?? "";
+		return readQueueChipText("details" in message ? message.details : undefined) ?? queuedTextContent(message) ?? "";
 	}
 	const text = queuedTextContent(message) ?? "";
 	if (text) return text;

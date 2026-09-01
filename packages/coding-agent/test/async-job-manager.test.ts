@@ -146,67 +146,54 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.resultText).toBe("late result");
 	});
 
-	test("enforces maxRunningJobs cap", () => {
+	test("queues jobs beyond maxRunningJobs cap", async () => {
 		const manager = new AsyncJobManager({
 			maxRunningJobs: 1,
 			onJobComplete: async () => {},
+			retentionMs: 60_000,
 		});
 
-		const firstJobId = manager.register("bash", "first", async ({ signal }) => {
-			await new Promise<void>(resolve => {
-				signal.addEventListener("abort", () => resolve(), { once: true });
-			});
+		const firstRelease = Promise.withResolvers<void>();
+		const firstJobId = manager.register("bash", "first", async () => {
+			await firstRelease.promise;
 			return "done";
 		});
+		const secondJobId = manager.register("bash", "second", async () => "second");
 
-		expect(() =>
-			manager.register("bash", "second", async () => {
-				return "second";
-			}),
-		).toThrow(/Background job limit reached/);
-
-		manager.cancel(firstJobId);
+		expect(manager.getJob(secondJobId)?.queued).toBe(true);
+		expect(manager.atCapacity).toBe(true);
+		firstRelease.resolve();
+		await manager.getJob(firstJobId)?.promise;
+		await manager.getJob(secondJobId)?.promise;
+		expect(manager.getJob(secondJobId)?.status).toBe("completed");
+		await manager.dispose();
 	});
 
-	test("queued jobs do not count toward the cap until markRunning", async () => {
-		const manager = new AsyncJobManager({
-			maxRunningJobs: 1,
-			onJobComplete: async () => {},
-		});
-
+	test("caller-queued jobs remain caller-controlled", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {}, retentionMs: 60_000 });
 		const gate = Promise.withResolvers<void>();
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
-		const queuedJobId = manager.register(
-			"task",
-			"queued",
-			async ({ markRunning }) => {
-				await gate.promise;
-				markRunning();
-				started.resolve();
-				await release.promise;
-				return "queued done";
-			},
-			{ queued: true },
-		);
-
-		// Queued job holds no slot: another job registers fine at cap 1.
+		const queuedJobId = manager.register("task", "queued", async ({ markRunning }) => {
+			await gate.promise;
+			markRunning();
+			started.resolve();
+			await release.promise;
+			return "queued done";
+		}, { queued: true });
 		const runningJobId = manager.register("bash", "running", async ({ signal }) => {
-			await new Promise<void>(resolve => {
-				signal.addEventListener("abort", () => resolve(), { once: true });
-			});
+			await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
 			return "done";
 		});
-
-		// Free the slot, then let the queued job start: it now occupies the slot.
+		expect(manager.getJob(queuedJobId)?.queued).toBe(true);
 		manager.cancel(runningJobId);
 		gate.resolve();
 		await started.promise;
-		expect(() => manager.register("bash", "third", async () => "third")).toThrow(/Background job limit reached/);
-
+		expect(manager.atCapacity).toBe(false);
 		release.resolve();
 		await manager.waitForAll();
 		expect(manager.getJob(queuedJobId)?.status).toBe("completed");
+		await manager.dispose();
 	});
 
 	test("evicts completed jobs after retention period", async () => {

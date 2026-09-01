@@ -76,6 +76,58 @@ describe("agentLoop with AgentMessage", () => {
 		expect(eventTypes).toContain("agent_end");
 	});
 
+	it("attaches provider call evidence from CPA trace response headers", async () => {
+		const context: AgentContext = {
+			systemPrompt: ["You are helpful."],
+			messages: [],
+			tools: [],
+		};
+		const mock = createMockModel({
+			responses: [
+				{
+					content: ["Hi there!"],
+					responseHeaders: { "X-CPA-TRACE-ID": "trace-0E4297FD" },
+					responseStatus: 202,
+					responseRequestId: "provider-response",
+				},
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const messages = await stream.result();
+		const assistantEnd = events.find(
+			(e): e is Extract<AgentEvent, { type: "message_end" }> =>
+				e.type === "message_end" && e.message.role === "assistant",
+		);
+		expect(assistantEnd).toBeDefined();
+		if (assistantEnd?.message.role !== "assistant") return;
+
+		const providerCall = assistantEnd.message.providerCall;
+		expect(providerCall?.version).toBe(1);
+		expect(typeof providerCall?.id).toBe("string");
+		expect(providerCall?.id.length).toBeGreaterThan(0);
+		expect(providerCall?.outcome).toBe("completed");
+		expect(providerCall?.attempts).toEqual([
+			{
+				ordinal: 1,
+				status: 202,
+				proxyTraceId: "trace-0E4297FD",
+				proxyRequestId: "0e4297fd",
+				joinKey: "cli-proxy-request:0e4297fd",
+				providerRequestId: "provider-response",
+			},
+		]);
+		expect(messages[1].role).toBe("assistant");
+		if (messages[1].role !== "assistant") return;
+		expect(messages[1].providerCall).toEqual(providerCall);
+	});
+
 	it("ends gracefully without a provider call after the deadline", async () => {
 		const context: AgentContext = {
 			systemPrompt: ["You are helpful."],

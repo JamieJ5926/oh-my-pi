@@ -12,7 +12,8 @@
  * `enableMCP: false`, regardless of what `baseOptions` carries.
  */
 
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAcpSessionFactory } from "@oh-my-pi/pi-coding-agent/main";
@@ -181,6 +182,73 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 
 			await expect(factory(tempDir.path())).rejects.toThrow(/Trusted extension failed to load.*fixture/);
 			expect(createCalls).toBe(0);
+		} finally {
+			await tempDir.remove();
+		}
+	});
+});
+
+describe("createAcpSessionFactory persisted revival ownership", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		AgentLifecycleManager.resetGlobalForTests();
+	});
+
+	it("registers concurrent sessions independently and unregisters each on dispose", async () => {
+		const tempDir = TempDir.createSync("@pi-acp-owner-registration-");
+		try {
+			const settings = Settings.isolated({});
+			const lifecycle = AgentLifecycleManager.global();
+			const registerSpy = vi.spyOn(lifecycle, "registerPersistedSubagentReviverOwner");
+			const unregisterSpy = vi.spyOn(lifecycle, "unregisterPersistedSubagentReviverOwner");
+			const sessions: AgentSession[] = [];
+			const disposeCounts: number[] = [];
+			const factory = createAcpSessionFactory({
+				baseOptions: {} as CreateAgentSessionOptions,
+				settings,
+				sessionDir: tempDir.join("sessions"),
+				authStorage,
+				modelRegistry,
+				parsedArgs: {},
+				rawArgs: [],
+				createSession: async () => {
+					const sessionIndex = disposeCounts.length;
+					disposeCounts.push(0);
+					let disposed = false;
+					const session = {
+						dispose: async () => {
+							if (!disposed) {
+								disposed = true;
+								disposeCounts[sessionIndex]++;
+							}
+						},
+					} as unknown as AgentSession; 
+					sessions.push(session);
+					return { session } as CreateAgentSessionResult;
+				},
+			});
+
+			const [left, right] = await Promise.all([factory(tempDir.path()), factory(tempDir.path())]);
+			const registrations = registerSpy.mock.calls.map(([registration]) => registration);
+			expect(registrations).toHaveLength(2);
+			expect(registrations[0].scope).toBe("session");
+			expect(registrations[1].scope).toBe("session");
+			expect(registrations[0].ownerAgentId).not.toBe(registrations[1].ownerAgentId);
+			expect(registrations[0].address.session).not.toBe(registrations[1].address.session);
+			expect(Number(registrations[0].address.generation)).toBe(1);
+			expect(Number(registrations[1].address.generation)).toBe(1);
+
+			await left.session.dispose();
+			expect(disposeCounts[0]).toBe(1);
+			expect(unregisterSpy).toHaveBeenCalledTimes(1);
+
+			await left.session.dispose();
+			expect(unregisterSpy).toHaveBeenCalledTimes(1);
+
+			await right.session.dispose();
+			expect(disposeCounts[1]).toBe(1);
+			expect(unregisterSpy).toHaveBeenCalledTimes(2);
+			expect(unregisterSpy.mock.calls[1][0]).toEqual(registrations[1].address);
 		} finally {
 			await tempDir.remove();
 		}

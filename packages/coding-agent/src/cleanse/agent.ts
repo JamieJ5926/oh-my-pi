@@ -1,3 +1,4 @@
+import type { BridgeSessionMetadata } from "../session/agent-session";
 import { getProjectDir, isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, resolveCliModel } from "../config/model-resolver";
@@ -75,6 +76,8 @@ export async function createCleanseAgentRuntime(options: {
 	cwd?: string;
 	model: string;
 	hooks?: CleanseAgentHooks;
+	irc?: IrcBus;
+	bridgeMetadata?: BridgeSessionMetadata;
 }): Promise<CleanseAgentRuntime> {
 	const cwd = options.cwd ?? getProjectDir();
 	const [settings, authStorage] = await Promise.all([Settings.init({ cwd }), discoverAuthStorage()]);
@@ -91,15 +94,16 @@ export async function createCleanseAgentRuntime(options: {
 	sessionManager.appendCustomEntry("cleanse", {
 		status: "running",
 		model: modelDisplay,
-		selector: options.model,
 	});
+	if (options.bridgeMetadata !== undefined) sessionManager.setBridgeMetadata(options.bridgeMetadata);
 	await sessionManager.ensureOnDisk();
 	const sessionFile = sessionManager.getSessionFile();
 	if (!sessionFile) throw new Error("Cleanse session could not be persisted");
 	const eventBus = new EventBus();
-	const toolSession: ToolSession = {
-		cwd,
-		hasUI: false,
+    const toolSession: ToolSession = {
+        cwd,
+        hasUI: false,
+        settings,
 		suppressSpawnAdvisory: true,
 		enableLsp: true,
 		enableIrc: true,
@@ -115,7 +119,6 @@ export async function createCleanseAgentRuntime(options: {
 		getActiveModelString: () => modelSelector,
 		getActiveModel: () => resolved.model,
 		sessionManager,
-		settings,
 		authStorage,
 		modelRegistry,
 	};
@@ -200,7 +203,7 @@ export async function createCleanseAgentRuntime(options: {
 		async followUp(worker: number, diagnostics: readonly CleanseDiagnostic[]): Promise<boolean> {
 			const agentId = workerAgentIds.get(worker);
 			if (!agentId) return false;
-			const receipt = await IrcBus.global().send({
+			const receipt = await (options.irc ?? IrcBus.global()).send({
 				from: MAIN_AGENT_ID,
 				to: agentId,
 				body: prompt.render(followUpPrompt, { diagnostics: formatDiagnostics(diagnostics) }),

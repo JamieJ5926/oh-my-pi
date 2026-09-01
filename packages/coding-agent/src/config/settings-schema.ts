@@ -87,6 +87,8 @@ import {
 export type ModelRoleStorage = "global" | "project";
 
 /** Per-role runtime profile: tools, model role, prompt/budget overrides. */
+export type RoleExecutionBackend = "local" | "pi" | "jcode";
+
 export interface RoleProfileConfig {
 	agents: string[];
 	tools: string[];
@@ -94,8 +96,21 @@ export interface RoleProfileConfig {
 	minimalPrompt: boolean;
 	softRequestBudget: number;
 	restrictToolNames?: boolean;
+	/** Structural backend selection. Omitted means local. */
+	execution_backend?: RoleExecutionBackend;
+	/** Built-in JCode provider id, such as `openai` or `claude`. */
+	jcode_provider?: string;
+	/**
+	 * Named JCode provider profile / startup provider. Required when
+	 * `execution_backend` is `jcode` and `jcode_provider` is not set.
+	 */
+	jcode_provider_profile?: string;
+	toolCallLoopGuard?: {
+		enabled?: boolean;
+		threshold?: number;
+		exemptTools?: string[];
+	};
 }
-
 
 const BUILTIN_BLOB_DESTINATION_METADATA: readonly BlobDestinationMetadata<BlobDestinationId>[] =
 	Object.values(BUILTIN_BLOB_DESTINATIONS);

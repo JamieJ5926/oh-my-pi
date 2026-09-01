@@ -76,6 +76,29 @@ describe("SessionManager close() drops empty metadata-only sessions", () => {
 		expect(await fileExists(sessionFile)).toBe(false);
 	});
 
+	it("restores draft cleanup arming without losing bridge metadata", async () => {
+		using tempDir = TempDir.createSync("@pi-session-snapshot-drift-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		session.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		session.setBridgeMetadata({ executionBackend: "pi", canResume: true });
+		await session.saveDraft("restore me");
+
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+		const snapshot = session.captureState();
+
+		// Change both pieces of state before restoring the captured session.
+		session.appendMessage({ role: "user", content: "real conversation", timestamp: 1 });
+		session.setBridgeMetadata(undefined);
+		session.restoreState(snapshot);
+
+		expect(session.getBridgeMetadata()).toEqual({ executionBackend: "pi", canResume: true });
+		await session.saveDraft("");
+		await session.close();
+
+		expect(await fileExists(sessionFile)).toBe(false);
+	});
+
 	// A draft still on disk at close time is the whole reason the session
 	// file was materialized in the first place (`--resume` needs to find
 	// this session's file to reattach the draft). Never drop it.

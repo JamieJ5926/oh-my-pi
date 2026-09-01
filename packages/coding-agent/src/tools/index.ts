@@ -67,8 +67,11 @@ import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
+import { InspectManyTool } from "./inspect-many";
 import { isMountableUnderXdev, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
+import { BatchPlanTool } from "./batch-plan";
+import { BatchWriteTool } from "./batch-write";
 
 export * from "../edit";
 export * from "../goals";
@@ -274,6 +277,10 @@ export interface ToolSession {
 	getToolContext?: () => AgentToolContext | undefined;
 	/** Names currently authorized for invocation through the eval bridge. */
 	getEvalBridgeToolNames?: () => readonly string[];
+	/** Execute one externally-originated tool call through AgentSession's canonical policy path. */
+	dispatchExternalToolCall?: import("../bridge/backends/jcode").HostToolDispatcher;
+	/** Owning live AgentSession for session-local external execution lifecycle. */
+	externalExecutionOwner?: import("../session/agent-session").AgentSession;
 	/** Direct partition of the active Code Mode surface; undefined when Code Mode is inactive. */
 	getCodeModeDirectToolNames?: () => readonly string[] | undefined;
 	/** Return whether a built-in tool is active in this turn's tool set. */
@@ -488,6 +495,9 @@ export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 	think: () => new ThinkTool(),
 	yield: s => new YieldTool(s),
 	goal: s => new GoalTool(s),
+	batch_plan: s => new BatchPlanTool(s),
+	batch_write: s => new BatchWriteTool(s),
+	inspect_many: s => new InspectManyTool(s),
 };
 
 export type ToolName = BuiltinToolName;

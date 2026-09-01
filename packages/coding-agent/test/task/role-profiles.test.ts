@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { RoleProfileConfig } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
+import { resolveToolCallLoopGuardSettings } from "@oh-my-pi/pi-coding-agent/session/stream-guards";
 import { applyRoleProfile, findRoleProfile } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 
@@ -88,5 +90,19 @@ describe("applyRoleProfile", () => {
 			restrictToolNames: false,
 		}) as AppliedRoleProfileAgent;
 		expect(explicitFalse.restrictToolNames).toBe(false);
+	});
+});
+
+describe("resolveToolCallLoopGuardSettings", () => {
+	it("reads the stamped threshold directly from settings", () => {
+		const settings = Settings.isolated({
+			"model.toolCallLoopGuard.enabled": true,
+			"model.toolCallLoopGuard.threshold": 2,
+		});
+		expect(resolveToolCallLoopGuardSettings(settings)).toEqual({
+			enabled: true,
+			threshold: 2,
+			exemptTools: settings.get("model.toolCallLoopGuard.exemptTools"),
+		});
 	});
 });

@@ -1,0 +1,218 @@
+diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
+index 6f8a400..9d49dc8 100644
+--- a/packages/coding-agent/src/config/settings-schema.ts
++++ b/packages/coding-agent/src/config/settings-schema.ts
+@@ -94,6 +94,11 @@ export interface RoleProfileConfig {
+ 	minimalPrompt: boolean;
+ 	softRequestBudget: number;
+ 	restrictToolNames?: boolean;
++	toolCallLoopGuard?: {
++		enabled?: boolean;
++		threshold?: number;
++		exemptTools?: string[];
++	};
+ }
+ 
+ 
+diff --git a/packages/coding-agent/src/session/stream-guards.ts b/packages/coding-agent/src/session/stream-guards.ts
+index 11bd7fb..56fd982 100644
+--- a/packages/coding-agent/src/session/stream-guards.ts
++++ b/packages/coding-agent/src/session/stream-guards.ts
+@@ -388,15 +388,12 @@ export class LoopGuards {
+ 	}
+ 
+ 	#activeToolCallLoopGuard(): ToolCallLoopGuard | undefined {
+-		if (this.#host.settings.get("model.toolCallLoopGuard.enabled") !== true) {
++		const { enabled, threshold, exemptTools } = resolveToolCallLoopGuardSettings(this.#host.settings);
++		if (enabled !== true) {
+ 			this.#toolCallLoopGuard = undefined;
+ 			this.#toolCallLoopGuardSettingsKey = undefined;
+ 			return undefined;
+ 		}
+-		const threshold = this.#host.settings.get("model.toolCallLoopGuard.threshold");
+-		const exemptTools = this.#host.settings
+-			.get("model.toolCallLoopGuard.exemptTools")
+-			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
+ 		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
+ 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
+ 			this.#toolCallLoopGuard = new ToolCallLoopGuard({ threshold, exemptTools });
+@@ -489,3 +486,13 @@ export class LoopGuards {
+ 		});
+ 	}
+ }
++
++export function resolveToolCallLoopGuardSettings(
++	settings: Settings,
++): { enabled: boolean; threshold: number; exemptTools: string[] } {
++	const enabled = settings.get("model.toolCallLoopGuard.enabled");
++	const threshold = settings.get("model.toolCallLoopGuard.threshold");
++	const rawExempt = settings.get("model.toolCallLoopGuard.exemptTools");
++	const exemptTools = rawExempt.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
++	return { enabled, threshold, exemptTools };
++}
+diff --git a/packages/coding-agent/src/task/executor.ts b/packages/coding-agent/src/task/executor.ts
+index 72bdfe6..b6e2e31 100644
+--- a/packages/coding-agent/src/task/executor.ts
++++ b/packages/coding-agent/src/task/executor.ts
+@@ -443,6 +443,14 @@ export interface ExecutorOptions {
+ 	 * watchdog is already suspended for the call's duration.
+ 	 */
+ 	maxRuntimeMs?: number;
++	/** Per-profile soft request budget; when set, used instead of the hardcoded map. */
++	softRequestBudget?: number;
++	/** Per-profile tool-call loop guard; stamped onto child settings when set. */
++	toolCallLoopGuard?: {
++		enabled?: boolean;
++		threshold?: number;
++		exemptTools?: string[];
++	};
+ 	/** Include IRC only when the invocation policy permits collaboration. */
+ 	enableIrc?: boolean;
+ 	enableLsp?: boolean;
+@@ -2801,6 +2809,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 		settingsOverride: settings.get("task.agentAdvisor")[agent.name],
+ 		agentAdvisor: agent.advisor,
+ 	});
++	const loopGuard = options.toolCallLoopGuard;
+ 	const subagentSettings = createSubagentSettings(
+ 		settings,
+ 		{
+@@ -2811,6 +2820,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 			...(advisorSelection?.model
+ 				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorSelection.model } }
+ 				: undefined),
++			...(loopGuard?.enabled !== undefined ? { "model.toolCallLoopGuard.enabled": loopGuard.enabled } : undefined),
++			...(loopGuard?.threshold !== undefined ? { "model.toolCallLoopGuard.threshold": loopGuard.threshold } : undefined),
++			...(loopGuard?.exemptTools !== undefined
++				? { "model.toolCallLoopGuard.exemptTools": loopGuard.exemptTools }
++				: undefined),
+ 		},
+ 		options.parentServiceTier,
+ 	);
+@@ -2826,7 +2840,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 		0,
+ 		Math.trunc(Number(settings.get("task.softRequestBudget") ?? SOFT_REQUEST_BUDGET.default) || 0),
+ 	);
+-	const softRequestBudget = resolveSoftRequestBudget(agent.name, configuredDefaultBudget);
++	const softRequestBudget =
++		options.softRequestBudget !== undefined
++			? Math.max(0, Math.trunc(options.softRequestBudget))
++			: resolveSoftRequestBudget(agent.name, configuredDefaultBudget);
+ 	const softRequestBudgetNotice = settings.get("task.softRequestBudgetNotice") ?? false;
+ 	const parentDepth = options.taskDepth ?? 0;
+ 	const childDepth = parentDepth + 1;
+diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
+index 4ca7fe4..80238c2 100644
+--- a/packages/coding-agent/src/task/structured-subagent.ts
++++ b/packages/coding-agent/src/task/structured-subagent.ts
+@@ -145,6 +145,8 @@ export interface EffectiveSubagentPolicy {
+ 	softRequestBudget?: number;
+ 	/** Profile-level opt-in to suppress auto-added tools. */
+ 	restrictToolNames?: boolean;
++	/** Profile-level tool-call loop guard; undefined keeps global settings. */
++	toolCallLoopGuard?: RoleProfileConfig["toolCallLoopGuard"];
+ }
+ 
+ /** Settled child execution plus data needed by the frontends' own rendering. */
+@@ -382,6 +384,7 @@ export async function resolveEffectiveSubagentPolicy(
+ 		minimalPrompt: roleProfile?.minimalPrompt ?? MINIMAL_PROMPT_AGENTS[agentName] === true,
+ 		softRequestBudget: roleProfile?.softRequestBudget,
+ 		restrictToolNames: roleProfile?.restrictToolNames === true,
++		toolCallLoopGuard: roleProfile?.toolCallLoopGuard,
+ 	};
+ }
+ 
+@@ -438,9 +441,8 @@ function buildExecutorOptions(
+ ): ExecutorOptions {
+ 	const { session } = request;
+ 	const minimal = policy.minimalPrompt;
+-	const { skills, autoloadSkills } = minimal
+-		? { skills: [], autoloadSkills: [] }
+-		: resolveAutoloadSkills(session, policy.agent);
++	const { skills, autoloadSkills: resolvedAutoload } = resolveAutoloadSkills(session, policy.agent);
++	const autoloadSkills = minimal ? [] : resolvedAutoload;
+ 	const localProtocolOptions: LocalProtocolOptions = session.localProtocolOptions ?? {
+ 		getArtifactsDir: session.getArtifactsDir ?? (() => null),
+ 		getSessionId: session.getSessionId ?? (() => null),
+@@ -522,6 +524,7 @@ function buildExecutorOptions(
+ 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
+ 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+ 		softRequestBudget: policy.softRequestBudget,
++		toolCallLoopGuard: policy.toolCallLoopGuard,
+ 	};
+ }
+ 
+diff --git a/packages/coding-agent/test/task/role-profiles.test.ts b/packages/coding-agent/test/task/role-profiles.test.ts
+index a978c05..5c9c7f5 100644
+--- a/packages/coding-agent/test/task/role-profiles.test.ts
++++ b/packages/coding-agent/test/task/role-profiles.test.ts
+@@ -1,5 +1,7 @@
+ import { describe, expect, it } from "bun:test";
++import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+ import type { RoleProfileConfig } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
++import { resolveToolCallLoopGuardSettings } from "@oh-my-pi/pi-coding-agent/session/stream-guards";
+ import { applyRoleProfile, findRoleProfile } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+ 
+@@ -90,3 +92,17 @@ describe("applyRoleProfile", () => {
+ 		expect(explicitFalse.restrictToolNames).toBe(false);
+ 	});
+ });
++
++describe("resolveToolCallLoopGuardSettings", () => {
++	it("reads the stamped threshold directly from settings", () => {
++		const settings = Settings.isolated({
++			"model.toolCallLoopGuard.enabled": true,
++			"model.toolCallLoopGuard.threshold": 2,
++		});
++		expect(resolveToolCallLoopGuardSettings(settings)).toEqual({
++			enabled: true,
++			threshold: 2,
++			exemptTools: settings.get("model.toolCallLoopGuard.exemptTools"),
++		});
++	});
++});
+diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
+index a9693cc..4baefe8 100644
+--- a/packages/coding-agent/test/task/structured-subagent.test.ts
++++ b/packages/coding-agent/test/task/structured-subagent.test.ts
+@@ -188,6 +188,39 @@ describe("structured subagent primitive", () => {
+ 		expect(policy.effectiveAgent.tools).toEqual(["read", "yield"]);
+ 		expect(policy.effectiveAgent.spawns).toBeUndefined();
+ 	});
++	it("threads roleProfile toolCallLoopGuard through policy, child Settings, and ExecutorOptions", async () => {
++		mockDiscovery();
++		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
++		childSession.settings.override("model.toolCallLoopGuard.enabled", true);
++		childSession.settings.override("model.toolCallLoopGuard.threshold", 5);
++		childSession.settings.override("roleProfiles", {
++			loop_guard_worker: {
++				agents: ["worker"],
++				tools: ["read", "yield"],
++				model_role: "reviewer",
++				minimalPrompt: true,
++				softRequestBudget: 4,
++				toolCallLoopGuard: { threshold: 2 },
++			},
++		});
++
++		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
++		expect(policy.toolCallLoopGuard?.threshold).toBe(2);
++
++		const dispatched: executorModule.ExecutorOptions[] = [];
++		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
++			dispatched.push(options);
++			return result();
++		});
++
++		const settled = await runStructuredSubagent(
++			request({ session: childSession, agent: "worker", retainArtifacts: true }),
++		);
++		expect(settled.policy.toolCallLoopGuard?.threshold).toBe(2);
++		expect(dispatched[0]?.toolCallLoopGuard?.threshold).toBe(2);
++        expect(dispatched[0]?.settings?.get("model.toolCallLoopGuard.threshold")).toBe(5);
++		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
++	});
+ 	it("reloads model roles before resolving an agent added during the session", async () => {
+ 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
+ 		const projectDir = path.join(root, "project");

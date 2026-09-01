@@ -115,6 +115,7 @@ export interface AgentOptions {
 	 * telemetry capture/provider send.
 	 */
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	onProviderContextReady?: (context: Context) => void | Promise<void>;
 
 	/**
 	 * Steering mode: "all" = send all steering messages at once, "one-at-a-time" = one per turn
@@ -423,6 +424,7 @@ export class Agent {
 	#onBeforeYield?: () => Promise<void> | void;
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
 	#beforeModelCall?: AgentBeforeModelCall;
+	#onProviderContextReady?: (context: Context) => void | Promise<void>;
 	#additionalBeforeModelCalls = new Set<AgentBeforeModelCall>();
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
@@ -510,6 +512,7 @@ export class Agent {
 		this.#telemetry = opts.telemetry;
 		this.#appendOnlyContext = opts.appendOnlyContext;
 		this.#transformProviderContext = opts.transformProviderContext;
+		this.#onProviderContextReady = opts.onProviderContextReady;
 	}
 
 	/**
@@ -1446,6 +1449,7 @@ export class Agent {
 							return undefined;
 						}
 					: undefined,
+			onProviderContextReady: this.#onProviderContextReady,
 			cursorExecHandlers: this.#cursorExecHandlers,
 			cursorOnToolResult,
 			cwd: this.#cwd,

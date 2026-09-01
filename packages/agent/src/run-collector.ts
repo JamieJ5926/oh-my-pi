@@ -59,6 +59,30 @@ export interface ToolCounters {
 	readonly aborted: number;
 	readonly totalLatencyMs: number;
 }
+/** Point-in-time project resource accounting supplied by an owning runtime. */
+export interface ResourceTelemetrySnapshot {
+	readonly runningWorkers: number;
+	readonly queuedExecutions: number;
+	readonly admittedExecutions: number;
+	readonly queuedBytes: number;
+	readonly resultBytes: number;
+	readonly rssBytes?: number;
+	readonly overflowedExecutions: number;
+	readonly model?: string;
+	readonly backend?: string;
+}
+
+/** Structural lifecycle event supplied by an owning runtime. */
+export interface ResourceTelemetryEvent {
+	readonly kind: "queued" | "admitted" | "running" | "terminal" | "cancelled" | "overflow";
+	readonly jobId: string;
+	readonly model?: string;
+	readonly backend?: string;
+	readonly requestBytes?: number;
+	readonly resultBytes?: number;
+	readonly droppedBytes?: number;
+	readonly reason?: string;
+}
 
 /**
  * Run-level rollup returned in the `agent_end` event and passed to
@@ -83,6 +107,10 @@ export interface AgentRunSummary {
 		readonly totalLatencyMs: number;
 		/** Per-tool-name counters; keys sorted by name on snapshot. */
 		readonly byName: Readonly<Record<string, ToolCounters>>;
+	};
+	readonly resources?: {
+		readonly snapshots: readonly ResourceTelemetrySnapshot[];
+		readonly events: readonly ResourceTelemetryEvent[];
 	};
 	readonly usage: {
 		readonly inputTokens: number;
@@ -147,6 +175,8 @@ type SpanWithToolStart = Span & { [kToolStart]?: ToolStart };
 export class AgentRunCollector {
 	readonly #chats: ChatRecord[] = [];
 	readonly #tools: ToolRecord[] = [];
+	readonly #resourceSnapshots: ResourceTelemetrySnapshot[] = [];
+	readonly #resourceEvents: ResourceTelemetryEvent[] = [];
 	readonly #availableTools = new Set<string>();
 	readonly #invokedTools = new Set<string>();
 	readonly #modelsUsed = new Set<string>();
@@ -170,11 +200,20 @@ export class AgentRunCollector {
 		this.#runEnded = true;
 		return true;
 	}
-
 	/** Record the tool names exposed on a single chat step. */
 	noteAvailableTools(tools: readonly { readonly name: string }[] | undefined): void {
 		if (!tools) return;
 		for (const tool of tools) this.#availableTools.add(tool.name);
+	}
+
+	/** Record a structural resource snapshot; accounting remains runtime-owned. */
+	recordResourceSnapshot(snapshot: ResourceTelemetrySnapshot): void {
+		this.#resourceSnapshots.push(snapshot);
+	}
+
+	/** Record a structural resource lifecycle event; no policy logic is applied. */
+	recordResourceEvent(event: ResourceTelemetryEvent): void {
+		this.#resourceEvents.push(event);
 	}
 
 	beginChat(
@@ -395,6 +434,10 @@ export class AgentRunCollector {
 				totalLatencyMs: toolLatency,
 				byName: sortedRecord(byName),
 			},
+			resources: {
+				snapshots: this.#resourceSnapshots.slice(),
+				events: this.#resourceEvents.slice(),
+			},
 			usage: {
 				inputTokens,
 				outputTokens,
@@ -419,9 +462,6 @@ export class AgentRunCollector {
 		const toolsAvailable = [...this.#availableTools].sort();
 		const toolsInvoked = [...this.#invokedTools].sort();
 		const toolsUnused = toolsAvailable.filter(name => !this.#invokedTools.has(name));
-		// Tools the LLM invoked that were never declared on any request remain
-		// present in `toolsInvoked` but absent from `toolsAvailable`. Callers
-		// diff to detect this case if they care.
 		return {
 			toolsAvailable,
 			toolsInvoked,
@@ -472,8 +512,9 @@ export function aggregateAgentRunSummaries(summaries: readonly AgentRunSummary[]
 
 	const errorsByType: Record<string, number> = {};
 	let errorsTotal = 0;
-	let stepCount = 0;
-
+	const stepCount = summaries.reduce((total, summary) => total + summary.stepCount, 0);
+	const resourceSnapshots: ResourceTelemetrySnapshot[] = [];
+	const resourceEvents: ResourceTelemetryEvent[] = [];
 	for (const s of summaries) {
 		chatTotal += s.chats.total;
 		chatLatency += s.chats.totalLatencyMs;
@@ -519,7 +560,8 @@ export function aggregateAgentRunSummaries(summaries: readonly AgentRunSummary[]
 			errorsByType[type] = (errorsByType[type] ?? 0) + count;
 		}
 		errorsTotal += s.errors.total;
-		stepCount += s.stepCount;
+		resourceSnapshots.push(...(s.resources?.snapshots ?? []));
+		resourceEvents.push(...(s.resources?.events ?? []));
 	}
 
 	return {
@@ -535,6 +577,7 @@ export function aggregateAgentRunSummaries(summaries: readonly AgentRunSummary[]
 			totalLatencyMs: toolLatency,
 			byName: sortedRecord(byName),
 		},
+		resources: { snapshots: resourceSnapshots, events: resourceEvents },
 		usage: { inputTokens, outputTokens, cachedInputTokens, cacheWriteTokens, reasoningOutputTokens, totalTokens },
 		cost: { estimatedUsd, unavailableReasons: [...unavailableReasons].sort() },
 		errors: { total: errorsTotal, byType: sortedRecord(errorsByType) },
@@ -579,6 +622,7 @@ const EMPTY_SUMMARY: AgentRunSummary = Object.freeze({
 		totalLatencyMs: 0,
 		byName: Object.freeze({}),
 	}),
+	resources: Object.freeze({ snapshots: Object.freeze([]), events: Object.freeze([]) }),
 	usage: Object.freeze({
 		inputTokens: 0,
 		outputTokens: 0,

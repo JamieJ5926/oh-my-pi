@@ -8,30 +8,39 @@ import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type:
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { CustomMessage } from "./messages";
+import type { ActiveExternalExecution } from "./agent-session-types";
 import type { SessionManager } from "./session-manager";
-
 /** Capabilities the IRC bridge borrows from its owning session. */
 export interface IrcBridgeHost {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	registry?: AgentRegistry;
+	bus?: IrcBus;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	planModeEnabled(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	wakeForIrc(records: CustomMessage[]): void;
 	runEphemeralTurn(args: { promptText: string }): Promise<{ replyText: string }>;
+	activeExternalExecution(): ActiveExternalExecution | undefined;
+	sessionId(): string;
+	promptGeneration(): number;
 }
 
 /** Owns incoming IRC queues, injection, and side-channel auto-replies. */
 export class IrcBridge {
 	readonly #host: IrcBridgeHost;
+	readonly #registry: AgentRegistry;
+	readonly #bus: IrcBus;
 	#interrupts: CustomMessage[] = [];
 	#asides: CustomMessage[] = [];
 	readonly #autoReplies = new Set<Promise<void>>();
 
 	constructor(host: IrcBridgeHost) {
 		this.#host = host;
+		this.#registry = host.registry ?? AgentRegistry.global();
+		this.#bus = host.bus ?? IrcBus.global();
 	}
 
 	/** Whether an incoming peer message can interrupt a wait. */
@@ -139,7 +148,7 @@ export class IrcBridge {
 		};
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
-			const recipientParentId = AgentRegistry.global().get(msg.to)?.parentId;
+			const recipientParentId = this.#registry.get(msg.to)?.parentId;
 			if (recipientParentId === msg.from) {
 				this.#host.agent.steer({
 					role: "user",
@@ -149,7 +158,19 @@ export class IrcBridge {
 					steering: true,
 				});
 			} else {
-				this.#interrupts.push(record);
+				const execution = this.#host.activeExternalExecution();
+				if (
+					execution?.backend === "jcode" &&
+					execution.sessionId === this.#host.sessionId() &&
+					execution.generation === this.#host.promptGeneration()
+				) {
+					void execution.softInterrupt(typeof record.content === "string" ? record.content : msg.body, true).catch(error => {
+						logger.warn("JCode IRC soft interrupt failed", { error: String(error) });
+						this.#interrupts.push(record);
+					});
+				} else {
+					this.#interrupts.push(record);
+				}
 			}
 			if (autoReply) this.#startAutoReply(msg);
 			return "injected";
@@ -200,6 +221,7 @@ export class IrcBridge {
 			});
 			const body = replyText.trim();
 			if (!body || this.#host.isDisposed()) return;
+			const target = msg.remoteSource ?? msg.from;
 			const record: CustomMessage = {
 				role: "custom",
 				customType: "irc:autoreply",
@@ -211,10 +233,9 @@ export class IrcBridge {
 			};
 			void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 			this.#asides.push(record);
-			const receipt = await IrcBus.global().send({ from: msg.to, to: msg.from, body, replyTo: msg.id });
-			if (receipt.outcome === "failed") {
-				logger.warn("IRC auto-reply delivery failed", { to: msg.from, error: receipt.error });
-			}
+			const receipt = await this.#bus.send({ from: msg.to, to: target, body, replyTo: msg.id });
+			if (receipt.outcome === "failed")
+				logger.warn("IRC auto-reply delivery failed", { to: target, error: receipt.error });
 		} catch (error) {
 			logger.warn("IRC auto-reply turn failed", { from: msg.from, error: String(error) });
 		}

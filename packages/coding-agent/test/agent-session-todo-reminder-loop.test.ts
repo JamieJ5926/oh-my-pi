@@ -243,6 +243,20 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(reminderAttempts).toEqual([1]);
 	});
 
+	it("does not revive old todos after a newer user text-only turn", async () => {
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		await session.prompt("tst");
+		emitTextOnlyStop("tst received");
+		await session.waitForIdle();
+
+		expect(promptSpy).toHaveBeenCalledTimes(1);
+		expect(reminderAttempts).toEqual([]);
+		expect(todoReminderTranscriptEntry()).toBeUndefined();
+		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
 	it("re-escalates after the agent makes tool-level progress between stops", async () => {
 		let continueCount = 0;
 		vi.spyOn(session.agent, "continue").mockImplementation(async () => {

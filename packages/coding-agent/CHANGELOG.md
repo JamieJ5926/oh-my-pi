@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- JCode-backed roles can select built-in providers, and the Subagents HUD shows their live backend, model, current-tool, and token details.
+
 ## [18.0.8] - 2026-08-27
 
 ### Added

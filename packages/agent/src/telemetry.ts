@@ -49,7 +49,14 @@ import {
 	type Tracer,
 	trace,
 } from "@opentelemetry/api";
-import { AgentRunCollector, type AgentRunCoverage, type AgentRunSummary, type ToolStatus } from "./run-collector";
+import {
+	AgentRunCollector,
+	type AgentRunCoverage,
+	type AgentRunSummary,
+	type ResourceTelemetryEvent,
+	type ResourceTelemetrySnapshot,
+	type ToolStatus,
+} from "./run-collector";
 import type { AgentTool } from "./types";
 import { EventLoopKeepalive } from "./utils/yield";
 
@@ -395,6 +402,10 @@ export interface AgentTelemetryConfig {
 	 * NEVER turn a successful agent run into a failed one.
 	 */
 	readonly onRunEnd?: (summary: AgentRunSummary, coverage: AgentRunCoverage) => void;
+	/** Receives runtime-owned resource snapshots without applying policy. */
+	readonly onResourceSnapshot?: (snapshot: ResourceTelemetrySnapshot) => void;
+	/** Receives runtime-owned resource lifecycle events without applying policy. */
+	readonly onResourceEvent?: (event: ResourceTelemetryEvent) => void;
 	/** Receives non-fatal telemetry callback failures and host-defined warnings. */
 	readonly onTelemetryWarning?: (warning: AgentTelemetryWarning) => void;
 }
@@ -666,6 +677,37 @@ function safeOnSpanEnd(telemetry: AgentTelemetry | undefined, ctx: TelemetryHook
 			code: "on_span_end_failed",
 			message: "onSpanEnd threw; swallowing telemetry hook failure",
 			error: err,
+		});
+	}
+}
+
+/** Forward an owning runtime snapshot to the configured structural hook. */
+export function recordResourceSnapshot(
+	telemetry: AgentTelemetry | undefined,
+	snapshot: ResourceTelemetrySnapshot,
+): void {
+	telemetry?.collector.recordResourceSnapshot(snapshot);
+	try {
+		telemetry?.config.onResourceSnapshot?.(snapshot);
+	} catch (error) {
+		emitTelemetryWarning(telemetry, {
+			code: "on_span_end_failed",
+			message: "onResourceSnapshot threw; swallowing telemetry hook failure",
+			error,
+		});
+	}
+}
+
+/** Forward an owning runtime lifecycle event to the configured structural hook. */
+export function recordResourceEvent(telemetry: AgentTelemetry | undefined, event: ResourceTelemetryEvent): void {
+	telemetry?.collector.recordResourceEvent(event);
+	try {
+		telemetry?.config.onResourceEvent?.(event);
+	} catch (error) {
+		emitTelemetryWarning(telemetry, {
+			code: "on_span_end_failed",
+			message: "onResourceEvent threw; swallowing telemetry hook failure",
+			error,
 		});
 	}
 }

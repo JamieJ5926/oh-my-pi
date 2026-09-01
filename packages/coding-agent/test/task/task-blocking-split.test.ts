@@ -252,12 +252,26 @@ describe("task per-item blocking split", () => {
 			makeResult(options.id ?? "?", options.agent.name),
 		);
 
-		// A running non-queued filler job exhausts maxRunningJobs, so the
-		// worker spawn's registration throws while the scout still runs inline.
+		// A running filler reserves the only worker slot. Once RSS crosses the
+		// configured limit, the worker spawn is rejected by resource admission
+		// while the blocking scout still runs inline.
 		const filler = Promise.withResolvers<string>();
-		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: () => {} });
+		const manager = new AsyncJobManager({
+			maxRunningJobs: 1,
+			onJobComplete: () => {},
+			resourceAdmission: {
+				maxInferenceWorkers: 1,
+				maxQueuedExecutions: 1,
+				maxQueuedBytes: 1,
+				maxResultBytes: 32,
+				maxEventBytes: 128,
+				maxEventsPerExecution: 4,
+				maxRssBytes: 10,
+			},
+		});
 		managers.push(manager);
 		manager.register("bash", "filler", () => filler.promise, { id: "filler" });
+		manager.setResourceRssBytes(11);
 
 		const tool = await TaskTool.create(createSession({ manager }));
 		const result = await tool.execute("tc-mixed-schedfail", {
@@ -273,6 +287,7 @@ describe("task per-item blocking split", () => {
 		expect(text).toContain('id="ScoutThree"');
 		expect(text).toContain("Failed to schedule 1 spawn");
 		expect(text).toContain("WorkerThree");
+		expect(text).toContain("Resource admission rejected: rss-limit");
 		expect(result.details?.results.map(r => r.id)).toEqual(["ScoutThree"]);
 		expect(result.details?.async?.state).toBe("failed");
 		expect(manager.getJob("WorkerThree")).toBeUndefined();

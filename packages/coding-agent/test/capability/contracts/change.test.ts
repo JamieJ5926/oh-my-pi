@@ -3,6 +3,7 @@ import {
 	type ChangePlan,
 	type ChangeUnit,
 	createWriteWaves,
+	parseChangePlan,
 	topologicalOrder,
 	validateChangePlan,
 	validateWriteWave,
@@ -65,5 +66,19 @@ describe("change plan contracts", () => {
 				value,
 			),
 		).toThrow("overlapping ownership");
+	});
+
+	test("parses external plans and rejects legacy payloads", () => {
+		const serialized = JSON.parse(JSON.stringify(plan([unit("a")])));
+		expect(parseChangePlan(serialized)).toEqual(plan([unit("a")]));
+		expect(() => parseChangePlan({ plan: null })).toThrow("unsupported fields");
+		expect(() => parseChangePlan({
+			...serialized,
+			units: [{ ...serialized.units[0], payload: { kind: "full_content" } }],
+		})).toThrow("unsupported fields");
+		expect(() => parseChangePlan({
+			...serialized,
+			meta: { ...serialized.meta, payload: true },
+		})).toThrow("meta is invalid");
 	});
 });

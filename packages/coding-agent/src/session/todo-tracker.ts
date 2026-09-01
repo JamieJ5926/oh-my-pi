@@ -50,8 +50,9 @@ export interface TodoTrackerHost {
 	model(): Model | undefined;
 	agentKind(): "main" | "sub";
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
-	scheduleAgentContinue(options: { generation?: number }): void;
+	scheduleAgentContinue(options: { generation?: number; shouldContinue?: () => boolean }): void;
 	promptGeneration(): number;
+	todoAuthorityGeneration(): number;
 	hasPendingAsyncWake(): boolean;
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
@@ -68,6 +69,7 @@ export class TodoTracker {
 	#reminderAwaitingProgress = false;
 	#mutationsSinceLastTouch = 0;
 	#midRunNudgeCount = 0;
+	#lastTodoTouchGeneration: number | undefined;
 
 	constructor(host: TodoTrackerHost) {
 		this.#host = host;
@@ -80,12 +82,13 @@ export class TodoTracker {
 
 	/** Replaces todo phases with a defensive clone. */
 	setPhases(phases: TodoPhase[]): void {
-		this.#phases = this.#clonePhases(phases);
+		this.#replacePhases(phases);
+		this.#lastTodoTouchGeneration = this.#host.todoAuthorityGeneration();
 	}
 
-	/** Rehydrates todo phases from the current transcript branch. */
+	/** Rehydrates todo phases from the current transcript branch without granting continuation authority. */
 	syncFromBranch(): void {
-		this.setPhases(getLatestTodoPhasesFromEntries(this.#host.sessionManager.getBranch()));
+		this.#replacePhases(getLatestTodoPhasesFromEntries(this.#host.sessionManager.getBranch()));
 	}
 
 	/** Returns a defensive clone suitable for snapshots and branch state. */
@@ -105,6 +108,7 @@ export class TodoTracker {
 	onToolResult(toolName: string, isError: boolean): void {
 		if (toolName === "todo") {
 			this.#mutationsSinceLastTouch = 0;
+			if (!isError) this.#lastTodoTouchGeneration = this.#host.todoAuthorityGeneration();
 		} else if (!isError && MUTATING_TOOLS[toolName]) {
 			this.#mutationsSinceLastTouch++;
 		}
@@ -238,6 +242,17 @@ export class TodoTracker {
 			this.#reminderAwaitingProgress = false;
 			return false;
 		}
+		const authorityGeneration = this.#host.todoAuthorityGeneration();
+		if (this.#lastTodoTouchGeneration !== authorityGeneration) {
+			logger.debug("Todo completion: incomplete todos are from an older user turn; skipping reminder", {
+				incomplete: incomplete.length,
+				lastTodoTouchGeneration: this.#lastTodoTouchGeneration,
+				authorityGeneration,
+			});
+			this.#reminderCount = 0;
+			this.#reminderAwaitingProgress = false;
+			return false;
+		}
 		if (isAwaitingUserAnswer(message)) {
 			logger.debug("Todo completion: assistant is waiting for user input; skipping reminder", {
 				incomplete: incomplete.length,
@@ -280,7 +295,12 @@ export class TodoTracker {
 		this.#reminderAwaitingProgress = true;
 		this.#host.agent.appendMessage(reminderMessage);
 		this.#host.sessionManager.appendMessage(reminderMessage);
-		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+		this.#host.scheduleAgentContinue({
+			generation: this.#host.promptGeneration(),
+			shouldContinue: () =>
+				this.#lastTodoTouchGeneration === authorityGeneration &&
+				this.#host.todoAuthorityGeneration() === authorityGeneration,
+		});
 		return true;
 	}
 
@@ -325,6 +345,10 @@ export class TodoTracker {
 			toolRefs: { task: wireName("task"), todo: wireName("todo") },
 			taskBatch: this.#host.settings.get("task.batch"),
 		};
+	}
+
+	#replacePhases(phases: TodoPhase[]): void {
+		this.#phases = this.#clonePhases(phases);
 	}
 
 	#clonePhases(phases: TodoPhase[]): TodoPhase[] {

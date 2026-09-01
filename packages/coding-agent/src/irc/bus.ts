@@ -16,12 +16,13 @@
  */
 
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { createMessageEnvelope, formatSessionAddress, parseMessageEnvelope, type MessageEnvelope, type SessionAddress } from "../bridge/index";
+import type { TransportAdapter, TransportDeliveryState } from "../bridge/transport";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { CustomMessage } from "../session/messages";
-
 export interface IrcMessage {
 	id: string;
 	/** Sender agent id. */
@@ -32,6 +33,44 @@ export interface IrcMessage {
 	ts: number;
 	/** Message id being answered. */
 	replyTo?: string;
+	/** Remote address used to route a reply across the transport. */
+	remoteSource?: SessionAddress;
+}
+
+interface IrcTransportPayload {
+	readonly kind: "irc-message";
+	readonly from: string;
+	readonly body: string;
+	readonly replyTo?: string;
+	readonly expectsReply?: boolean;
+}
+
+function parseIrcTransportPayload(value: unknown): IrcTransportPayload | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const kind = Reflect.get(value, "kind");
+	const from = Reflect.get(value, "from");
+	const body = Reflect.get(value, "body");
+	const replyTo = Reflect.get(value, "replyTo");
+	const expectsReply = Reflect.get(value, "expectsReply");
+	if (kind !== "irc-message" || typeof from !== "string" || from.length === 0 || typeof body !== "string") return undefined;
+	if (replyTo !== undefined && typeof replyTo !== "string") return undefined;
+	if (expectsReply !== undefined && typeof expectsReply !== "boolean") return undefined;
+	return {
+		kind: "irc-message",
+		from,
+		body,
+		...(replyTo === undefined ? {} : { replyTo }),
+		...(expectsReply === undefined ? {} : { expectsReply }),
+	};
+}
+
+export type IrcTarget = string | SessionAddress;
+
+export interface IrcBusOptions {
+	registry?: AgentRegistry;
+	lifecycle?: AgentLifecycleManager;
+	transport?: TransportAdapter;
+	localAddress?: SessionAddress;
 }
 
 export interface IrcDeliveryReceipt {
@@ -80,18 +119,99 @@ export class IrcBus {
 
 	readonly #registry: AgentRegistry;
 	readonly #lifecycle: () => AgentLifecycleManager;
+#transport?: TransportAdapter;
+#localAddress?: SessionAddress;
+	readonly #transportAddresses = new Map<string, SessionAddress>();
+	#transportClosed = false;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
 
-	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
-		this.#registry = registry;
-		// Lazy: the lifecycle global self-constructs against the global registry,
-		// so only touch it when a parked recipient actually needs reviving.
-		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+	constructor(options: IrcBusOptions | AgentRegistry = {}) {
+		const deps = options instanceof AgentRegistry ? { registry: options } : options;
+		this.#registry = deps.registry ?? AgentRegistry.global();
+		this.#lifecycle = () => deps.lifecycle ?? AgentLifecycleManager.global();
+		this.#transport = deps.transport;
+		this.#localAddress = deps.localAddress;
+	}
+
+	/** Attach one process transport and register its local inbound address. */
+	async attachTransport(options: { transport: TransportAdapter; localAddress: SessionAddress }): Promise<void> {
+		if (this.#transport && this.#transport !== options.transport) throw new Error("IRC transport is already attached");
+		if (this.#transportClosed) throw new Error("IRC transport is closed");
+		this.#transport = options.transport;
+		this.#localAddress = options.localAddress;
+		await this.registerAddress(options.localAddress);
+	}
+
+	/** Register a published address as an inbound delivery endpoint. */
+	async registerAddress(address: SessionAddress): Promise<void> {
+		if (!this.#transport) throw new Error("IRC transport is not attached");
+		if (this.#transportClosed) throw new Error("IRC transport is closed");
+		const key = formatSessionAddress(address);
+		if (this.#transportAddresses.has(key)) return;
+		this.#transportAddresses.set(key, address);
+		try {
+			await this.#transport.register(address, envelope => this.#receiveTransportEnvelope(envelope, address));
+		} catch (error) {
+			this.#transportAddresses.delete(key);
+			throw error;
+		}
+	}
+
+	async unregisterAddress(address: SessionAddress): Promise<void> {
+		const key = formatSessionAddress(address);
+		this.#transportAddresses.delete(key);
+		await this.#transport?.unregister(address);
+	}
+
+	async closeTransport(): Promise<void> {
+		if (this.#transportClosed) return;
+		this.#transportClosed = true;
+		const transport = this.#transport;
+		this.#transportAddresses.clear();
+		if (transport) await transport.close();
+	}
+
+	async #receiveTransportEnvelope(rawEnvelope: MessageEnvelope, address: SessionAddress): Promise<void> {
+		if (this.#transportClosed) return;
+		let envelope: MessageEnvelope;
+		try {
+			envelope = parseMessageEnvelope(rawEnvelope);
+		} catch {
+			return;
+		}
+		if (envelope.destination.generation !== address.generation) return;
+		const payload = parseIrcTransportPayload(envelope.body.kind === "payload" ? envelope.body.payload : undefined);
+		if (!payload) return;
+		const ref = this.#registry.getByAddress(envelope.destination);
+		if (!ref) return;
+		const msg: IrcMessage = {
+			id: envelope.id,
+			from: payload.from,
+			to: ref.id,
+			body: payload.body,
+			ts: envelope.createdAt,
+			...(payload.replyTo === undefined ? {} : { replyTo: payload.replyTo }),
+			remoteSource: envelope.source,
+		};
+		await this.#deliverLocally(msg, { expectsReply: payload.expectsReply }, true);
+	}
+
+	async #deliverLocally(message: IrcMessage, opts?: { expectsReply?: boolean }, queueIfUnavailable = false): Promise<"injected" | "woken" | undefined> {
+		const waiter = this.#takeMatchingWaiter(message.to, message.from);
+		if (waiter) {
+			waiter.resolve(message);
+			return "injected";
+		}
+		const session = this.#registry.get(message.to)?.session;
+		if (!session) {
+			if (queueIfUnavailable) this.#enqueue(message);
+			return undefined;
+		}
+		return session.deliverIrcMessage(message, opts);
 	}
 
 	/**
-	 * Fire-and-forget delivery. Never blocks on the recipient generating
 	 * anything: the receipt reports how the message reached the recipient
 	 * (waiter/aside = "injected", idle wake = "woken", park revival =
 	 * "revived"), not what they did with it.
@@ -115,11 +235,35 @@ export class IrcBus {
 	 * incoming card, so relaying the sibling legs would duplicate it.
 	 */
 	async send(
-		msg: Omit<IrcMessage, "id" | "ts">,
+		msg: Omit<IrcMessage, "id" | "ts" | "to"> & { to: IrcTarget },
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
-		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
-		const ref = this.#registry.get(message.to);
+		const message: IrcMessage = { ...msg, to: typeof msg.to === "string" ? msg.to : msg.to.session, id: Snowflake.next(), ts: Date.now() };
+		const targetAddress = typeof msg.to === "string" ? undefined : msg.to;
+		const ref = targetAddress ? this.#registry.getByAddress(targetAddress) : this.#registry.get(message.to);
+		if (!ref && targetAddress && this.#transport && this.#localAddress) {
+			const source = this.#registry.get(message.from)?.address ?? this.#localAddress;
+			const envelope = createMessageEnvelope({
+				id: message.id,
+				source,
+				destination: targetAddress,
+				body: {
+					kind: "payload",
+					payload: {
+						kind: "irc-message",
+						from: message.from,
+						body: message.body,
+						...(message.replyTo === undefined ? {} : { replyTo: message.replyTo }),
+						...(opts?.expectsReply === undefined ? {} : { expectsReply: opts.expectsReply }),
+					},
+				},
+				sequence: 1,
+				idempotencyKey: message.id,
+				createdAt: message.ts,
+			});
+			const result = await this.#transport.send(envelope);
+			return this.#remoteReceipt(message.to, result);
+		}
 		if (!ref) {
 			return {
 				to: message.to,
@@ -134,7 +278,6 @@ export class IrcBus {
 				error: `Agent "${message.to}" was hard-aborted and cannot be messaged or revived. Its transcript remains readable at history://${message.to}.`,
 			};
 		}
-		// Advisor refs are observability-only transcripts, never messageable peers.
 		if (ref.kind === "advisor") {
 			return {
 				to: message.to,
@@ -143,14 +286,6 @@ export class IrcBus {
 			};
 		}
 
-		// A `parked` recipient always needs the lifecycle to revive it — this is
-		// read from *this* bus's registry, so it holds for any registry. The
-		// mid-park / adopted checks below query the lifecycle's own state, which
-		// only describes the registry it manages: consult them only when the
-		// lifecycle owns this bus's registry, otherwise a custom-registry bus
-		// (fallen back to the global manager) would gate a live recipient on
-		// unrelated global park state. Main/non-adopted live peers skip the gate,
-		// and pending waiters still win without a session.
 		const lifecycle = this.#lifecycle();
 		const lifecycleOwnsRegistry = lifecycle.manages(this.#registry);
 		const needsLifecycleGate =
@@ -162,23 +297,12 @@ export class IrcBus {
 		if (needsLifecycleGate) {
 			try {
 				const liveSession = await lifecycle.ensureLive(message.to);
-				// Revival = we did not keep the same live instance (parked start, or
-				// park completed and a fresh session was rebuilt).
 				revived = !priorSession || liveSession !== priorSession;
 			} catch (error) {
-				// Not revivable / released / revive failed. Do not buffer: a permanent
-				// failure must not inflate unread counts or pretend delivery is pending.
-				return {
-					to: message.to,
-					outcome: "failed",
-					error: error instanceof Error ? error.message : String(error),
-				};
+				return { to: message.to, outcome: "failed", error: error instanceof Error ? error.message : String(error) };
 			}
 		}
 
-		// A pending `wait` from the recipient consumes the message directly —
-		// it is returned from their irc tool call and never hits the inbox or
-		// the session injection path.
 		const waiter = this.#takeMatchingWaiter(message.to, message.from);
 		if (waiter) {
 			waiter.resolve(message);
@@ -187,25 +311,31 @@ export class IrcBus {
 		}
 
 		const session = this.#registry.get(message.to)?.session;
-		if (!session) {
-			return { to: message.to, outcome: "failed", error: `Agent "${message.to}" has no live session.` };
-		}
-
+		if (!session) return { to: message.to, outcome: "failed", error: `Agent "${message.to}" has no live session.` };
 		try {
 			const delivery = await session.deliverIrcMessage(message, opts);
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
-			// Live hand-off failed (e.g. recipient disposed mid-shutdown): buffer
-			// the message so a later `wait`/`inbox` from the recipient can still
-			// pick it up. The receipt stays "failed" — the recipient has not
-			// seen it.
 			this.#enqueue(message);
-			return {
-				to: message.to,
-				outcome: "failed",
-				error: error instanceof Error ? error.message : String(error),
-			};
+			return { to: message.to, outcome: "failed", error: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	#remoteReceipt(to: string, result: TransportDeliveryState): IrcDeliveryReceipt {
+		switch (result.kind) {
+			case "delivered":
+				return { to, outcome: "injected" };
+			case "queued":
+				return { to, outcome: "woken" };
+			case "backpressure":
+				return { to, outcome: "failed", error: `Transport backpressure (${result.bytes}/${result.limit} bytes).` };
+			case "dead-letter":
+				return { to, outcome: "failed", error: result.reason };
+			case "stale-generation":
+				return { to, outcome: "failed", error: `Transport stale generation (expected ${result.expected}, actual ${result.actual ?? "unknown"}).` };
+			case "rejected":
+				return { to, outcome: "failed", error: result.reason };
 		}
 	}
 

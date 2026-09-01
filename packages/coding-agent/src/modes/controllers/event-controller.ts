@@ -856,7 +856,7 @@ export class EventController {
 			// Queued custom-message chips are derived from the agent queue; refresh the
 			// pending bar when the queued custom is consumed so the chip disappears
 			// immediately.
-			if (event.message.role === "custom" && readQueueChipText(event.message.details)) {
+			if (event.message.role === "custom" && "details" in event.message && readQueueChipText(event.message.details)) {
 				this.ctx.updatePendingMessagesDisplay();
 			}
 			this.ctx.ui.requestRender();

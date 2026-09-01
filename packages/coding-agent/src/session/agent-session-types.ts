@@ -74,6 +74,15 @@ export interface AsyncJobSnapshot {
 
 export type { ShakeMode, ShakeResult } from "./shake-types";
 
+
+/** Session-local owner for a live external execution that can receive IRC soft interrupts. */
+export interface ActiveExternalExecution {
+	readonly backend: string;
+	readonly sessionId: string;
+	readonly generation: number;
+	softInterrupt(content: string, urgent?: boolean): Promise<void>;
+	cancelSoftInterrupts(): Promise<void>;
+}
 /**
  * Prewalk switches an active session one-way from its starting model to a
  * fast/cheap target after implementation begins.
@@ -115,7 +124,6 @@ export interface InitialRetryFallbackState {
 	originalSelector: string;
 	/** Thinking selector configured for the unavailable primary. */
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
-	/** Prevent cooldown restoration when startup selected this fallback from live usage health. */
 	pinned?: boolean;
 }
 
@@ -191,8 +199,6 @@ export interface AgentSessionConfig {
 	builtInToolNames?: Iterable<string>;
 	/** MCP names whose initial registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
-	/** Updates tool-session predicates from the live active tool set. */
-	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Registers the built-in write transport when it is needed at runtime. */
 	ensureWriteRegistered?: () => Promise<boolean>;
 	/** Reports whether the registered write tool is currently transport-only. */
@@ -236,6 +242,8 @@ export interface AgentSessionConfig {
 	xdev?: XdevState;
 	/** Names pinned top-level during runtime repartitioning. */
 	presentationPinnedToolNames?: ReadonlySet<string>;
+	/** Updates the live tool-activation predicate after runtime repartitioning. */
+	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Accessor for live MCP server instructions. */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	/** Time-traveling stream-rule manager. */

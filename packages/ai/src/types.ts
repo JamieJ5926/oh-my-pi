@@ -930,6 +930,22 @@ export interface ContextSnapshot {
 	lastMessageTimestamp?: number;
 }
 
+export interface ProviderCallAttempt {
+	ordinal: number;
+	status?: number;
+	proxyTraceId?: string;
+	proxyRequestId?: string;
+	joinKey?: string;
+	providerRequestId?: string;
+}
+
+export interface ProviderCallEvidence {
+	version: 1;
+	id: string;
+	attempts: ProviderCallAttempt[];
+	outcome: "completed" | "error" | "aborted";
+}
+
 export interface AssistantMessage {
 	role: "assistant";
 	content: (
@@ -947,6 +963,7 @@ export interface AssistantMessage {
 	contextSnapshot?: ContextSnapshot;
 	retryRecovery?: AssistantRetryRecovery;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
+	providerCall?: ProviderCallEvidence;
 	/**
 	 * Name of the upstream provider an aggregator routed this request to, as
 	 * reported in the response (e.g. OpenRouter's top-level `provider` field:

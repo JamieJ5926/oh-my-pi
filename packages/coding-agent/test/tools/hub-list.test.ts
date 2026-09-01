@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createSessionAddress } from "@oh-my-pi/pi-coding-agent/bridge/core/address";
 import { AgentProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/agent-protocol";
 import { HistoryProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/history-protocol";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
@@ -1557,10 +1558,19 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 		await Bun.write(artifactB, "B OUTPUT");
 
 		const registry = AgentRegistry.global();
+		const lifecycle = AgentLifecycleManager.global();
+		const ownerAddress = createSessionAddress({
+			namespace: "omp",
+			host: "test",
+			process: "hub-list-test",
+			backend: "coding-agent",
+			session: "main",
+			generation: 1,
+		});
+		let unregisterOwner: (() => Promise<void>) | undefined;
 		const readdirs: string[] = [];
 		spyOnReaddirs(readdirs);
 		try {
-			// B's scan runs first and restores the shared id: the process-global
 			// Worker ref points at B's transcript (and B's artifacts dir wins the
 			// agent:// scan before A's session is even registered).
 			await ensurePersistedRoster(registry, rootB);
@@ -1596,15 +1606,18 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 			expect(artifact.content).toBe("A OUTPUT");
 			expect(artifact.sourcePath).toBe(artifactA);
 			expect(countReaddirs(readdirs, scanDir(rootA))).toBe(1);
+			let delivered: string[] = [];
 
 			// A direct send without a prior list revives A's parked Worker: the
 			// refreshed ref is what the cold revive (persisted-subagent factory)
 			// and the bus delivery are bound to.
-			let delivered: string[] = [];
-			AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
-				async () => async () => fakeRevivedSession(delivered),
-				0,
-			);
+			unregisterOwner = lifecycle.registerPersistedSubagentReviverOwner({
+				address: ownerAddress,
+				ownerAgentId: MAIN_AGENT_ID,
+				factory: async () => async () => fakeRevivedSession(delivered),
+				idleTtlMs: 0,
+				scope: "global",
+			});
 			const sent = await executeSend(
 				{ registry, senderId: MAIN_AGENT_ID, settings: Settings.isolated(), sessionFileHint: rootA },
 				{ to: "Worker", message: "wake A" },
@@ -1666,6 +1679,7 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 			expect(countReaddirs(readdirs, scanDir(rootB))).toBe(2);
 			expect(countReaddirs(readdirs, scanDir(rootA))).toBe(1);
 		} finally {
+			await unregisterOwner?.();
 			spyOn(fs.promises, "readdir").mockRestore();
 		}
 	}, 15_000);
@@ -1747,6 +1761,7 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 			id: "Worker",
 			displayName: "task",
 			kind: "sub",
+			parentId: MAIN_AGENT_ID,
 			session: null,
 			sessionFile: childB,
 			status: "parked",
@@ -1761,19 +1776,34 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 		expect(history.sourcePath).toBe(childB);
 		expect(history.content).toContain("secret-B-line");
 
-		// A send with an unresolvable caller root still delivers (in-memory refs).
 		const delivered: string[] = [];
-		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
-			async () => async () => fakeRevivedSession(delivered),
-			0,
-		);
-		const sent = await executeSend(
-			{ registry, senderId: MAIN_AGENT_ID, settings: Settings.isolated(), sessionFileHint: missingRoot },
-			{ to: "Worker", message: "wake in-memory" },
-		);
-		expect(sent.isError).toBeFalsy();
-		expect(sent.details?.receipts).toEqual([{ to: "Worker", outcome: "revived" }]);
-		expect(delivered).toEqual(["wake in-memory"]);
+		const lifecycle = AgentLifecycleManager.global();
+		const ownerAddress = createSessionAddress({
+			namespace: "omp",
+			host: "test",
+			process: "hub-list-test-missing",
+			backend: "coding-agent",
+			session: "main",
+			generation: 1,
+		});
+		const unregisterOwner = lifecycle.registerPersistedSubagentReviverOwner({
+			address: ownerAddress,
+			ownerAgentId: MAIN_AGENT_ID,
+			factory: async () => async () => fakeRevivedSession(delivered),
+			idleTtlMs: 0,
+			scope: "global",
+		});
+		try {
+			const sent = await executeSend(
+				{ registry, senderId: MAIN_AGENT_ID, settings: Settings.isolated(), sessionFileHint: missingRoot },
+				{ to: "Worker", message: "wake in-memory" },
+			);
+			expect(sent.isError).toBeFalsy();
+			expect(sent.details?.receipts).toEqual([{ to: "Worker", outcome: "revived" }]);
+			expect(delivered).toEqual(["wake in-memory"]);
+		} finally {
+			await unregisterOwner();
+		}
 
 		// Unknown ids still fail with the same guided error, and sends to them
 		// still produce a failed receipt — never a throw.

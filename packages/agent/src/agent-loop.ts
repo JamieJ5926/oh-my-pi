@@ -1179,8 +1179,7 @@ async function runLoopBody(
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
 				}
-
-				if (!turnOpen) {
+                if (!turnOpen) {
 					stream.push({ type: "turn_start" });
 					emitInputMessages(stream, turnMessages);
 					turnOpen = true;
@@ -1667,13 +1666,33 @@ async function streamAssistantResponse(
 	// for telemetry (`ChatUsageEvent.headers`, gateway auto-detection) without
 	// stealing them from the configured hook.
 	let capturedHeaders: Readonly<Record<string, string>> | undefined;
+	const providerCallId = crypto.randomUUID();
+	const providerAttempts: Array<{
+		ordinal: number;
+		status?: number;
+		proxyTraceId?: string;
+		proxyRequestId?: string;
+		joinKey?: string;
+		providerRequestId?: string;
+	}> = [];
 	const userOnResponse = config.onResponse;
 	const captureOnResponse: AgentLoopConfig["onResponse"] = (response, modelInfo) => {
 		capturedHeaders = response.headers;
+		const header = Object.entries(response.headers).find(([key]) => key.toLowerCase() === "x-cpa-trace-id")?.[1];
+		const proxyRequestId = header?.match(/([0-9a-fA-F]{8})$/)?.[1]?.toLowerCase();
+		providerAttempts.push({
+			ordinal: providerAttempts.length + 1,
+			status: response.status,
+			...(header ? { proxyTraceId: header } : {}),
+			...(proxyRequestId ? { proxyRequestId, joinKey: `cli-proxy-request:${proxyRequestId}` } : {}),
+			...(response.requestId ? { providerRequestId: response.requestId } : {}),
+		});
 		return userOnResponse?.(response, modelInfo);
 	};
 
 	const finishChat = async (message: AssistantMessage): Promise<void> => {
+		const outcome = message.stopReason === "aborted" ? "aborted" : message.stopReason === "error" ? "error" : "completed";
+		message.providerCall = { version: 1, id: providerCallId, attempts: providerAttempts, outcome };
 		await finishChatSpan(telemetry, chatSpan, message, {
 			stepNumber: chatStepNumber,
 			serviceTier: effectiveServiceTier,
@@ -1813,11 +1832,11 @@ async function streamAssistantResponse(
 						} else {
 							context.messages.push(finalMessage);
 						}
+						await finishChat(finalMessage);
 						if (!addedPartial) {
 							stream.push({ type: "message_start", message: snapshotAssistantMessage(finalMessage) });
 						}
 						stream.push({ type: "message_end", message: snapshotAssistantMessage(finalMessage) });
-						await finishChat(finalMessage);
 						return finalMessage;
 					}
 					if (requestSignal?.aborted) {
@@ -1907,9 +1926,11 @@ async function streamAssistantResponse(
 			trailing = snapshotAssistantMessage(trailing);
 			if (addedPartial) {
 				context.messages[context.messages.length - 1] = trailing;
-				stream.push({ type: "message_end", message: snapshotAssistantMessage(trailing) });
 			}
 			await finishChat(trailing);
+			if (addedPartial) {
+				stream.push({ type: "message_end", message: snapshotAssistantMessage(trailing) });
+			}
 			return trailing;
 		});
 	} catch (err) {
@@ -2239,6 +2260,52 @@ async function prepareToolCallDispatch(
 	}
 	return prepared;
 }
+
+/**
+ * Canonical single-call host dispatch: same prepare/runTool policy as a
+ * one-item executeToolCalls batch. Callers must not invoke tool.execute.
+ */
+export async function executeSingleToolCall(
+	context: AgentContext,
+	toolCall: AgentToolCall,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+	telemetry?: AgentTelemetry,
+): Promise<ToolResultMessage> {
+	const assistantMessage = {
+		role: "assistant" as const,
+		content: [toolCall],
+		api: "openai-completions" as const,
+		provider: "openai",
+		model: config.model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse" as const,
+		timestamp: Date.now(),
+	};
+	const { toolResults } = await executeToolCalls(
+		context,
+		assistantMessage,
+		signal,
+		stream,
+		config,
+		telemetry,
+		undefined,
+	);
+	const result = toolResults[0];
+	if (!result) {
+		throw new Error(`executeSingleToolCall produced no result for ${toolCall.id}`);
+	}
+	return result;
+}
+
 /**
  * Execute tool calls from an assistant message.
  */

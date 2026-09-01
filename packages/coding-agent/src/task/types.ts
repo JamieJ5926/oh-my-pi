@@ -164,7 +164,7 @@ export interface TaskItem {
 	effort?: TaskEffort;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
-	/** Validation behavior for a caller-provided or inherited output schema. */
+	/** Enforcement policy for structured output schema validation. */
 	schemaMode?: "permissive" | "strict";
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
@@ -181,6 +181,7 @@ export const taskSchema = type({
 	"isolated?": "boolean",
 	"+": "delete",
 });
+
 const taskSchemaNoIsolation = type({
 	"name?": "string",
 	agent: "string = 'task'",

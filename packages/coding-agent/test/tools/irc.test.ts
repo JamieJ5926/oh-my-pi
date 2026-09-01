@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockHandler } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { createSessionAddress } from "@oh-my-pi/pi-coding-agent/bridge/core/address";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
@@ -1308,6 +1309,7 @@ describe("IRC", () => {
 			const ephemeralSpy = vi
 				.spyOn(session, "runEphemeralTurn")
 				.mockResolvedValue({ replyText: "auto answer", assistantMessage: {} as never });
+			const sendSpy = vi.spyOn(bus, "send");
 			const autoReplyEvent = new Promise<CustomMessage>(resolve => {
 				session.subscribe(event => {
 					if (event.type === "irc_message" && event.message.customType === "irc:autoreply") {
@@ -1336,6 +1338,54 @@ describe("IRC", () => {
 			// The recipient records what was said on its behalf.
 			const record = await autoReplyEvent;
 			expect(record.details).toMatchObject({ to: "0-Sub", body: "auto answer" });
+			const localAutoReplyCall = sendSpy.mock.calls.find(([msg]) => msg.body === "auto answer");
+			expect(localAutoReplyCall?.[0]).toMatchObject({
+				from: "Main",
+				to: "0-Sub",
+				body: "auto answer",
+				replyTo: reply?.replyTo,
+			});
+		});
+
+		it("auto-replies to a remote source while preserving message correlation", async () => {
+			const { session } = createRealSession({ "async.enabled": false });
+			sessions.push(session);
+			registry.register({ id: "RemoteRecipient", displayName: "remote recipient", kind: "main", session });
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			vi.spyOn(session, "runEphemeralTurn").mockResolvedValue({
+				replyText: "remote auto answer",
+				assistantMessage: {} as never,
+			});
+			const remoteSource = createSessionAddress({
+				namespace: "omp",
+				host: "remote-host",
+				process: "remote-process",
+				backend: "pi",
+				session: "remote-session",
+				generation: 1,
+			});
+			const sendSpy = vi.spyOn(bus, "send").mockResolvedValue({ to: "remote-agent", outcome: "injected" });
+
+			await session.deliverIrcMessage(
+				{
+					id: "remote-msg-1",
+					from: "remote-agent",
+					to: "RemoteRecipient",
+					body: "remote question",
+					ts: Date.now(),
+					remoteSource,
+				},
+				{ expectsReply: true },
+			);
+			await session.waitForIrcAutoReplies();
+
+			expect(sendSpy).toHaveBeenCalledTimes(1);
+			expect(sendSpy.mock.calls[0]?.[0]).toMatchObject({
+				from: "RemoteRecipient",
+				to: remoteSource,
+				body: "remote auto answer",
+				replyTo: "remote-msg-1",
+			});
 		});
 
 		it("does not auto-reply when async execution is enabled or the sender does not await", async () => {

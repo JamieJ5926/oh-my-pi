@@ -330,6 +330,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * the run is canceled or its deadline expires.
 	 */
 	beforeModelCall?: AgentBeforeModelCall;
+	/**
+	 * Observe the final provider-bound context after synchronization, provider
+	 * transforms, and beforeModelCall mutation, but before transport dispatch.
+	 * The observer must not mutate the context.
+	 */
+	onProviderContextReady?: (context: Context) => void | Promise<void>;
 
 	/**
 	 * Optional transform applied to tool call arguments before execution.

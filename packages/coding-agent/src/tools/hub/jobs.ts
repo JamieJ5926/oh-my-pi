@@ -7,6 +7,7 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
+import { toError } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager, AsyncJobType } from "../../async";
 import { settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
@@ -411,7 +412,7 @@ async function cancelAgentRegistration(
 		return {
 			id,
 			status: "already_completed",
-			message: `Agent ${id} could not be fully cancelled: ${error instanceof Error ? error.message : String(error)}.`,
+			message: `Agent ${id} could not be fully cancelled: ${toError(error).message}.`,
 		};
 	}
 	return { id, status: "cancelled", message: `Cancelled agent ${id} (killed session, dropped registration).` };

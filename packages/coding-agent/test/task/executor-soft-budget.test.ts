@@ -505,4 +505,21 @@ describe("resolveSoftRequestBudget", () => {
 		expect(resolveSoftRequestBudget("scout", -5)).toBe(0);
 		expect(resolveSoftRequestBudget("scout", 20.9)).toBe(20);
 	});
+
+	it("caps read-only roles at their bundled ceiling of 15", () => {
+		for (const role of ["explorer", "researcher", "watcher", "research-gemini", "research-grok", "research-luna"]) {
+			expect(resolveSoftRequestBudget(role, 200)).toBe(15);
+			expect(resolveSoftRequestBudget(role, 15)).toBe(15);
+			expect(resolveSoftRequestBudget(role, 10)).toBe(10);
+			expect(resolveSoftRequestBudget(role, 0)).toBe(0);
+		}
+	});
+
+	it("does not cap manager, synthesizer, or reviewer (no bundled entry)", () => {
+		expect(resolveSoftRequestBudget("manager", 200)).toBe(200);
+		expect(resolveSoftRequestBudget("synthesizer", 200)).toBe(200);
+		expect(resolveSoftRequestBudget("reviewer", 200)).toBe(200);
+		expect(resolveSoftRequestBudget("reviewer-sol", 200)).toBe(200);
+		expect(resolveSoftRequestBudget("implementer", 200)).toBe(200);
+	});
 });

@@ -19,6 +19,7 @@ import {
 	toError,
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "../task/types";
+import type { BridgeSessionMetadata } from "./agent-session";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
@@ -396,6 +397,7 @@ interface SessionManagerStateSnapshot {
 	onDisk: boolean;
 	needsRewrite: boolean;
 	draftOnlySessionCleanupArmed: boolean;
+	bridgeMetadata?: BridgeSessionMetadata;
 	fallbackRuntimeOnly: boolean;
 	header: SessionHeader;
 	entries: SessionEntry[];
@@ -474,6 +476,7 @@ export class SessionManager {
 	#titleSource: SessionTitleSource | undefined;
 	#sessionFile: string | undefined;
 	#header!: SessionHeader;
+	#bridgeMetadata: BridgeSessionMetadata | undefined;
 	#titleUpdatedAt = "";
 	#hasTitleSlot = true;
 	#entries: SessionEntry[] = [];
@@ -1298,6 +1301,7 @@ export class SessionManager {
 			onDisk: this.#fileIsCurrent,
 			needsRewrite: this.#rewriteRequired,
 			draftOnlySessionCleanupArmed: this.#draftOnlySessionCleanupArmed,
+			bridgeMetadata: this.#bridgeMetadata,
 			fallbackRuntimeOnly: this.#fallbackRuntimeOnly,
 			// Entries are snapshotted by reference (switch/reload replaces the
 			// array wholesale). The header is cloned: moveTo mutates it in place
@@ -1341,6 +1345,7 @@ export class SessionManager {
 		this.#forceFileCreation = snapshot.onDisk;
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
+		this.#bridgeMetadata = snapshot.bridgeMetadata;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
 		this.#sessionName = snapshot.sessionName;
@@ -2098,6 +2103,15 @@ export class SessionManager {
 		return this.#artifactManagerForSession();
 	}
 
+
+	/** Authoritative bridge metadata supplied by the messaging/task owners. */
+	getBridgeMetadata(): BridgeSessionMetadata | undefined {
+		return this.#bridgeMetadata;
+	}
+
+	setBridgeMetadata(metadata: BridgeSessionMetadata | undefined): void {
+		this.#bridgeMetadata = metadata;
+	}
 	async allocateArtifactPath(toolType: string): Promise<{ id?: string; path?: string }> {
 		return (await this.#artifactManagerForSession()?.allocatePath(toolType)) ?? {};
 	}

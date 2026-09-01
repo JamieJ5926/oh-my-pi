@@ -55,7 +55,15 @@ import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
-import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
+import {
+	findRoleProfile,
+	resolveEffectiveSubagentPolicy,
+	runStructuredSubagent,
+	StructuredSubagentError,
+} from "./structured-subagent";
+import { createJCodeExecutionBackendFactory } from "../bridge/backends/jcode";
+import type { ExecutionBackendFactory, ExecutionBackendRegistry } from "../bridge/index";
+import type { RoleProfileConfig } from "../config/settings-schema";
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -100,6 +108,41 @@ function addUsageTotals(target: Usage, usage: Partial<Usage>): void {
 	target.cost.cacheRead += cost.cacheRead;
 	target.cost.cacheWrite += cost.cacheWrite;
 	target.cost.total += cost.total;
+}
+
+export function jcodeExecutionRouteKey(input: {
+	providerProfile: string;
+	model?: string;
+	toolPolicyFingerprint?: string;
+	generationOwner: string;
+}): string {
+	return [input.providerProfile, input.model ?? "", input.toolPolicyFingerprint ?? "", input.generationOwner].join(
+		"\0",
+	);
+}
+
+export function createCallerScopedJcodeRegistry(createFactory: (routeKey: string) => ExecutionBackendFactory): {
+	registryFor(routeKey: string): ExecutionBackendRegistry;
+	reuseCount: () => number;
+	close: () => Promise<void>;
+} {
+	const factories = new Map<string, ExecutionBackendFactory>();
+	return {
+		registryFor(routeKey: string) {
+			let factory = factories.get(routeKey);
+			if (!factory) {
+				factory = createFactory(routeKey);
+				factories.set(routeKey, factory);
+			}
+			return { get: backend => (backend === "jcode" ? factory : undefined) };
+		},
+		reuseCount: () => factories.size,
+		async close() {
+			const all = [...factories.values()];
+			factories.clear();
+			for (const factory of all) await factory.close?.();
+		},
+	};
 }
 
 // Re-export types and utilities
@@ -279,14 +322,14 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
 		return params.tasks;
 	}
-const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
-if ("taskClass" in params) item.taskClass = params.taskClass;
-if ("stragglerPolicy" in params) item.stragglerPolicy = params.stragglerPolicy;
-if ("outputSchema" in params) item.outputSchema = params.outputSchema;
-if ("schemaMode" in params) item.schemaMode = params.schemaMode;
-if ("effort" in params) item.effort = params.effort;
-if ("isolated" in params) item.isolated = params.isolated;
-return [item];
+	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
+	if ("taskClass" in params) item.taskClass = params.taskClass;
+	if ("stragglerPolicy" in params) item.stragglerPolicy = params.stragglerPolicy;
+	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
+	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
+	if ("effort" in params) item.effort = params.effort;
+	if ("isolated" in params) item.isolated = params.isolated;
+	return [item];
 }
 
 /**
@@ -307,12 +350,12 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("stragglerPolicy" in item) spawn.stragglerPolicy = item.stragglerPolicy;
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
-	if ("effort" in item) spawn.effort = item.effort;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
 	} else if ("isolated" in params) {
 		spawn.isolated = params.isolated;
 	}
+
 	return spawn;
 }
 
@@ -585,6 +628,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly mergeCallAndResult = true;
 	readonly #discoveredAgents: AgentDefinition[];
 	readonly #blockedAgent: string | undefined;
+	#jcodeFactories = new Map<string, ExecutionBackendFactory>();
+	#jcodeRegistry: ExecutionBackendRegistry | undefined;
 	/**
 	 * One semaphore per TaskTool instance (i.e. per session): bounds concurrent
 	 * subagents across parallel `task` calls within the session. Resized in
@@ -649,6 +694,78 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			this.#spawnSemaphore = new Semaphore(max);
 		}
 		return this.#spawnSemaphore;
+	}
+
+	#jcodeRouteKey(profile: RoleProfileConfig, model: string | undefined, generationOwner: string): string {
+		const toolNames = [...new Set(profile.tools)].sort();
+		return jcodeExecutionRouteKey({
+			providerProfile: profile.jcode_provider_profile?.trim() ?? profile.jcode_provider?.trim() ?? "",
+			model,
+			toolPolicyFingerprint: JSON.stringify({ restrict: profile.restrictToolNames === true, tools: toolNames }),
+			generationOwner,
+		});
+	}
+
+	#ensureJcodeFactory(
+		profile: RoleProfileConfig,
+		modelOverride: string | string[] | undefined,
+		generationOwner: string,
+	): ExecutionBackendFactory {
+		const providerProfile = profile.jcode_provider_profile?.trim();
+		const provider = profile.jcode_provider?.trim();
+		if (!providerProfile && !provider) {
+			throw new StructuredSubagentError(
+				"preflight",
+				"roleProfiles.jcode_provider or roleProfiles.jcode_provider_profile is required when execution_backend is jcode",
+			);
+		}
+		const model = Array.isArray(modelOverride) ? modelOverride[0] : modelOverride;
+		const key = this.#jcodeRouteKey(profile, model, generationOwner);
+		const existing = this.#jcodeFactories.get(key);
+		if (existing) return existing;
+		const hostTools = [...new Set(profile.tools)]
+			.map(name => this.session.getToolByName?.(name))
+			.filter((tool): tool is NonNullable<typeof tool> => tool !== undefined)
+			.map(tool => ({ name: tool.name, description: tool.description ?? "", input_schema: tool.parameters }));
+		const factory = createJCodeExecutionBackendFactory({
+			cwd: this.session.cwd,
+			provider,
+			providerProfile,
+			model,
+			hostTools,
+			hostToolDispatcher: call =>
+				this.session.dispatchExternalToolCall?.(call) ??
+				Promise.resolve({ ok: false, error: "session unavailable" }),
+		});
+		this.#jcodeFactories.set(key, factory);
+		return factory;
+	}
+
+	#jcodeRegistryFor(factory: ExecutionBackendFactory): ExecutionBackendRegistry {
+		return {
+			get: backend => (backend === "jcode" ? factory : undefined),
+		};
+	}
+
+	#spawnBackendFields(params: TaskParams): {
+		executionBackend?: "local" | "pi" | "jcode";
+		executionBackendRegistry?: ExecutionBackendRegistry;
+	} {
+		const agentName = params.agent?.trim();
+		if (!agentName) return {};
+		const profiles = this.session.settings.get("roleProfiles") as Record<string, RoleProfileConfig> | undefined;
+		const profile = findRoleProfile(profiles, agentName);
+		const backend = profile?.execution_backend ?? "local";
+		if (backend !== "jcode") return { executionBackend: backend };
+		const factory = this.#ensureJcodeFactory(profile!, undefined, this.session.getAgentId?.() ?? "task");
+		return { executionBackend: "jcode", executionBackendRegistry: this.#jcodeRegistryFor(factory) };
+	}
+
+	async closeJcodeBackends(): Promise<void> {
+		const factories = [...this.#jcodeFactories.values()];
+		this.#jcodeFactories.clear();
+		this.#jcodeRegistry = undefined;
+		for (const factory of factories) await factory.close?.();
 	}
 
 	#releaseSpawnSemaphore(): void {
@@ -1173,7 +1290,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				const acquiredAt = Date.now();
 				if (!semaphoreHeld || runSignal.aborted) {
 					releasePermit();
+					progress.status = "aborted";
+					progress.durationMs = Date.now() - startedAt;
 					settleLogical(true);
+					await reportProgress(
+						"Background task aborted before execution.",
+						buildDetails() as unknown as Record<string, unknown>,
+					);
 					throw new Error("Aborted before execution");
 				}
 				const launchReplacement = (): Promise<boolean> => {
@@ -1181,7 +1304,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					replacementPromise = (async () => {
 						if (attemptState.current !== attempt || attempt >= retryLimit) return false;
 						const nextAttempt = attempt + 1;
-						const retryOutputManager = this.session.agentOutputManager ?? new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
+						const retryOutputManager =
+							this.session.agentOutputManager ??
+							new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
 						this.session.agentOutputManager ??= retryOutputManager;
 						const replacementId = await retryOutputManager.allocate(agentId);
 						try {
@@ -1268,8 +1393,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					// (results: []) — treat it as a failure, not success.
 					const resultFailed = !singleResult || (singleResult.aborted ?? false) || singleResult.exitCode !== 0;
 					progress.status =
-						(singleResult?.aborted && runSignal.reason === STRAGGLER_CANCEL_REASON && attempt >= retryLimit &&
-						spawnParams.stragglerPolicy?.classifyExhaustedAsMissing === true)
+						singleResult?.aborted &&
+						runSignal.reason === STRAGGLER_CANCEL_REASON &&
+						attempt >= retryLimit &&
+						spawnParams.stragglerPolicy?.classifyExhaustedAsMissing === true
 							? "missing"
 							: singleResult?.aborted
 								? "aborted"
@@ -1310,7 +1437,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				} catch (error) {
 					const isStraggler = runSignal.reason === STRAGGLER_CANCEL_REASON;
 					if (attemptState.current !== attempt) return "Superseded attempt.";
-					if (isStraggler && await launchReplacement()) return "Straggler attempt replaced.";
+					if (isStraggler && (await launchReplacement())) return "Straggler attempt replaced.";
 					if (isStraggler && attemptState.current !== attempt) return "Straggler attempt replaced.";
 					if (isStraggler && spawnParams.stragglerPolicy?.classifyExhaustedAsMissing) {
 						progress.status = "missing";
@@ -1318,9 +1445,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						progress.status = "failed";
 					}
 					settleLogical(true);
-					const statusText = progress.status === "missing"
-						? `Background task ${agentId} missing after straggler retry.`
-						: `Background task ${agentId} failed.`;
+					const statusText =
+						progress.status === "missing"
+							? `Background task ${agentId} missing after straggler retry.`
+							: `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
 					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
@@ -1342,7 +1470,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				onProgress: text => {
 					onUpdate?.({ content: [{ type: "text", text }], details: buildDetails() });
 				},
-			}
+			},
 		);
 	}
 
@@ -1516,7 +1644,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return this.#runSpawn(toolCallId, params, signal, onUpdate, preAllocatedId, spawnIndex, detached, launchTiming);
 	}
 
-	/** Spawn a fresh subagent and run it to completion. */
 	async #runSpawn(
 		toolCallId: string,
 		params: TaskParams,
@@ -1541,8 +1668,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
-				// `name` is the spawn handle: keep it for id allocation when this
-				// path did not pre-reserve one. Do not treat it as a HUD description.
 				identity: { id: preAllocatedId, label: params.name },
 				index: spawnIndex,
 				parentToolCallId: toolCallId,
@@ -1567,6 +1692,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						},
 					});
 				},
+				...this.#spawnBackendFields(params),
 			});
 			return this.#buildResultPayload(
 				execution.result,

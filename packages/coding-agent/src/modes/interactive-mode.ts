@@ -534,21 +534,41 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 				const displayId = formatTaskId(session.id);
 				const role = session.agent ?? session.progress?.agent;
 				const badge = agentTypeBadge(role, theme);
-				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}${badge}`;
+				const execution = session.execution;
+				const resolvedModel = execution?.attribution?.resolvedModel;
+				const requestedModel = execution?.attribution?.requestedModel;
+				const model = resolvedModel ?? requestedModel;
+				const totalTokens =
+					execution?.usage?.totalTokens ??
+					((execution?.usage?.inputTokens ?? 0) + (execution?.usage?.outputTokens ?? 0) || undefined);
+				const executionDetails = [
+					execution?.backend,
+					model,
+					execution?.currentTool ? `tool:${execution.currentTool}` : undefined,
+					totalTokens === undefined ? undefined : `${totalTokens} tok`,
+				].filter((value): value is string => Boolean(value));
+				const executionBadge =
+					executionDetails.length > 0 ? theme.fg("muted", ` [${executionDetails.join(" · ")}]`) : "";
+				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}${badge}${executionBadge}`;
 				const description = session.description?.trim() || session.progress?.description?.trim();
 				const distinctDescription =
 					description && !labelEchoesHandle(session.id, description) ? description : undefined;
 				if (distinctDescription) {
 					const budget = Math.max(
 						TRUNCATE_LENGTHS.SHORT,
-						columns - visibleWidth(displayId) - visibleWidth(Bun.stripANSI(badge)) - 10,
+						columns -
+							visibleWidth(displayId) -
+							visibleWidth(Bun.stripANSI(badge)) -
+							visibleWidth(Bun.stripANSI(executionBadge)) -
+							10,
 					);
 					const formatted = replaceTabs(distinctDescription).replace(/\s*[\r\n]+\s*/g, " ↵ ");
 					line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
 				} else {
 					// No spawn description: fall back to a muted task preview, same as
 					// the inline task rows when a row has no label.
-					const taskPreview = session.progress?.task?.trim();
+					const taskPreview =
+						session.progress?.task?.trim() || execution?.textPreview?.trim() || execution?.error?.trim();
 					if (taskPreview && !labelEchoesHandle(session.id, taskPreview)) {
 						const formatted = replaceTabs(taskPreview).replace(/\s*[\r\n]+\s*/g, " ↵ ");
 						line += ` ${theme.fg("muted", truncateToWidth(formatted, TRUNCATE_LENGTHS.SHORT))}`;

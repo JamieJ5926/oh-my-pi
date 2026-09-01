@@ -25,9 +25,9 @@ import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
-import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
+import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
 import {
@@ -520,40 +520,37 @@ export class CollabHost {
 		this.#scheduleStateBroadcast();
 	}
 
-	#buildState(): CollabSessionState {
-		const session = this.#ctx.session;
-		// Context numbers come from the status line's memoized breakdown so guests
-		// render exactly the same anchored, provider-real count the host's own
-		// status line shows.
-		const breakdown = this.#ctx.statusLine.getCachedContextBreakdown();
-		const tokens = breakdown.usedTokens ?? 0;
-		return {
-			isStreaming: session.isStreaming,
-			isAborting: session.isAborting,
-			queuedMessageCount: session.queuedMessageCount,
-			sessionName: session.sessionName,
-			cwd: this.#ctx.sessionManager.getCwd(),
-			model: session.model,
-			thinkingLevel: session.thinkingLevel,
-			contextUsage: {
-				tokens,
-				contextWindow: breakdown.contextWindow,
-				percent: breakdown.contextWindow > 0 ? (tokens / breakdown.contextWindow) * 100 : 0,
-			},
-			participants: this.participants,
-		};
-	}
+  #buildState(): CollabSessionState {
+    const session = this.#ctx.session;
+    const breakdown = this.#ctx.statusLine.getCachedContextBreakdown();
+    const tokens = breakdown.usedTokens ?? 0;
+    return {
+      isStreaming: session.isStreaming,
+      isAborting: session.isAborting,
+      queuedMessageCount: session.queuedMessageCount,
+      sessionName: session.sessionName,
+      cwd: this.#ctx.sessionManager.getCwd(),
+      model: session.model,
+      thinkingLevel: session.thinkingLevel,
+      contextUsage: {
+        tokens,
+        contextWindow: breakdown.contextWindow,
+        percent: breakdown.contextWindow > 0 ? (tokens / breakdown.contextWindow) * 100 : 0,
+      },
+      participants: this.participants,
+    };
+  }
 
-	#onEventForState(event: AgentSessionEvent): void {
-		if (!STATE_TRIGGER_EVENTS[event.type]) return;
-		this.#scheduleStateBroadcast();
-		if (event.type === "agent_start" && !this.#streamingInterval) {
-			this.#streamingInterval = setInterval(() => this.#scheduleStateBroadcast(), STREAMING_STATE_INTERVAL_MS);
-		} else if (event.type === "agent_end" && this.#streamingInterval) {
-			clearInterval(this.#streamingInterval);
-			this.#streamingInterval = null;
-		}
-	}
+  #onEventForState(event: AgentSessionEvent): void {
+    if (!STATE_TRIGGER_EVENTS[event.type]) return;
+    this.#scheduleStateBroadcast();
+    if (event.type === "agent_start" && !this.#streamingInterval) {
+      this.#streamingInterval = setInterval(() => this.#scheduleStateBroadcast(), STREAMING_STATE_INTERVAL_MS);
+    } else if (event.type === "agent_end" && this.#streamingInterval) {
+      clearInterval(this.#streamingInterval);
+      this.#streamingInterval = null;
+    }
+  }
 
 	#snapshotAgents(): AgentSnapshot[] {
 		return (

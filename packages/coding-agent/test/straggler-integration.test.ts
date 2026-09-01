@@ -92,6 +92,7 @@ describe("AsyncJobManager straggler integration", () => {
 			const stragglerPolicy = { retryLimit: 1, classifyExhaustedAsMissing: true };
 			let currentAttempt = 0;
 			let logicalStatus: "running" | "missing" = "running";
+			const readLogicalStatus = (): "running" | "missing" => logicalStatus;
 			const registrations: Array<{ id: string; attempt: number; logicalItemId: string }> = [];
 
 			const registerAttempt = (): string => {
@@ -145,7 +146,7 @@ describe("AsyncJobManager straggler integration", () => {
 
 			expect(manager.getJob(firstJobId)?.status).toBe("cancelled");
 			expect(manager.getJob(replacementJobId)?.status).toBe("cancelled");
-			expect(logicalStatus).toBe("missing");
+			expect(readLogicalStatus()).toBe("missing");
 			console.log(
 				JSON.stringify({
 					test: "straggler-retry-exhaustion",
@@ -154,7 +155,7 @@ describe("AsyncJobManager straggler integration", () => {
 					registrations,
 					firstStatus: manager.getJob(firstJobId)?.status,
 					replacementStatus: manager.getJob(replacementJobId)?.status,
-					finalLogicalStatus: logicalStatus,
+					finalLogicalStatus: readLogicalStatus(),
 					stragglerReason: "STRAGGLER_CANCEL_REASON",
 				}),
 			);

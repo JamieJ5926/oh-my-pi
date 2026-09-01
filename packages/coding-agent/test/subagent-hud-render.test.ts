@@ -23,6 +23,7 @@ import {
 	type AgentProgress,
 	type SubagentLifecyclePayload,
 	type SubagentProgressPayload,
+	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "@oh-my-pi/pi-coding-agent/task";
@@ -237,6 +238,45 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("Detached: background work");
 		expect(out).toContain("FromProgress: background work");
 		expect(out).not.toContain("Inline");
+	});
+
+	it("shows live JCode model, tool, and usage details while ignoring stale backend events", () => {
+		const eventBus = new EventBus();
+		const registry = new SessionObserverRegistry();
+		registry.subscribeToEventBus(eventBus);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle("BridgeWorker", 0, "Inspect bridge wiring", true));
+
+		const attribution = {
+			requestedModel: "gpt-5.6-codex",
+			resolvedModel: "gpt-5.6-codex",
+			fallback: "no" as const,
+		};
+		const emit = (payload: object) => eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, payload);
+		emit({
+			id: "BridgeWorker",
+			backend: "jcode",
+			event: { kind: "tool-call", executionId: "BridgeWorker", sequence: 2, name: "agentgrep", attribution },
+		});
+		emit({
+			id: "BridgeWorker",
+			backend: "jcode",
+			event: {
+				kind: "usage",
+				executionId: "BridgeWorker",
+				sequence: 3,
+				usage: { inputTokens: 120, outputTokens: 30 },
+				attribution,
+			},
+		});
+		emit({
+			id: "BridgeWorker",
+			backend: "jcode",
+			event: { kind: "tool-call", executionId: "BridgeWorker", sequence: 1, name: "stale-tool", attribution },
+		});
+
+		const out = render(registry.getSessions());
+		expect(out).toContain("BridgeWorker [jcode · gpt-5.6-codex · tool:agentgrep · 150 tok]: Inspect bridge wiring");
+		expect(out).not.toContain("stale-tool");
 	});
 
 	it("renders nested ids as a breadcrumb and truncates long descriptions to the viewport", () => {

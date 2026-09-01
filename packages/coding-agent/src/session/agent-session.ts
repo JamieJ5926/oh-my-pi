@@ -40,6 +40,7 @@ import {
 	EventLoopKeepalive,
 	resolveTelemetry,
 	type StreamFn,
+	executeSingleToolCall,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	type ThinkingLevel,
 	type ToolChoiceDirective,
@@ -76,6 +77,8 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
+import { EventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import type { HostToolCall, HostToolOutcome } from "../bridge/backends/jcode/protocol";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -211,6 +214,10 @@ import {
 } from "../tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
 import type { TodoPhase } from "../tools/todo";
+import type { SessionAddress } from "../bridge/core/address";
+import type { DeliveryState } from "../bridge/core/envelope";
+import type { ResourceSnapshot } from "../bridge/runtime/resource-policy";
+
 import { ToolError } from "../tools/tool-errors";
 import { parseCommandArgs } from "../utils/command-args";
 import type { EditMode } from "../utils/edit-mode";
@@ -222,9 +229,13 @@ import { resumeCommand } from "../utils/resume-command";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
-import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
+import type {
+	AgentSessionEvent,
+	AgentSessionEventListener,
+} from "./agent-session-events";
 import type {
 	AgentSessionConfig,
+	ActiveExternalExecution,
 	AgentSessionDisposeOptions,
 	AsyncJobSnapshot,
 	CommandMetadataChangedListener,
@@ -246,6 +257,9 @@ import type {
 	SessionStats,
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
+export type { ActiveExternalExecution } from "./agent-session-types";
+
+
 import { writeArtifact } from "./artifacts";
 import {
 	ASYNC_INLINE_RESULT_MAX_CHARS,
@@ -352,9 +366,23 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
+
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
 
+
+/** Authoritative bridge projection supplied by messaging/task owners. */
+export interface BridgeSessionMetadata {
+	sessionAddress?: SessionAddress;
+	deliveryState?: DeliveryState;
+	executionBackend?: "local" | "pi" | "jcode";
+	requestedModel?: string;
+	resolvedModel?: string;
+	fallbackState?: "used" | "not-used" | "unobserved";
+	resourceSnapshot?: ResourceSnapshot;
+	canCancel?: boolean;
+	canResume?: boolean;
+}
 export * from "./agent-session-events";
 export * from "./agent-session-types";
 export type { AdvisorStats, PerAdvisorStat } from "./session-advisors";
@@ -586,6 +614,7 @@ export class AgentSession {
 	 * undefined to avoid reading the primary's jobs.
 	 */
 	readonly #asyncJobManager: AsyncJobManager | undefined;
+	readonly #bridgeMetadata: BridgeSessionMetadata | undefined;
 	/** Clears this session's owner delivery sink registration; set when a manager + agent id exist. */
 	#unregisterAsyncDeliverySink: (() => void) | undefined;
 	/**
@@ -600,6 +629,7 @@ export class AgentSession {
 	#ircWakeTurnObserver:
 		| ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
 		| undefined;
+	#activeExternalExecution: ActiveExternalExecution | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
@@ -685,6 +715,7 @@ export class AgentSession {
 	// on `agent_end` can fire its next `prompt` before #promptWithMessage's finally
 	#promptGeneration = 0;
 	#promptSequence = 0;
+	#todoAuthorityGeneration = 0;
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
@@ -1001,7 +1032,6 @@ export class AgentSession {
 			suppliedTitle: title,
 			statePlanFilePath: state.planFilePath,
 			readPlan: url => this.#readPlanFile(url),
-			listPlanFiles: () => this.#listPlanFiles(),
 		});
 		return {
 			content: [{ type: "text", text: "Plan ready for review." }],
@@ -1023,8 +1053,9 @@ export class AgentSession {
 	}
 
 	#codeModeState: { namespacesInfo?: unknown };
-
-	constructor(config: AgentSessionConfig) {
+	constructor(config: AgentSessionConfig & { bridgeMetadata?: BridgeSessionMetadata }) {
+		this.#bridgeMetadata = config.bridgeMetadata ?? config.sessionManager.getBridgeMetadata();
+		if (config.bridgeMetadata !== undefined) config.sessionManager.setBridgeMetadata(config.bridgeMetadata);
 		this.agent = config.agent;
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
@@ -1073,6 +1104,9 @@ export class AgentSession {
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			wakeForIrc: records => this.#wakeForIrc(records),
 			runEphemeralTurn: args => this.runEphemeralTurn(args),
+			activeExternalExecution: () => this.#activeExternalExecution,
+			sessionId: () => this.sessionId,
+			promptGeneration: () => this.#promptGeneration,
 		};
 		this.#irc = new IrcBridge(ircHost);
 		const prewalkHost: PrewalkCoordinatorHost = {
@@ -1111,6 +1145,7 @@ export class AgentSession {
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			promptGeneration: () => this.#promptGeneration,
+			todoAuthorityGeneration: () => this.#todoAuthorityGeneration,
 			hasPendingAsyncWake: () => this.#hasPendingAsyncWake(),
 			getActiveToolNames: () => this.getActiveToolNames(),
 			getEnabledToolNames: () => this.getEnabledToolNames(),
@@ -2513,7 +2548,7 @@ export class AgentSession {
 					message.customType,
 					message.content,
 					message.display,
-					message.details,
+					"details" in message ? message.details : undefined,
 					message.attribution ?? "agent",
 					// Preserve the initiating message's own timestamp: the entry
 					// otherwise records emission time, which on rebuild excludes
@@ -4093,6 +4128,7 @@ export class AgentSession {
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
+		this.#clearActiveExternalExecution();
 		this.#irc.flushPending();
 		this.yieldQueue.clear();
 		this.agent.setAsideMessageProvider(undefined);
@@ -4736,6 +4772,88 @@ export class AgentSession {
 		return this.#tools.getToolByName(name);
 	}
 
+	/**
+	 * Owner-mediated host tool dispatch. Uses Agent loop prepare/runTool
+	 * policy — never getToolByName()+tool.execute.
+	 */
+	async dispatchExternalToolCall(call: HostToolCall): Promise<HostToolOutcome> {
+		const generation = this.#promptGeneration;
+		if (this.#isDisposed) {
+			return { ok: false, error: "session disposed" };
+		}
+		const args =
+			call.arguments !== undefined &&
+			typeof call.arguments === "object" &&
+			call.arguments !== null &&
+			!Array.isArray(call.arguments)
+				? (call.arguments as Record<string, unknown>)
+				: { value: call.arguments };
+		const toolCall: AgentToolCall = {
+			type: "toolCall",
+			id: call.callId,
+			name: call.name,
+			arguments: args,
+		};
+		const abort = new AbortController();
+		const onAbort = () => abort.abort(call.signal.reason);
+		if (call.signal.aborted) abort.abort(call.signal.reason);
+		else call.signal.addEventListener("abort", onAbort, { once: true });
+		const stream = new EventStream<AgentEvent, AgentMessage[]>(
+			event => event.type === "agent_end",
+			event => (event.type === "agent_end" ? event.messages : []),
+		);
+		const unsub = this.agent.subscribe(event => {
+			this.agent.emitExternalEvent(event);
+		});
+		try {
+			const result = await executeSingleToolCall(
+				{
+					systemPrompt: this.agent.state.systemPrompt,
+					messages: this.agent.state.messages.slice(),
+					tools: this.agent.state.tools,
+				},
+				toolCall,
+				{
+					model: this.agent.state.model,
+					convertToLlm: messages => this.#convertToLlm(messages),
+					beforeToolCall: this.agent.beforeToolCall,
+					afterToolCall: this.agent.afterToolCall,
+				},
+				abort.signal,
+				stream,
+			);
+			if (this.#isDisposed || this.#promptGeneration !== generation) {
+				return { ok: false, error: "stale generation" };
+			}
+			const text = result.content
+				.filter((block): block is { type: "text"; text: string } => block.type === "text")
+				.map(block => block.text)
+				.join("\n");
+			const terminal = this.#isTerminalYieldToolResult({
+				toolName: result.toolName,
+				isError: result.isError,
+				result: { details: result.details },
+			});
+			if (result.isError) {
+				return { ok: false, error: text || "tool error", ...(terminal ? { terminal: true } : {}) };
+			}
+			return {
+				ok: true,
+				result: result.details ?? text,
+				...(terminal ? { terminal: true } : {}),
+			};
+		} catch (error) {
+			if (this.#isDisposed || this.#promptGeneration !== generation) {
+				return { ok: false, error: "stale generation" };
+			}
+			return { ok: false, error: error instanceof Error ? error.message : String(error) };
+		} finally {
+			unsub();
+			call.signal.removeEventListener("abort", onAbort);
+		}
+	}
+
+
 	/** Looks up an enabled eval-bridge tool with the session's permission gate applied. */
 	getToolForEvalBridge(name: string): AgentTool | undefined {
 		return this.#tools.getToolForEvalBridge(name);
@@ -5085,6 +5203,11 @@ export class AgentSession {
 		return this.agent.getSteeringMode();
 	}
 
+
+	/** Metadata projected by the owning messaging/task bridge, without local inference. */
+	get bridgeMetadata(): BridgeSessionMetadata | undefined {
+		return this.#bridgeMetadata;
+	}
 	/** Current follow-up mode */
 	get followUpMode(): "all" | "one-at-a-time" {
 		return this.agent.getFollowUpMode();
@@ -5666,6 +5789,7 @@ export class AgentSession {
 			// A user turn owns the next decision; drop a queued forced choice from
 			// a reminder continuation this prompt just preempted.
 			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
+			this.#todoAuthorityGeneration++;
 		}
 
 		// If streaming, queue via steer() or followUp() based on option
@@ -7976,6 +8100,34 @@ export class AgentSession {
 	/** Waits for side-channel IRC auto-replies currently owned by this session. */
 	waitForIrcAutoReplies(): Promise<void> {
 		return this.#irc.waitForAutoReplies();
+	}
+
+
+	bindActiveExternalExecution(execution: Omit<ActiveExternalExecution, "sessionId" | "generation">): ActiveExternalExecution {
+		const bound: ActiveExternalExecution = {
+			...execution,
+			sessionId: this.sessionId,
+			generation: this.#promptGeneration,
+		};
+		this.#activeExternalExecution = bound;
+		return bound;
+	}
+
+	activeExternalExecution(): ActiveExternalExecution | undefined {
+		return this.#activeExternalExecution;
+	}
+
+	clearActiveExternalExecution(execution?: ActiveExternalExecution): void {
+		if (execution && this.#activeExternalExecution !== execution) return;
+		this.#clearActiveExternalExecution();
+	}
+
+	#clearActiveExternalExecution(): void {
+		const current = this.#activeExternalExecution;
+		this.#activeExternalExecution = undefined;
+		void current?.cancelSoftInterrupts().catch(error => {
+			logger.warn("Failed to cancel external soft interrupts", { error: String(error) });
+		});
 	}
 
 	/** Installs task-executor monitoring around autonomous IRC wake turns. */
