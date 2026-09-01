@@ -378,8 +378,13 @@ export async function resolveEffectiveSubagentPolicy(
 	const isolationRequested = request.isolation?.requested === true;
 	const wantsAutoIsolation =
 		!isolationRequested && request.invocationKind === "task" && !isReadOnlyAgent(effectiveAgent);
-	const canAutoIsolate = wantsAutoIsolation && (await git.repo.root(request.session.cwd)) !== null;
-	const isIsolated = isolationRequested || canAutoIsolate;
+	if (wantsAutoIsolation && (await git.repo.root(request.session.cwd)) === null) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Cannot auto-isolate a writer task: cwd is not a git repository. Set task.worktree or task.isolation.mode, or run from a git repo. Do not inherit the parent cwd.`,
+		);
+	}
+	const isIsolated = isolationRequested || wantsAutoIsolation;
 	if (isolationRequested && isolationMode === "none") {
 		throw new StructuredSubagentError(
 			"preflight",

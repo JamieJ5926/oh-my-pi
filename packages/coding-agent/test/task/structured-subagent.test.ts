@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
@@ -30,6 +30,13 @@ const AGENT: AgentDefinition = {
 	output: { type: "object", properties: { agent: { type: "boolean" } } },
 };
 
+let gitFixtureCwd: string;
+
+beforeAll(async () => {
+	gitFixtureCwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-structured-subagent-git-"));
+	await Bun.$`git init`.cwd(gitFixtureCwd);
+});
+
 function session(
 	options: {
 		planMode?: boolean;
@@ -42,7 +49,7 @@ function session(
 	} = {},
 ): ToolSession {
 	return {
-		cwd: options.cwd ?? "/tmp",
+		cwd: options.cwd ?? gitFixtureCwd,
 		hasUI: false,
 		outputSchema: options.outputSchema,
 		settings: Settings.isolated({
@@ -87,6 +94,17 @@ function result(): SingleResult {
 
 function mockDiscovery(agent: AgentDefinition = AGENT): void {
 	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+	mockIsolatedDispatch();
+}
+
+function mockIsolatedDispatch(): void {
+	vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+		repoRoot: gitFixtureCwd,
+		baseline: {},
+	} as never);
+	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions }) =>
+		executorModule.runSubprocess(baseOptions),
+	);
 }
 
 afterEach(() => {
@@ -227,6 +245,7 @@ describe("structured subagent primitive", () => {
 		const projectDir = path.join(root, "project");
 		const agentDir = path.join(root, "agent");
 		await fs.mkdir(projectDir, { recursive: true });
+		await Bun.$`git init`.cwd(projectDir);
 		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
 		const liveSession = {
 			...session(),
@@ -723,29 +742,20 @@ describe("structured subagent primitive", () => {
 		expect(policy.isIsolated).toBe(false);
 	});
 
-	it("does not auto-isolate writer tasks when cwd is not a git repo", async () => {
+	it("throws when auto-isolating a writer task whose cwd is not a git repo", async () => {
 		mockDiscovery();
-		const policy = await resolveEffectiveSubagentPolicy(request());
-		expect(policy.isIsolated).toBe(false);
-
-		const prepare = vi.spyOn(isolationRunner, "prepareIsolationContext");
-		const isolatedRun = vi.spyOn(isolationRunner, "runIsolatedSubprocess");
-		const dispatched: executorModule.ExecutorOptions[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-			dispatched.push(options);
-			return result();
-		});
-
-		const settled = await runStructuredSubagent(request({ retainArtifacts: true }));
-		expect(settled.policy.isIsolated).toBe(false);
-		expect(prepare).not.toHaveBeenCalled();
-		expect(isolatedRun).not.toHaveBeenCalled();
-		expect(dispatched).toHaveLength(1);
-		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nongit-cwd-"));
+		try {
+			await expect(resolveEffectiveSubagentPolicy(request({ session: session({ cwd }) }))).rejects.toThrow(
+				/Cannot auto-isolate a writer task: cwd is not a git repository.*task\.worktree.*task\.isolation\.mode/,
+			);
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
 	});
 
 	it("auto-isolates writer tasks when mode is none without throwing", async () => {
-		mockDiscovery();
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [AGENT], projectAgentsDir: null });
 		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auto-iso-git-"));
 		try {
 			await Bun.$`git init`.cwd(repo);
