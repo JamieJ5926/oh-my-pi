@@ -54,7 +54,10 @@ check("single t1 no trigger", g1.recordTurn(single), "falsy");
 check("single t2 no trigger", g1.recordTurn(single), "falsy");
 check("single t3 triggers", g1.recordTurn(single), "truthy");
 
-const multi = turn([{ name: "glob", args: {} }, { name: "", args: { path: "reviews/errors/**" } }]);
+const multi = turn([
+	{ name: "glob", args: {} },
+	{ name: "", args: { path: "reviews/errors/**" } },
+]);
 const g2 = new ToolCallLoopGuard({ threshold: 3, exemptTools: [] });
 check("multi t1 no trigger", g2.recordTurn(multi), "falsy");
 check("multi t2 no trigger", g2.recordTurn(multi), "falsy");
