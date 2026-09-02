@@ -178,7 +178,7 @@ describe("harness socket transport", () => {
 	});
 
 	it("rejects pending requests and fires onDeath exactly once on explicit close", async () => {
-		const { h, t } = await connect();
+		const { t } = await connect();
 		const pending = t.request({ req: "ping" });
 		const deaths: (Error | undefined)[] = [];
 		t.onDeath(error => deaths.push(error));
@@ -191,7 +191,7 @@ describe("harness socket transport", () => {
 	});
 
 	it("stops firing onDeath after the listener unsubscribes", async () => {
-		const { h, t } = await connect();
+		const { t } = await connect();
 		const deaths: (Error | undefined)[] = [];
 		const unsubscribe = t.onDeath(error => deaths.push(error));
 		unsubscribe();

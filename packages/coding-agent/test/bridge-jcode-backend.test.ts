@@ -3,7 +3,6 @@ import {
 	createJCodeBackend,
 	createJCodeExecutionBackendFactory,
 	type JCodeBackendOptions,
-	type JCodeEvent,
 	type JCodeExecutionBackendFactoryOptions,
 	type JCodeHarnessConnection,
 } from "../src/bridge/backends/jcode";
@@ -532,10 +531,6 @@ describe("JCode shared execution backend factory", () => {
 		};
 	}
 
-	function promptText(req: HarnessRequest): string | undefined {
-		return req.req === "send_message" ? req.content : undefined;
-	}
-
 	function cwdOf(req: HarnessRequest): string | undefined {
 		return req.req === "create_session" ? req.working_dir : undefined;
 	}
@@ -601,7 +596,7 @@ describe("JCode shared execution backend factory", () => {
 			{ backend: "jcode", prompt: "second", metadata: { cwd: "/tmp/two" } },
 			new AbortController().signal,
 		);
-		const secondResult = await second.result;
+		await second.result;
 		expect(transports[1]).not.toBe(transports[0]);
 		expect(transports).toHaveLength(2);
 		expect(transports[1].requests.filter(request => request.req === "hello")).toHaveLength(1);

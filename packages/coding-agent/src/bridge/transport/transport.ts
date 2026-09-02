@@ -179,11 +179,6 @@ function enqueueJournalCompaction(
 	removedIds.clear();
 	return enqueueJournalOperation(file, () => compactJournal(file, entries, removed));
 }
-function journalBytes(entries: readonly JournalEntry[]): number {
-	let total = 0;
-	for (const entry of entries) total += Buffer.byteLength(journalLine(entry), "utf8");
-	return total;
-}
 
 function retryAt(entry: JournalEntry, limits: Required<TransportLimits>): number {
 	const delay = Math.min(limits.retryMaxMs, limits.retryBaseMs * 2 ** Math.min(entry.attempts, 30));
@@ -691,7 +686,6 @@ export class BrokerBackedTransportAdapter implements TransportAdapter {
 /** Broker server for focused deployments without another launch broker. */
 export class BrokerTransportServer {
 	readonly #socketPath: string;
-	readonly #removed = new Set<string>();
 	readonly #limits: Required<TransportLimits>;
 	readonly #server: net.Server;
 	readonly #registrations = new Map<string, { readonly address: SessionAddress; readonly socket: net.Socket }>();
