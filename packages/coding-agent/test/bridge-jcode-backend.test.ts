@@ -7,7 +7,11 @@ import {
 	type JCodeExecutionBackendFactoryOptions,
 	type JCodeHarnessConnection,
 } from "../src/bridge/backends/jcode";
-import { HARNESS_PROTOCOL_VERSION, type HarnessEvent, type HarnessRequest } from "../src/bridge/backends/jcode/harness-protocol";
+import {
+	HARNESS_PROTOCOL_VERSION,
+	type HarnessEvent,
+	type HarnessRequest,
+} from "../src/bridge/backends/jcode/harness-protocol";
 
 let nextFakeSession = 0;
 
@@ -92,15 +96,23 @@ class FakeHarnessConnection implements JCodeHarnessConnection {
 	}
 }
 
-
 async function collectEvents<T>(events: AsyncIterable<T>): Promise<T[]> {
 	const collected: T[] = [];
 	for await (const event of events) collected.push(event);
 	return collected;
 }
 
-function options(connection: FakeHarnessConnection, limits: Pick<JCodeBackendOptions, "maxBufferedEvents" | "maxBufferedBytes"> = {}): JCodeBackendOptions {
-	return { cwd: process.cwd(), provider: "openai", model: "gpt-5.6-sol", ...limits, connectionFactory: async () => connection };
+function options(
+	connection: FakeHarnessConnection,
+	limits: Pick<JCodeBackendOptions, "maxBufferedEvents" | "maxBufferedBytes"> = {},
+): JCodeBackendOptions {
+	return {
+		cwd: process.cwd(),
+		provider: "openai",
+		model: "gpt-5.6-sol",
+		...limits,
+		connectionFactory: async () => connection,
+	};
 }
 
 describe("JCode structured backend", () => {
@@ -192,7 +204,9 @@ describe("JCode structured backend", () => {
 	it("keeps the terminal event observable under a byte bound", async () => {
 		const connection = new FakeHarnessConnection();
 		const terminalBytes = 1_000;
-		const backend = createJCodeBackend(options(connection, { maxBufferedEvents: 8, maxBufferedBytes: terminalBytes }));
+		const backend = createJCodeBackend(
+			options(connection, { maxBufferedEvents: 8, maxBufferedBytes: terminalBytes }),
+		);
 		const session = await backend.start({});
 		await session.prompt("bounded");
 		const events = await collectEvents(session.events);
@@ -246,7 +260,12 @@ describe("JCode structured backend", () => {
 		const backend = createJCodeBackend(options(connection));
 		const session = await backend.start({});
 		const pending = session.prompt("final");
-		connection.emit({ ev: "model_info", session_id: session.address.sessionId, provider: "resolved-openai", model: "resolved-model" });
+		connection.emit({
+			ev: "model_info",
+			session_id: session.address.sessionId,
+			provider: "resolved-openai",
+			model: "resolved-model",
+		});
 		connection.emit({ ev: "turn_done", session_id: session.address.sessionId });
 		const result = await pending;
 		expect(result.resolvedProvider).toBe("resolved-openai");
@@ -278,14 +297,26 @@ describe("JCode host tool callback and soft interrupt", () => {
 			},
 		});
 		const session = await backend.start({});
-		expect(connection.requests.find(request => request.req === "create_session")).toMatchObject({ host_tools: [hostTool] });
+		expect(connection.requests.find(request => request.req === "create_session")).toMatchObject({
+			host_tools: [hostTool],
+		});
 		connection.emit(hostCall(session.address.sessionId, "c-ok"));
-		await connection.waitFor(requests => requests.some(request => request.req === "host_tool_result" && request.call_id === "c-ok"));
+		await connection.waitFor(requests =>
+			requests.some(request => request.req === "host_tool_result" && request.call_id === "c-ok"),
+		);
 		expect(results(connection)).toEqual([
-			{ req: "host_tool_result", session_id: session.address.sessionId, call_id: "c-ok", result: { echoed: { x: 1 } }, terminal: true },
+			{
+				req: "host_tool_result",
+				session_id: session.address.sessionId,
+				call_id: "c-ok",
+				result: { echoed: { x: 1 } },
+				terminal: true,
+			},
 		]);
 		connection.emit(hostCall(session.address.sessionId, "c-err", "fail"));
-		await connection.waitFor(requests => requests.some(request => request.req === "host_tool_result" && request.call_id === "c-err"));
+		await connection.waitFor(requests =>
+			requests.some(request => request.req === "host_tool_result" && request.call_id === "c-err"),
+		);
 		expect(results(connection).at(-1)).toEqual({
 			req: "host_tool_result",
 			session_id: session.address.sessionId,
@@ -301,9 +332,16 @@ describe("JCode host tool callback and soft interrupt", () => {
 		const backend = createJCodeBackend(options(connection));
 		const session = await backend.start({});
 		connection.emit(hostCall(session.address.sessionId, "c-none"));
-		await connection.waitFor(requests => requests.some(request => request.req === "host_tool_result" && request.call_id === "c-none"));
+		await connection.waitFor(requests =>
+			requests.some(request => request.req === "host_tool_result" && request.call_id === "c-none"),
+		);
 		expect(results(connection)).toEqual([
-			{ req: "host_tool_result", session_id: session.address.sessionId, call_id: "c-none", error: "no host tool dispatcher" },
+			{
+				req: "host_tool_result",
+				session_id: session.address.sessionId,
+				call_id: "c-none",
+				error: "no host tool dispatcher",
+			},
 		]);
 		await backend.close();
 	});
@@ -323,13 +361,23 @@ describe("JCode host tool callback and soft interrupt", () => {
 		const session = await backend.start({});
 		connection.emit(hostCall(session.address.sessionId, "dup"));
 		connection.emit(hostCall(session.address.sessionId, "dup"));
-		await connection.waitFor(requests => requests.some(request => request.req === "host_tool_result" && request.call_id === "dup"));
+		await connection.waitFor(requests =>
+			requests.some(request => request.req === "host_tool_result" && request.call_id === "dup"),
+		);
 		expect(invocations).toBe(1);
 		expect(results(connection)).toEqual([
-			{ req: "host_tool_result", session_id: session.address.sessionId, call_id: "dup", error: "duplicate host tool call id" },
+			{
+				req: "host_tool_result",
+				session_id: session.address.sessionId,
+				call_id: "dup",
+				error: "duplicate host tool call id",
+			},
 		]);
 		resolve();
-		await connection.waitFor(requests => requests.filter(request => request.req === "host_tool_result" && request.call_id === "dup").length >= 2);
+		await connection.waitFor(
+			requests =>
+				requests.filter(request => request.req === "host_tool_result" && request.call_id === "dup").length >= 2,
+		);
 		expect(results(connection).at(-1)).toEqual({
 			req: "host_tool_result",
 			session_id: session.address.sessionId,
@@ -371,10 +419,17 @@ describe("JCode host tool callback and soft interrupt", () => {
 		});
 		const [left, right] = await Promise.all([backend.start({}), backend.start({})]);
 		connection.emit(hostCall(left.address.sessionId, "only-left"));
-		await connection.waitFor(requests => requests.some(request => request.req === "host_tool_result" && request.call_id === "only-left"));
+		await connection.waitFor(requests =>
+			requests.some(request => request.req === "host_tool_result" && request.call_id === "only-left"),
+		);
 		expect(seen).toEqual([left.address.sessionId]);
 		expect(results(connection)).toEqual([
-			{ req: "host_tool_result", session_id: left.address.sessionId, call_id: "only-left", result: left.address.sessionId },
+			{
+				req: "host_tool_result",
+				session_id: left.address.sessionId,
+				call_id: "only-left",
+				result: left.address.sessionId,
+			},
 		]);
 		expect(right.address.sessionId).not.toBe(left.address.sessionId);
 		await backend.close();
@@ -386,7 +441,11 @@ describe("JCode host tool callback and soft interrupt", () => {
 		const session = await backend.start({});
 		await session.softInterrupt("nudge", true);
 		await session.cancelSoftInterrupts();
-		expect(connection.requests.filter(request => request.req === "soft_interrupt" || request.req === "cancel_soft_interrupts")).toEqual([
+		expect(
+			connection.requests.filter(
+				request => request.req === "soft_interrupt" || request.req === "cancel_soft_interrupts",
+			),
+		).toEqual([
 			{ req: "soft_interrupt", session_id: session.address.sessionId, content: "nudge", urgent: true },
 			{ req: "cancel_soft_interrupts", session_id: session.address.sessionId },
 		]);
@@ -429,7 +488,9 @@ describe("JCode host tool callback and soft interrupt", () => {
 		await exec.result;
 		await exec.softInterrupt?.("ping");
 		await exec.cancelSoftInterrupts?.();
-		expect(connection.requests.some(request => request.req === "soft_interrupt" && request.content === "ping")).toBe(true);
+		expect(connection.requests.some(request => request.req === "soft_interrupt" && request.content === "ping")).toBe(
+			true,
+		);
 		expect(connection.requests.some(request => request.req === "cancel_soft_interrupts")).toBe(true);
 		await factory.close?.();
 	});
@@ -439,7 +500,10 @@ describe("JCode shared execution backend factory", () => {
 	class DeathConnection extends FakeHarnessConnection {
 		#releaseLongRunning: (() => void) | undefined;
 
-		override async request(req: HarnessRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HarnessEvent> {
+		override async request(
+			req: HarnessRequest,
+			options?: { timeoutMs?: number; signal?: AbortSignal },
+		): Promise<HarnessEvent> {
 			if (req.req === "send_message" && req.content === "long-running") {
 				this.requests.push(req);
 				const { promise, resolve } = Promise.withResolvers<HarnessEvent>();
@@ -480,8 +544,14 @@ describe("JCode shared execution backend factory", () => {
 		const transports: DeathConnection[] = [];
 		const factory = createJCodeExecutionBackendFactory(factoryOptions(transports));
 		const [left, right] = await Promise.all([
-			factory.start({ backend: "jcode", prompt: "left", metadata: { cwd: "/tmp/left" } }, new AbortController().signal),
-			factory.start({ backend: "jcode", prompt: "right", metadata: { cwd: "/tmp/right" } }, new AbortController().signal),
+			factory.start(
+				{ backend: "jcode", prompt: "left", metadata: { cwd: "/tmp/left" } },
+				new AbortController().signal,
+			),
+			factory.start(
+				{ backend: "jcode", prompt: "right", metadata: { cwd: "/tmp/right" } },
+				new AbortController().signal,
+			),
 		]);
 		expect(transports).toHaveLength(1);
 		expect(transports[0].requests.filter(request => request.req === "hello")).toHaveLength(1);
@@ -499,8 +569,14 @@ describe("JCode shared execution backend factory", () => {
 	it("isolates interleaved sessions and cancels only the cancelled session", async () => {
 		const transports: DeathConnection[] = [];
 		const factory = createJCodeExecutionBackendFactory(factoryOptions(transports));
-		const held = await factory.start({ backend: "jcode", prompt: "long-running", metadata: { cwd: "/tmp/held" } }, new AbortController().signal);
-		const quick = await factory.start({ backend: "jcode", prompt: "quick", metadata: { cwd: "/tmp/quick" } }, new AbortController().signal);
+		const held = await factory.start(
+			{ backend: "jcode", prompt: "long-running", metadata: { cwd: "/tmp/held" } },
+			new AbortController().signal,
+		);
+		const quick = await factory.start(
+			{ backend: "jcode", prompt: "quick", metadata: { cwd: "/tmp/quick" } },
+			new AbortController().signal,
+		);
 		const heldEvents = collectEvents(held.events);
 		const quickResult = await quick.result;
 		expect(quickResult.output).toContain(quickResult.sessionId ?? "");
@@ -514,18 +590,34 @@ describe("JCode shared execution backend factory", () => {
 	it("retires the transport on death, bumps generation, and rejects stale resumes", async () => {
 		const transports: DeathConnection[] = [];
 		const factory = createJCodeExecutionBackendFactory(factoryOptions(transports));
-		const first = await factory.start({ backend: "jcode", prompt: "first", metadata: { cwd: "/tmp/one" } }, new AbortController().signal);
+		const first = await factory.start(
+			{ backend: "jcode", prompt: "first", metadata: { cwd: "/tmp/one" } },
+			new AbortController().signal,
+		);
 		const firstResult = await first.result;
 		const staleId = firstResult.sessionId;
 		transports[0].die(new Error("daemon crashed"));
-		const second = await factory.start({ backend: "jcode", prompt: "second", metadata: { cwd: "/tmp/two" } }, new AbortController().signal);
+		const second = await factory.start(
+			{ backend: "jcode", prompt: "second", metadata: { cwd: "/tmp/two" } },
+			new AbortController().signal,
+		);
 		const secondResult = await second.result;
 		expect(transports[1]).not.toBe(transports[0]);
 		expect(transports).toHaveLength(2);
 		expect(transports[1].requests.filter(request => request.req === "hello")).toHaveLength(1);
-		await expect(factory.start({ backend: "jcode", prompt: "stale", sessionId: staleId, metadata: { cwd: "/tmp/one" } }, new AbortController().signal)).rejects.toThrow(/Stale JCode session/);
+		await expect(
+			factory.start(
+				{ backend: "jcode", prompt: "stale", sessionId: staleId, metadata: { cwd: "/tmp/one" } },
+				new AbortController().signal,
+			),
+		).rejects.toThrow(/Stale JCode session/);
 		await expect(first.resume()).rejects.toThrow(/transport/);
-		await expect(factory.start({ backend: "jcode", prompt: "unbound", sessionId: "never-bound", metadata: { cwd: "/tmp/one" } }, new AbortController().signal)).rejects.toThrow(/Stale JCode session/);
+		await expect(
+			factory.start(
+				{ backend: "jcode", prompt: "unbound", sessionId: "never-bound", metadata: { cwd: "/tmp/one" } },
+				new AbortController().signal,
+			),
+		).rejects.toThrow(/Stale JCode session/);
 	});
 
 	it("uses the factory cwd when the request has none", async () => {
@@ -552,7 +644,10 @@ describe("JCode shared execution backend factory", () => {
 				return connection;
 			},
 		});
-		const session = await factory.start({ backend: "jcode", prompt: "fails", metadata: { cwd: "/tmp/fail" } }, new AbortController().signal);
+		const session = await factory.start(
+			{ backend: "jcode", prompt: "fails", metadata: { cwd: "/tmp/fail" } },
+			new AbortController().signal,
+		);
 		const events = collectEvents(session.events);
 		await expect(session.result).rejects.toThrow("prompt failed");
 		expect((await events).map(event => event.kind)).toEqual(["error"]);
@@ -562,7 +657,10 @@ describe("JCode shared execution backend factory", () => {
 		const transports: DeathConnection[] = [];
 		const factory = createJCodeExecutionBackendFactory(factoryOptions(transports));
 		const controller = new AbortController();
-		const session = await factory.start({ backend: "jcode", prompt: "long-running", metadata: { cwd: "/tmp/abort" } }, controller.signal);
+		const session = await factory.start(
+			{ backend: "jcode", prompt: "long-running", metadata: { cwd: "/tmp/abort" } },
+			controller.signal,
+		);
 		controller.abort();
 		const result = await session.result;
 		expect(result.stopReason).toBe("cancelled");
@@ -571,7 +669,10 @@ describe("JCode shared execution backend factory", () => {
 
 	it("returns a cancelled terminal when a signal-aware transport would abort the prompt RPC", async () => {
 		class AbortAwareConnection extends DeathConnection {
-			override async request(req: HarnessRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HarnessEvent> {
+			override async request(
+				req: HarnessRequest,
+				options?: { timeoutMs?: number; signal?: AbortSignal },
+			): Promise<HarnessEvent> {
 				const signal = options?.signal;
 				if (signal?.aborted) throw new Error("JCode request aborted");
 				if (req.req !== "send_message" || !signal) return super.request(req, options);
@@ -603,7 +704,10 @@ describe("JCode shared execution backend factory", () => {
 			},
 		});
 		const controller = new AbortController();
-		const session = await factory.start({ backend: "jcode", prompt: "long-running", metadata: { cwd: "/tmp/abort-aware" } }, controller.signal);
+		const session = await factory.start(
+			{ backend: "jcode", prompt: "long-running", metadata: { cwd: "/tmp/abort-aware" } },
+			controller.signal,
+		);
 		controller.abort();
 		const result = await session.result;
 		expect(result.stopReason).toBe("cancelled");
@@ -611,7 +715,10 @@ describe("JCode shared execution backend factory", () => {
 
 		const already = new AbortController();
 		already.abort();
-		const preAborted = await factory.start({ backend: "jcode", prompt: "long-running", metadata: { cwd: "/tmp/pre-aborted" } }, already.signal);
+		const preAborted = await factory.start(
+			{ backend: "jcode", prompt: "long-running", metadata: { cwd: "/tmp/pre-aborted" } },
+			already.signal,
+		);
 		const preAbortedResult = await preAborted.result;
 		expect(preAbortedResult.stopReason).toBe("cancelled");
 	});

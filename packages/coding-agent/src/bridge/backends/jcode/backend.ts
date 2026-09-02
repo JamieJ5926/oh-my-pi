@@ -44,7 +44,9 @@ function createEventQueue(maxEvents: number, maxBytes: number): EventQueue {
 	let dropped = 0;
 	let sequence = 0;
 
-	function eventSize(event: JCodeEvent): number { return Buffer.byteLength(JSON.stringify(event), "utf8"); }
+	function eventSize(event: JCodeEvent): number {
+		return Buffer.byteLength(JSON.stringify(event), "utf8");
+	}
 
 	function evictOldest(): void {
 		const removed = events.shift();
@@ -155,7 +157,9 @@ class JCodeSessionImpl implements JCodeSession {
 	#output = "";
 	#usage: JCodeUsage | undefined;
 	#attribution: JCodeAttribution;
-	#pending: { resolve: (result: JCodeResult) => void; reject: (error: Error) => void; cancellationRequested: boolean } | undefined;
+	#pending:
+		| { resolve: (result: JCodeResult) => void; reject: (error: Error) => void; cancellationRequested: boolean }
+		| undefined;
 	#eventCount = 0;
 	#hostCalls = new Map<string, AbortController>();
 	#terminal = false;
@@ -175,13 +179,25 @@ class JCodeSessionImpl implements JCodeSession {
 		this.#spec = spec;
 		this.address = address;
 		this.#onDispose = onDispose;
-		this.#queue = createEventQueue(options.maxBufferedEvents ?? DEFAULT_MAX_EVENTS, options.maxBufferedBytes ?? DEFAULT_MAX_BYTES);
-		this.#attribution = { requestedProvider: spec.provider ?? options.provider, requestedModel: spec.model ?? options.model, resolvedProvider: undefined, resolvedModel: undefined };
+		this.#queue = createEventQueue(
+			options.maxBufferedEvents ?? DEFAULT_MAX_EVENTS,
+			options.maxBufferedBytes ?? DEFAULT_MAX_BYTES,
+		);
+		this.#attribution = {
+			requestedProvider: spec.provider ?? options.provider,
+			requestedModel: spec.model ?? options.model,
+			resolvedProvider: undefined,
+			resolvedModel: undefined,
+		};
 		this.#state = initialState;
 	}
 
-	get state(): JCodeSessionState { return this.#state; }
-	get events(): AsyncIterable<JCodeEvent> { return this.#queue.iterable; }
+	get state(): JCodeSessionState {
+		return this.#state;
+	}
+	get events(): AsyncIterable<JCodeEvent> {
+		return this.#queue.iterable;
+	}
 
 	async prompt(text: string, signal?: AbortSignal): Promise<JCodeResult> {
 		if (this.#disposed) throw new Error("JCode session is disposed");
@@ -222,11 +238,15 @@ class JCodeSessionImpl implements JCodeSession {
 		}
 	}
 
-
 	async softInterrupt(content: string, urgent?: boolean): Promise<void> {
 		if (this.#disposed) throw new Error("JCode session is disposed");
 		await this.#connection.request(
-			{ req: "soft_interrupt", session_id: this.address.sessionId, content, ...(urgent === undefined ? {} : { urgent }) },
+			{
+				req: "soft_interrupt",
+				session_id: this.address.sessionId,
+				content,
+				...(urgent === undefined ? {} : { urgent }),
+			},
 			{ timeoutMs: this.#options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS },
 		);
 	}
@@ -243,7 +263,10 @@ class JCodeSessionImpl implements JCodeSession {
 		if (this.#disposed) throw new Error("JCode session is disposed");
 		await this.#connection.request({ req: "attach_session", session_id: this.address.sessionId });
 		this.#queue.close();
-		this.#queue = createEventQueue(this.#options.maxBufferedEvents ?? DEFAULT_MAX_EVENTS, this.#options.maxBufferedBytes ?? DEFAULT_MAX_BYTES);
+		this.#queue = createEventQueue(
+			this.#options.maxBufferedEvents ?? DEFAULT_MAX_EVENTS,
+			this.#options.maxBufferedBytes ?? DEFAULT_MAX_BYTES,
+		);
 		this.#state = { kind: "running" };
 	}
 
@@ -269,7 +292,6 @@ class JCodeSessionImpl implements JCodeSession {
 		this.#fail({ code: "JCODE_TRANSPORT_DEAD", message: error?.message ?? "harness connection closed" });
 	}
 
-
 	#makeResult(stopReason: JCodeResult["stopReason"]): JCodeResult {
 		return {
 			...this.#attribution,
@@ -282,7 +304,14 @@ class JCodeSessionImpl implements JCodeSession {
 	}
 
 	#telemetry(cancellationRequested: boolean): JCodeTelemetry {
-		return { startedAt: this.#startedAt, finishedAt: Date.now(), eventCount: this.#eventCount, droppedEventCount: this.#droppedEvents, transport: "harness", cancellationRequested };
+		return {
+			startedAt: this.#startedAt,
+			finishedAt: Date.now(),
+			eventCount: this.#eventCount,
+			droppedEventCount: this.#droppedEvents,
+			transport: "harness",
+			cancellationRequested,
+		};
 	}
 
 	handleEvent(event: HarnessEvent): void {
@@ -323,7 +352,12 @@ class JCodeSessionImpl implements JCodeSession {
 			case "session_status":
 			case "connection_phase": {
 				this.#eventCount++;
-				this.#queue.push({ kind: "status", status: event.ev === "session_status" ? event.status : event.phase, sequence: ++this.#sequence, raw: event });
+				this.#queue.push({
+					kind: "status",
+					status: event.ev === "session_status" ? event.status : event.phase,
+					sequence: ++this.#sequence,
+					raw: event,
+				});
 				return;
 			}
 			case "turn_done": {
@@ -343,8 +377,6 @@ class JCodeSessionImpl implements JCodeSession {
 		for (const controller of this.#hostCalls.values()) controller.abort();
 		this.#hostCalls.clear();
 	}
-
-
 
 	async #handleHostToolCall(event: Extract<HarnessEvent, { ev: "host_tool_call" }>): Promise<void> {
 		if (this.#disposed || this.#terminal) return;
@@ -374,7 +406,13 @@ class JCodeSessionImpl implements JCodeSession {
 				outcome = { ok: false, error: error instanceof Error ? error.message : String(error) };
 			}
 		}
-		if (this.#disposed || this.#terminal || this.address.generation !== generation || !this.#hostCalls.has(event.call_id)) return;
+		if (
+			this.#disposed ||
+			this.#terminal ||
+			this.address.generation !== generation ||
+			!this.#hostCalls.has(event.call_id)
+		)
+			return;
 		this.#hostCalls.delete(event.call_id);
 		await this.#sendHostToolResult(event.call_id, outcome);
 	}
@@ -397,7 +435,9 @@ class JCodeSessionImpl implements JCodeSession {
 					...(outcome.terminal === undefined ? {} : { terminal: outcome.terminal }),
 				};
 		try {
-			await this.#connection.request(frame, { timeoutMs: this.#options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS });
+			await this.#connection.request(frame, {
+				timeoutMs: this.#options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+			});
 		} catch {
 			// Best effort: death/dispose may already have torn the connection down.
 		}
@@ -446,7 +486,9 @@ export class JCodeBackendImpl implements JCodeBackend {
 		this.#generation = options.generation ?? 0;
 	}
 
-	get generation(): number { return this.#generation; }
+	get generation(): number {
+		return this.#generation;
+	}
 
 	/** One launcher/connection per backend, created lazily on the first start. */
 	#connect(): Promise<JCodeHarnessConnection> {
@@ -459,15 +501,19 @@ export class JCodeBackendImpl implements JCodeBackend {
 			} else if (options.socketPath) {
 				connection = await (options.openConnection ?? openHarnessSocket)(options.socketPath);
 			} else {
-				this.#launcher = await (options.launchFactory ?? ((opts) => launchHarness({
-					binary: opts.command?.[0] ?? "jcode",
-					workingDir: opts.cwd,
-					env: { ...opts.env },
-					provider: opts.provider,
-					providerProfile: opts.providerProfile,
-					model: opts.model,
-					startupTimeoutMs: opts.startupTimeoutMs,
-				})))(options);
+				this.#launcher = await (
+					options.launchFactory ??
+					(opts =>
+						launchHarness({
+							binary: opts.command?.[0] ?? "jcode",
+							workingDir: opts.cwd,
+							env: { ...opts.env },
+							provider: opts.provider,
+							providerProfile: opts.providerProfile,
+							model: opts.model,
+							startupTimeoutMs: opts.startupTimeoutMs,
+						}))
+				)(options);
 				connection = await (options.openConnection ?? openHarnessSocket)(this.#launcher.socketPath);
 			}
 			if (!this.#eventsBound) {
@@ -487,7 +533,12 @@ export class JCodeBackendImpl implements JCodeBackend {
 		this.#helloPromise = (async () => {
 			const connection = await this.#connect();
 			const reply = await connection.request(
-				{ req: "hello", min_version: HARNESS_PROTOCOL_VERSION, max_version: HARNESS_PROTOCOL_VERSION, client: "omp-jcode-bridge" },
+				{
+					req: "hello",
+					min_version: HARNESS_PROTOCOL_VERSION,
+					max_version: HARNESS_PROTOCOL_VERSION,
+					client: "omp-jcode-bridge",
+				},
 				{ timeoutMs: this.#options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS },
 			);
 			if (reply.ev !== "hello_ok") throw new Error(`harness hello failed: ${reply.ev}`);
@@ -507,7 +558,11 @@ export class JCodeBackendImpl implements JCodeBackend {
 		const reply = await connection.request(
 			isResume
 				? { req: "attach_session", session_id: requestedId as string }
-				: { req: "create_session", working_dir: spec.cwd ?? this.#options.cwd, ...(hostTools === undefined ? {} : { host_tools: hostTools }) },
+				: {
+						req: "create_session",
+						working_dir: spec.cwd ?? this.#options.cwd,
+						...(hostTools === undefined ? {} : { host_tools: hostTools }),
+					},
 		);
 		if (reply.ev === "error") throw new Error(reply.message);
 		const sessionId = sessionIdFromReply(reply, requestedId);

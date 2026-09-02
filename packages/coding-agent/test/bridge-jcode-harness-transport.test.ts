@@ -1,6 +1,10 @@
 import * as net from "node:net";
 import { afterEach, describe, expect, it } from "bun:test";
-import { encodeServerFrame, type HarnessEvent, type HarnessServerFrame } from "../src/bridge/backends/jcode/harness-protocol";
+import {
+	encodeServerFrame,
+	type HarnessEvent,
+	type HarnessServerFrame,
+} from "../src/bridge/backends/jcode/harness-protocol";
 import { HarnessRequestError, HarnessSocketTransport } from "../src/bridge/backends/jcode/harness-transport";
 
 interface ServerHarness {
@@ -15,11 +19,11 @@ interface ServerHarness {
 }
 
 function startServer(onConnection?: (socket: net.Socket) => void): Promise<ServerHarness> {
-	return new Promise((resolveServer) => {
+	return new Promise(resolveServer => {
 		let clientSocket: net.Socket | undefined;
 		let received = "";
 		const { promise: accepted, resolve: resolveAccepted } = Promise.withResolvers<void>();
-		const server = net.createServer((socket) => {
+		const server = net.createServer(socket => {
 			clientSocket = socket;
 			resolveAccepted();
 			socket.setEncoding("utf8");
@@ -46,7 +50,7 @@ function startServer(onConnection?: (socket: net.Socket) => void): Promise<Serve
 					clientSocket.destroy();
 				},
 				close: () =>
-					new Promise<void>((resolveClose) => {
+					new Promise<void>(resolveClose => {
 						clientSocket?.destroy();
 						server.close(() => resolveClose());
 					}),
@@ -66,7 +70,7 @@ async function connect(): Promise<{ h: ServerHarness; t: HarnessSocketTransport 
 	const h = await startServer();
 	servers.push(h);
 	const socket = net.connect(h.port, "127.0.0.1");
-	await new Promise<void>((resolveConnect) => socket.once("connect", resolveConnect));
+	await new Promise<void>(resolveConnect => socket.once("connect", resolveConnect));
 	await h.accepted;
 	return { h, t: new HarnessSocketTransport(socket) };
 }
@@ -78,7 +82,7 @@ function sendBytes(h: ServerHarness, frame: HarnessServerFrame): void {
 /** Await a promise that may reject, returning the value or the error. */
 function settle(pending: Promise<unknown>): Promise<unknown> {
 	return pending.then(
-		(value) => value,
+		value => value,
 		(error: unknown) => error,
 	);
 }
@@ -101,20 +105,20 @@ describe("harness socket transport", () => {
 		sendBytes(h, { v: 1, reply_to: 0, ev: "ok" });
 		sendBytes(h, { v: 1, reply_to: 1, ev: "ok" });
 		const replies = await Promise.all([p0, p1, p2]);
-		expect(replies.map((reply) => (reply as HarnessServerFrame).reply_to)).toEqual([0, 1, 2]);
+		expect(replies.map(reply => (reply as HarnessServerFrame).reply_to)).toEqual([0, 1, 2]);
 	});
 
 	it("fans reply_to-less events to listeners in order while streaming interleaves with replies", async () => {
 		const { h, t } = await connect();
 		const events: HarnessEvent[] = [];
-		t.onEvent((event) => events.push(event));
+		t.onEvent(event => events.push(event));
 		const pending = t.request({ req: "send_message", session_id: "s1", content: "hi" });
 		sendBytes(h, { v: 1, ev: "text_delta", session_id: "s1", text: "he" });
 		sendBytes(h, { v: 1, reply_to: 0, ev: "message_accepted", session_id: "s1" });
 		sendBytes(h, { v: 1, ev: "text_delta", session_id: "s1", text: "llo" });
 		sendBytes(h, { v: 1, ev: "turn_done", session_id: "s1" });
 		expect((await pending) as unknown).toEqual({ v: 1, reply_to: 0, ev: "message_accepted", session_id: "s1" });
-		expect(events.map((e) => e.ev)).toEqual(["text_delta", "text_delta", "turn_done"]);
+		expect(events.map(e => e.ev)).toEqual(["text_delta", "text_delta", "turn_done"]);
 		expect(events[0]).toMatchObject({ text: "he" });
 	});
 
@@ -140,7 +144,7 @@ describe("harness socket transport", () => {
 	it("leaves unsolicited error events observable to listeners instead of rejecting requests", async () => {
 		const { h, t } = await connect();
 		const events: HarnessEvent[] = [];
-		t.onEvent((event) => events.push(event));
+		t.onEvent(event => events.push(event));
 		const pending = t.request({ req: "ping" });
 		sendBytes(h, { v: 1, ev: "error", code: "internal", message: "unsolicited" });
 		sendBytes(h, { v: 1, reply_to: 0, ev: "ok" });
@@ -151,16 +155,20 @@ describe("harness socket transport", () => {
 	it("delivers unknown event kinds as decoded unknown events", async () => {
 		const { h, t } = await connect();
 		const delivered = Promise.withResolvers<HarnessEvent>();
-		t.onEvent((event) => delivered.resolve(event));
+		t.onEvent(event => delivered.resolve(event));
 		h.send('{"v":1,"ev":"future_thing","payload":{"x":1}}\n');
-		expect((await delivered.promise) as unknown).toEqual({ v: 1, ev: "unknown", raw: { v: 1, ev: "future_thing", payload: { x: 1 } } });
+		expect((await delivered.promise) as unknown).toEqual({
+			v: 1,
+			ev: "unknown",
+			raw: { v: 1, ev: "future_thing", payload: { x: 1 } },
+		});
 	});
 
 	it("rejects pending requests once on socket death, fires onDeath exactly once, and rejects later requests", async () => {
 		const { h, t } = await connect();
 		const pending = t.request({ req: "ping" });
 		const deaths: (Error | undefined)[] = [];
-		t.onDeath((error) => deaths.push(error));
+		t.onDeath(error => deaths.push(error));
 		h.destroyClient();
 		const rejection = await settle(pending);
 		expect(rejection).toBeInstanceOf(Error);
@@ -173,7 +181,7 @@ describe("harness socket transport", () => {
 		const { h, t } = await connect();
 		const pending = t.request({ req: "ping" });
 		const deaths: (Error | undefined)[] = [];
-		t.onDeath((error) => deaths.push(error));
+		t.onDeath(error => deaths.push(error));
 		t.close();
 		t.close(); // second close must be a no-op
 		expect(await settle(pending)).toBeInstanceOf(Error);
@@ -185,7 +193,7 @@ describe("harness socket transport", () => {
 	it("stops firing onDeath after the listener unsubscribes", async () => {
 		const { h, t } = await connect();
 		const deaths: (Error | undefined)[] = [];
-		const unsubscribe = t.onDeath((error) => deaths.push(error));
+		const unsubscribe = t.onDeath(error => deaths.push(error));
 		unsubscribe();
 		t.close();
 		await Bun.sleep(20); // death fires on socket close; no exposed signal to await
@@ -235,7 +243,7 @@ describe("harness request lifecycle", () => {
 		const pending = t.request({ req: "ping" });
 		const aborted = t.request({ req: "ping" }, { signal: controller.signal });
 		controller.abort();
-		expect((await settle(aborted) as Error).message).toContain("aborted");
+		expect(((await settle(aborted)) as Error).message).toContain("aborted");
 		// default timeout is finite: kill the server so the first request can never be replied to
 		await h.close();
 		expect(await settle(pending)).toBeInstanceOf(Error);
@@ -267,6 +275,6 @@ describe("harness request lifecycle", () => {
 		sendBytes(h, { v: 1, reply_to: 1, ev: "ok" });
 		sendBytes(h, { v: 1, reply_to: 0, ev: "ok" });
 		const replies = await Promise.all([p0, p1]);
-		expect(replies.map((reply) => (reply as HarnessServerFrame).reply_to)).toEqual([0, 1]);
+		expect(replies.map(reply => (reply as HarnessServerFrame).reply_to)).toEqual([0, 1]);
 	});
 });
