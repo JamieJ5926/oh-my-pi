@@ -531,7 +531,6 @@ describe("JCode shared execution backend factory", () => {
 		};
 	}
 
-
 	function cwdOf(req: HarnessRequest): string | undefined {
 		return req.req === "create_session" ? req.working_dir : undefined;
 	}

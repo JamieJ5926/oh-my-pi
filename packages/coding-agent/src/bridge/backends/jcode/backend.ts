@@ -6,6 +6,7 @@
 import { createConnection } from "node:net";
 import { HARNESS_PROTOCOL_VERSION, type HarnessEvent } from "./harness-protocol";
 import { DEFAULT_REQUEST_TIMEOUT_MS, HarnessSocketTransport } from "./harness-transport";
+import { launchHarness } from "./harness-launch";
 import {
 	type JCodeAttribution,
 	type JCodeBackend,
@@ -171,6 +172,7 @@ class JCodeSessionImpl implements JCodeSession {
 		initialState: JCodeSessionState = { kind: "new" },
 	) {
 		this.#connection = connection;
+		this.#options = options;
 		this.address = address;
 		this.#onDispose = onDispose;
 		this.#queue = createEventQueue(
@@ -619,8 +621,6 @@ export function createJCodeBackend(options: JCodeBackendOptions): JCodeBackendIm
 	return new JCodeBackendImpl(options);
 }
 
-
 declare module "./protocol" {
 	// (placeholder removed below)
 }
-
