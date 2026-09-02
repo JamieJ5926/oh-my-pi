@@ -6,10 +6,7 @@
 import { createConnection } from "node:net";
 import { HARNESS_PROTOCOL_VERSION, type HarnessEvent } from "./harness-protocol";
 import { DEFAULT_REQUEST_TIMEOUT_MS, HarnessSocketTransport } from "./harness-transport";
-import { launchHarness, type LaunchedHarness } from "./harness-launch";
 import {
-	isRecord,
-	readString,
 	type JCodeAttribution,
 	type JCodeBackend,
 	type JCodeBackendOptions,
@@ -148,7 +145,6 @@ class JCodeSessionImpl implements JCodeSession {
 	readonly address: JCodeSessionAddress;
 	readonly #connection: JCodeHarnessConnection;
 	readonly #options: JCodeBackendOptions;
-	readonly #spec: JCodeSessionSpec;
 	readonly #onDispose: (sessionId: string) => void;
 	#queue: EventQueue;
 	#startedAt = Date.now();
@@ -175,8 +171,6 @@ class JCodeSessionImpl implements JCodeSession {
 		initialState: JCodeSessionState = { kind: "new" },
 	) {
 		this.#connection = connection;
-		this.#options = options;
-		this.#spec = spec;
 		this.address = address;
 		this.#onDispose = onDispose;
 		this.#queue = createEventQueue(
@@ -625,18 +619,8 @@ export function createJCodeBackend(options: JCodeBackendOptions): JCodeBackendIm
 	return new JCodeBackendImpl(options);
 }
 
-export { isRecord as jcodeIsRecord, readString as jcodeReadString };
-
-// Re-exported for callers that branch on parsed reply shapes.
-export { isRecord, readString };
 
 declare module "./protocol" {
 	// (placeholder removed below)
 }
 
-function assertNever(value: never): never {
-	throw new Error(`unexpected harness event: ${JSON.stringify(value)}`);
-}
-void assertNever;
-void isRecord;
-void readString;
