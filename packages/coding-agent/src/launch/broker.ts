@@ -7,7 +7,8 @@ import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProce
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
-import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
+import { BrokerTransportServer } from "../bridge/transport";
+import { daemonBridgeTransportBrokerJournalPath, daemonBridgeTransportEndpoint, daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -350,6 +351,7 @@ class DaemonBroker {
 	readonly #projectDir: string;
 	readonly #runtimeDir: string;
 	readonly #endpoint: string;
+	readonly #bridgeServer: BrokerTransportServer;
 	readonly #token: string;
 	readonly #idleGraceMs: number;
 	readonly #restartBackoffBaseMs: number;
@@ -383,24 +385,36 @@ class DaemonBroker {
 		this.#projectDir = projectDir;
 		this.#runtimeDir = runtimeDir;
 		this.#endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		this.#bridgeServer = new BrokerTransportServer({
+			socketPath: daemonBridgeTransportEndpoint(projectDir, runtimeDir),
+			journalPath: daemonBridgeTransportBrokerJournalPath(runtimeDir),
+		});
 		this.#token = token;
 		this.#idleGraceMs = idleGraceMs;
 		this.#restartBackoffBaseMs = restartBackoffBaseMs;
 	}
 
 	async run(): Promise<void> {
-		await this.#recoverRecords();
-		if (process.platform !== "win32") await fs.rm(this.#endpoint, { force: true });
-		const server = net.createServer(socket => this.#accept(socket));
-		this.#server = server;
-		const { promise: listening, resolve, reject } = Promise.withResolvers<void>();
-		server.once("listening", resolve);
-		server.once("error", reject);
-		server.listen(this.#endpoint);
-		await listening;
-		if (process.platform !== "win32") await fs.chmod(this.#endpoint, 0o600);
-		this.#scheduleIdleShutdown();
-		await this.#finished.promise;
+		try {
+			// The daemon endpoint is the readiness signal for clients. Start the embedded
+			// bridge first so a ready broker always has both services available.
+			await this.#bridgeServer.listen();
+			await this.#recoverRecords();
+			if (process.platform !== "win32") await fs.rm(this.#endpoint, { force: true });
+			const server = net.createServer(socket => this.#accept(socket));
+			this.#server = server;
+			const { promise: listening, resolve, reject } = Promise.withResolvers<void>();
+			server.once("listening", resolve);
+			server.once("error", reject);
+			server.listen(this.#endpoint);
+			await listening;
+			if (process.platform !== "win32") await fs.chmod(this.#endpoint, 0o600);
+			this.#scheduleIdleShutdown();
+			await this.#finished.promise;
+		} catch (error) {
+			await this.shutdown();
+			throw error;
+		}
 	}
 
 	async shutdown(): Promise<void> {
@@ -408,24 +422,37 @@ class DaemonBroker {
 		this.#shuttingDown = true;
 		clearTimeout(this.#idleTimer);
 		this.#idleTimer = undefined;
+		let shutdownError: unknown;
+		const closeResource = async (close: () => Promise<void>): Promise<void> => {
+			try {
+				await close();
+			} catch (error) {
+				shutdownError ??= error;
+			}
+		};
+		await closeResource(() => this.#bridgeServer.close());
 		for (const record of this.#records.values()) {
-			const detached = record.spec.detached && !record.stopRequested && record.snapshot.pid !== undefined;
-			if (!detached && !terminalState(record.snapshot.state)) await this.#stopRecord(record, 2_000);
-			clearTimeout(record.restartTimer);
-			await record.log?.close();
-			await record.persistQueue;
+			await closeResource(async () => {
+				const detached = record.spec.detached && !record.stopRequested && record.snapshot.pid !== undefined;
+				if (!detached && !terminalState(record.snapshot.state)) await this.#stopRecord(record, 2_000);
+				clearTimeout(record.restartTimer);
+				await record.log?.close();
+				await record.persistQueue;
+			});
 		}
 		this.#ownerSockets.clear();
 		for (const socket of this.#sockets) socket.destroy();
 		this.#sockets.clear();
 		this.#clients.clear();
-		if (this.#server) {
-			const { promise, resolve } = Promise.withResolvers<void>();
-			this.#server.close(() => resolve());
-			await promise;
-		}
-		if (process.platform !== "win32") await fs.rm(this.#endpoint, { force: true });
+		await closeResource(async () => {
+			if (!this.#server?.listening) return;
+			await new Promise<void>((resolve, reject) => {
+				this.#server?.close(error => (error ? reject(error) : resolve()));
+			});
+		});
+		if (process.platform !== "win32") await closeResource(() => fs.rm(this.#endpoint, { force: true }));
 		this.#finished.resolve();
+		if (shutdownError !== undefined) throw shutdownError;
 	}
 
 	#accept(socket: net.Socket): void {
