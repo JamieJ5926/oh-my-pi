@@ -103,6 +103,29 @@ describe("bridge core contracts", () => {
 			await Bun.$`rm -f ${path} ${path}.generation ${path}.lock`;
 		}
 	});
+
+	it("lists only unexpired active records from memory and file directories", async () => {
+		const path = `/tmp/bridge-core-list-active-${crypto.randomUUID()}.json`;
+		const directories = [new InMemorySessionDirectory(), new FileSessionDirectory(path)];
+		vi.useFakeTimers();
+		try {
+			for (const [index, directory] of directories.entries()) {
+				setSystemTime(1_000);
+				const live = address(`live-${index}`, 1);
+				expect((await directory.register({ address: live, ttlMs: 10_000 })).ok).toBe(true);
+				const gone = address(`gone-${index}`, 1);
+				expect((await directory.register({ address: gone, ttlMs: 10_000 })).ok).toBe(true);
+				expect((await directory.tombstone(gone, "done")).ok).toBe(true);
+				const fading = address(`fading-${index}`, 1);
+				expect((await directory.register({ address: fading, ttlMs: 100 })).ok).toBe(true);
+				setSystemTime(1_101);
+				expect((await directory.listActive()).map(record => record.address)).toEqual([live]);
+			}
+		} finally {
+			vi.useRealTimers();
+			await Bun.$`rm -f ${path} ${path}.generation ${path}.lock`;
+		}
+	});
 	it("creates absent nested lock parents before the first file claim", async () => {
 		const root = `/tmp/bridge-core-nested-${crypto.randomUUID()}`;
 		const path = `${root}/missing/nested/directory.json`;

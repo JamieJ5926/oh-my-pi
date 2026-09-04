@@ -3,7 +3,11 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockHandler } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { createSessionAddress } from "@oh-my-pi/pi-coding-agent/bridge/core/address";
-import type { MessageEnvelope, TransportAdapter } from "@oh-my-pi/pi-coding-agent/bridge/index";
+import {
+	InMemorySessionDirectory,
+	type MessageEnvelope,
+	type TransportAdapter,
+} from "@oh-my-pi/pi-coding-agent/bridge/index";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
@@ -1189,6 +1193,84 @@ describe("IRC", () => {
 			expect(details?.receipts).toEqual([{ to: "0-Remote", outcome: "injected" }]);
 			expect(sent).toHaveLength(1);
 			expect(sent[0]?.destination).toEqual(ref.address);
+		});
+
+		it("op=send by bare session id reaches a peer known only via the shared directory", async () => {
+			const sessionId = "0196c8d2-7a3f-7e11-9b4c-2f6d8a0c1e5d";
+			const directory = new InMemorySessionDirectory();
+			AgentRegistry.resetGlobalForTests({
+				directory,
+				generationAllocator: directory,
+				localAddress: createSessionAddress({
+					namespace: "omp",
+					host: "sender-host",
+					process: "111",
+					backend: "coding-agent",
+					session: "main",
+					generation: 1,
+				}),
+			});
+			IrcBus.resetGlobalForTests();
+			const senderRegistry = AgentRegistry.global();
+			const senderBus = IrcBus.global();
+			const receiverRegistry = new AgentRegistry({
+				directory,
+				generationAllocator: directory,
+				localAddress: createSessionAddress({
+					namespace: "omp",
+					host: "receiver-host",
+					process: "222",
+					backend: "coding-agent",
+					session: "main",
+					generation: 1,
+				}),
+			});
+			const ref = await receiverRegistry.registerPublished(
+				{
+					id: "0-Remote",
+					displayName: "task",
+					kind: "sub",
+					session: null,
+					address: { ...receiverRegistry.localAddress, session: sessionId },
+				},
+				{ ttlMs: 60_000 },
+			);
+			const sent: MessageEnvelope[] = [];
+			const transport: TransportAdapter = {
+				register: async () => {},
+				unregister: async () => {},
+				close: async () => {},
+				send: async envelope => {
+					sent.push(envelope);
+					return { kind: "delivered", messageId: envelope.id };
+				},
+			};
+			await senderBus.attachTransport({ transport, localAddress: senderRegistry.localAddress });
+			const tool = new HubTool(makeToolSession(senderRegistry, "0-Worker"));
+			const result = await tool.execute("call-1", { op: "send", to: sessionId, message: "ping remote" });
+			expect(result.isError).toBeFalsy();
+			const details = result.details as CoordinationDetails | undefined;
+			expect(details?.receipts).toEqual([{ to: sessionId, outcome: "injected" }]);
+			expect(sent).toHaveLength(1);
+			expect(sent[0]?.destination).toEqual(ref.address);
+		});
+
+		it("op=send by unknown session id keeps the exact Unknown-agent failure", async () => {
+			const directory = new InMemorySessionDirectory();
+			AgentRegistry.resetGlobalForTests({ directory, generationAllocator: directory });
+			IrcBus.resetGlobalForTests();
+			const senderRegistry = AgentRegistry.global();
+			const tool = new HubTool(makeToolSession(senderRegistry, "0-Worker"));
+			const result = await tool.execute("call-1", { op: "send", to: "no-such-session", message: "ping" });
+			expect(result.isError).toBe(true);
+			const details = result.details as CoordinationDetails | undefined;
+			expect(details?.receipts).toEqual([
+				{
+					to: "no-such-session",
+					outcome: "failed",
+					error: 'Unknown agent "no-such-session" — check `irc list` for live peers.',
+				},
+			]);
 		});
 
 		it("op=wait returns a clean non-error timeout result", async () => {

@@ -265,7 +265,14 @@ export async function executeSend(
 	const bus = IrcBus.global();
 	// A direct `to` may be a published bridge-address session (Main's real session id) instead of an id.
 	// Canonicalize once so delivery, the reply wait, and the await-target monitor all use the id.
-	const canonicalTo = isBroadcast ? to : (registry.get(to)?.id ?? registry.getBySession(to)?.id ?? to);
+	const localRef = isBroadcast ? undefined : (registry.get(to) ?? registry.getBySession(to));
+	const canonicalTo = isBroadcast ? to : (localRef?.id ?? to);
+	// A direct `to` that matches no local id or session may still be live in
+	// another process sharing this registry's directory: resolve its published
+	// address and send by address object down the existing transport path.
+	// Unknown session ids keep the exact Unknown-agent failure; id sends are
+	// byte-identical.
+	const remoteAddress = !isBroadcast && !localRef ? await registry.findSessionAddress(to) : undefined;
 	let waited: IrcMessage | null | undefined;
 	const timeoutMs = params.await ? resolveMessageTimeoutMs(settings, params.timeoutMs) : undefined;
 	const awaitAbort = params.await ? new AbortController() : undefined;
@@ -311,9 +318,16 @@ export async function executeSend(
 				bus.send(
 					// Direct sends keep the original `to` so the bus sees a session string
 					// and can take the sessionRef transport branch for session-less refs
-					// (the bus re-canonicalizes to the id internally). Reply matching and
-					// monitoring above still use canonicalTo. Broadcasts fan out by id.
-					{ from: senderId, to: isBroadcast ? target : to, body: message, replyTo: params.replyTo },
+					// (the bus re-canonicalizes to the id internally), unless the
+					// directory scan found the session in another process — then the
+					// address object takes the existing transport path. Reply matching
+					// and monitoring above still use canonicalTo. Broadcasts fan out by id.
+					{
+						from: senderId,
+						to: isBroadcast ? target : (remoteAddress ?? to),
+						body: message,
+						replyTo: params.replyTo,
+					},
 					// Awaited sends mark the sender as blocked on an answer so a
 					// busy recipient that cannot reach a step boundary (async
 					// disabled) auto-replies instead of stranding the sender.

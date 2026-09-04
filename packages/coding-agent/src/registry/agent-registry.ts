@@ -228,8 +228,8 @@ export class AgentRegistry {
 	}
 
 	/** Reset the process-global registry for isolated tests. */
-	static resetGlobalForTests(): void {
-		AgentRegistry.#global = new AgentRegistry();
+	static resetGlobalForTests(options: AgentRegistryOptions = {}): void {
+		AgentRegistry.#global = new AgentRegistry(options);
 	}
 
   readonly #refs = new Map<string, AgentRef>();
@@ -441,6 +441,21 @@ export class AgentRegistry {
 	 */
 	getBySession(session: string): AgentRef | undefined {
 		return this.list().find(ref => ref.address.session === session);
+	}
+
+	/**
+	 * Scan the shared directory for an active record whose bridge-address
+	 * session segment equals `session` (e.g. another process's published
+	 * session id). Tombstoned and expired records never match; the returned
+	 * address carries the generation its owner claimed. Local refs are not
+	 * consulted — callers try id lookup first.
+	 */
+	async findSessionAddress(session: string): Promise<SessionAddress | undefined> {
+		if (!this.#directory) return undefined;
+		for (const record of await this.#directory.listActive()) {
+			if (record.address.session === session) return record.address;
+		}
+		return undefined;
 	}
 
 	/** Perform an explicit authoritative directory lookup. */

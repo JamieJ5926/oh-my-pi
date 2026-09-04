@@ -65,6 +65,8 @@ export interface SessionDirectory {
 	compareAndSwap(address: SessionAddress, expectedGeneration: number, replacement: SessionRecord): Promise<CasResult>;
 	tombstone(address: SessionAddress, reason: string): Promise<TombstoneResult>;
 	purgeExpired(now?: number): Promise<number>;
+	/** Every unexpired active record. Tombstoned and expired records never appear. */
+	listActive(): Promise<ClaimResult[]>;
 }
 
 const MAX_DIRECTORY_BYTES = 8 * 1024 * 1024;
@@ -192,6 +194,15 @@ export class InMemorySessionDirectory implements SessionDirectory, SessionGenera
 			}
 		}
 		return count;
+	}
+
+	async listActive(): Promise<ClaimResult[]> {
+		const now = Date.now();
+		const active: ClaimResult[] = [];
+		for (const record of this.#records.values()) {
+			if (record.kind === "active" && record.expiresAt > now) active.push(record);
+		}
+		return active;
 	}
 }
 
@@ -403,5 +414,15 @@ export class FileSessionDirectory implements SessionDirectory, SessionGeneration
 			}
 			return { result: count, changed: count > 0 };
 		});
+	}
+
+	async listActive(): Promise<ClaimResult[]> {
+		const records = await this.#read();
+		const now = Date.now();
+		const active: ClaimResult[] = [];
+		for (const record of records.values()) {
+			if (record.kind === "active" && record.expiresAt > now) active.push(record);
+		}
+		return active;
 	}
 }

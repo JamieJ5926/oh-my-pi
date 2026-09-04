@@ -138,3 +138,53 @@ describe("AgentRegistry publication lifecycle", () => {
   });
 
 });
+
+describe("AgentRegistry cross-process session resolution", () => {
+  const sessionId = "0196c8d2-7a3f-7e11-9b4c-2f6d8a0c1e5e";
+
+  function makePair() {
+    const directory = new InMemorySessionDirectory();
+    const localAddress = (process: string) => ({ ...base, host: "cross-process", process });
+    const receiver = new AgentRegistry({ directory, generationAllocator: directory, localAddress: localAddress("receiver") });
+    const sender = new AgentRegistry({ directory, generationAllocator: directory, localAddress: localAddress("sender") });
+    return { directory, receiver, sender };
+  }
+
+  function publishedInput(address: { session: string }) {
+    return { ...input("worker"), address: { ...base, host: "cross-process", process: "receiver", session: address.session } };
+  }
+
+  it("resolves another process's published session with its claimed generation", async () => {
+    const { sender, receiver } = makePair();
+    const ref = await receiver.registerPublished(publishedInput({ session: sessionId }), { ttlMs: 60_000 });
+    expect(sender.getBySession(sessionId)).toBeUndefined();
+    expect(await sender.findSessionAddress(sessionId)).toEqual(ref.address);
+  });
+
+  it("misses unknown sessions and directory-less registries", async () => {
+    const { sender } = makePair();
+    expect(await sender.findSessionAddress("no-such-session")).toBeUndefined();
+    const bare = new AgentRegistry({ localAddress: base });
+    expect(await bare.findSessionAddress(sessionId)).toBeUndefined();
+  });
+
+  it("never matches tombstoned or expired records", async () => {
+    vi.useFakeTimers();
+    try {
+      setSystemTime(1_000);
+      const { sender, receiver } = makePair();
+      const ref = await receiver.registerPublished(publishedInput({ session: sessionId }), { ttlMs: 100 });
+      expect(await sender.findSessionAddress(sessionId)).toEqual(ref.address);
+      expect(await receiver.unregisterPublished("worker", ref.address)).toBe(true);
+      expect(await sender.findSessionAddress(sessionId)).toBeUndefined();
+      const revived = await receiver.registerPublished(publishedInput({ session: sessionId }), { ttlMs: 100 });
+      expect(Number(revived.address.generation)).toBe(Number(ref.address.generation) + 1);
+      expect(await sender.findSessionAddress(sessionId)).toEqual(revived.address);
+      setSystemTime(1_101);
+      expect(await sender.findSessionAddress(sessionId)).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      setSystemTime();
+    }
+  });
+});
