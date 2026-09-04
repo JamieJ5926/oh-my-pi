@@ -1,6 +1,6 @@
 import { describe, expect, it, setSystemTime, vi } from "bun:test";
 import { InMemorySessionDirectory, createSessionAddress } from "@oh-my-pi/pi-coding-agent/bridge/index";
-import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { addressSegment, AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 
 const base = createSessionAddress({
   namespace: "omp",
@@ -51,6 +51,8 @@ function input(id: string) {
     });
     const sessionRegistry = new AgentRegistry({ localAddress: sessionBase });
     const sub = sessionRegistry.register(input("worker"));
+    // Pins the sdk subagent branch (sdk.ts registrationInput): the derived session is addressSegment(id, sessionId), not hand-built.
+    expect(sub.address.session).toBe(addressSegment("worker", sessionId));
     expect(sub.address.session).not.toBe(sessionId);
     expect(sub.address.session).toContain(sessionId);
     expect(sub.address.session.length).toBeLessThanOrEqual(128);

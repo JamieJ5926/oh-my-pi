@@ -240,7 +240,11 @@ export class IrcBus {
 	): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, to: typeof msg.to === "string" ? msg.to : msg.to.session, id: Snowflake.next(), ts: Date.now() };
 		const targetAddress = typeof msg.to === "string" ? undefined : msg.to;
-		const ref = targetAddress ? this.#registry.getByAddress(targetAddress) : this.#registry.get(message.to);
+		// A bare string is normally an agent id, but it may be a published bridge-address session (Main's real session id). Ids win.
+		const directRef = targetAddress ? undefined : this.#registry.get(message.to);
+		const sessionRef = targetAddress || directRef ? undefined : this.#registry.getBySession(message.to);
+		const ref = targetAddress ? this.#registry.getByAddress(targetAddress) : (directRef ?? sessionRef);
+		if (sessionRef) message.to = sessionRef.id;
 		if (!ref && targetAddress && this.#transport && this.#localAddress) {
 			const source = this.#registry.get(message.from)?.address ?? this.#localAddress;
 			const envelope = createMessageEnvelope({
@@ -284,6 +288,32 @@ export class IrcBus {
 				outcome: "failed",
 				error: `Agent "${message.to}" is a read-only advisor transcript and cannot be messaged.`,
 			};
+		}
+		// A session id that resolved to a ref with no live session lives in another process: route it over the
+		// transport envelope path (mirroring the address-object branch above) instead of failing it locally.
+		// Parked refs stay on the lifecycle-revival path below, exactly like an id send.
+		if (sessionRef && !ref.session && ref.status !== "parked" && this.#transport && this.#localAddress) {
+			const source = this.#registry.get(message.from)?.address ?? this.#localAddress;
+			const envelope = createMessageEnvelope({
+				id: message.id,
+				source,
+				destination: ref.address,
+				body: {
+					kind: "payload",
+					payload: {
+						kind: "irc-message",
+						from: message.from,
+						body: message.body,
+						...(message.replyTo === undefined ? {} : { replyTo: message.replyTo }),
+						...(opts?.expectsReply === undefined ? {} : { expectsReply: opts.expectsReply }),
+					},
+				},
+				sequence: 1,
+				idempotencyKey: message.id,
+				createdAt: message.ts,
+			});
+			const result = await this.#transport.send(envelope);
+			return this.#remoteReceipt(message.to, result);
 		}
 
 		const lifecycle = this.#lifecycle();
@@ -469,12 +499,12 @@ export class IrcBus {
 					return;
 				}
 				void session.waitForIrcAutoReplies().then(() => {
-					if (!active || registry.get(target)?.session !== session) return;
+					if (!active || (registry.get(target) ?? registry.getBySession(target))?.session !== session) return;
 					settle({ kind: "abort", error: new IrcAwaitTargetStopped(target) });
 				});
 			};
 			const sync = (): void => {
-				const ref = registry.get(target);
+				const ref = registry.get(target) ?? registry.getBySession(target);
 				// Gone or hard-aborted: no reply will ever come.
 				if (!ref || ref.status === "aborted") {
 					settle({ kind: "abort", error: new IrcAwaitTargetStopped(target) });

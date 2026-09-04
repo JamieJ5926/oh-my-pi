@@ -435,6 +435,14 @@ export class AgentRegistry {
 		);
 	}
 
+	/**
+	 * Resolve a local ref by bridge-address session segment (e.g. a published
+	 * session id). Exact match on the segment only; callers try id lookup first.
+	 */
+	getBySession(session: string): AgentRef | undefined {
+		return this.list().find(ref => ref.address.session === session);
+	}
+
 	/** Perform an explicit authoritative directory lookup. */
 	async lookupAddress(address: SessionAddress): Promise<SessionRecord | undefined> {
 		return (await this.#directory?.lookup(address)) ?? undefined;

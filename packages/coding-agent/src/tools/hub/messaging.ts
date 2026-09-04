@@ -263,6 +263,9 @@ export async function executeSend(
 	}
 
 	const bus = IrcBus.global();
+	// A direct `to` may be a published bridge-address session (Main's real session id) instead of an id.
+	// Canonicalize once so delivery, the reply wait, and the await-target monitor all use the id.
+	const canonicalTo = isBroadcast ? to : (registry.get(to)?.id ?? registry.getBySession(to)?.id ?? to);
 	let waited: IrcMessage | null | undefined;
 	const timeoutMs = params.await ? resolveMessageTimeoutMs(settings, params.timeoutMs) : undefined;
 	const awaitAbort = params.await ? new AbortController() : undefined;
@@ -270,9 +273,9 @@ export async function executeSend(
 	let removeAwaitAbortListener: (() => void) | undefined;
 	const waiting = params.await
 		? bus
-				.wait(senderId, { from: to }, timeoutMs ?? DEFAULT_IRC_TIMEOUT_MS, awaitAbort?.signal, {
+				.wait(senderId, { from: canonicalTo }, timeoutMs ?? DEFAULT_IRC_TIMEOUT_MS, awaitAbort?.signal, {
 					drainPending: false,
-					awaitTarget: { registry, target: to },
+					awaitTarget: { registry, target: canonicalTo },
 				})
 				.then(
 					message => ({ message, error: null as Error | null }),
@@ -298,7 +301,7 @@ export async function executeSend(
 		// Broadcasts fan out to live peers only (running | idle); reviving every
 		// parked agent on a broadcast would be a stampede. Direct sends go
 		// through the bus unfiltered so parked recipients are revived.
-		const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
+		const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [canonicalTo];
 		// A broadcast that also reaches the main agent delivers the body to it
 		// directly (its own incoming card); relaying the sibling legs to the
 		// main UI would then show the same body once per other recipient.

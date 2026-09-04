@@ -3,6 +3,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockHandler } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { createSessionAddress } from "@oh-my-pi/pi-coding-agent/bridge/core/address";
+import type { MessageEnvelope, TransportAdapter } from "@oh-my-pi/pi-coding-agent/bridge/index";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
@@ -220,6 +221,60 @@ describe("IRC", () => {
 			registry.setStatus("0-Dead", "aborted");
 			const aborted = await bus.send({ from: "0-Main", to: "0-Dead", body: "hello?" });
 			expect(aborted.outcome).toBe("failed");
+		});
+
+		it("send resolves a published bridge-address session id to the local ref", async () => {
+			const sessionId = "0196c8d2-7a3f-7e11-9b4c-2f6d8a0c1e5b";
+			const main = makeFakeSession();
+			registry.register({
+				id: "Main",
+				displayName: "main",
+				kind: "main",
+				session: main.session,
+				address: { ...registry.localAddress, session: sessionId },
+			});
+			const worker = makeFakeSession();
+			registry.register({ id: "0-Worker", displayName: "task", kind: "sub", session: worker.session });
+
+			const bySession = await bus.send({ from: "0-Worker", to: sessionId, body: "ping main by session" });
+			expect(bySession).toEqual({ to: "Main", outcome: "injected" });
+			expect(main.delivered.map(msg => msg.body)).toEqual(["ping main by session"]);
+
+			const byId = await bus.send({ from: "0-Worker", to: "Main", body: "ping main by id" });
+			expect(byId).toEqual({ to: "Main", outcome: "injected" });
+
+			const unknown = await bus.send({ from: "0-Worker", to: "0-Ghost", body: "hello?" });
+			expect(unknown).toEqual({
+				to: "0-Ghost",
+				outcome: "failed",
+				error: 'Unknown agent "0-Ghost" — check `irc list` for live peers.',
+			});
+		});
+
+		it("send routes a session id with no live session via the transport envelope", async () => {
+			const sessionId = "0196c8d2-7a3f-7e11-9b4c-2f6d8a0c1e5b";
+			const ref = registry.register({
+				id: "0-Remote",
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				address: { ...registry.localAddress, session: sessionId },
+			});
+			const sent: MessageEnvelope[] = [];
+			const transport: TransportAdapter = {
+				register: async () => {},
+				unregister: async () => {},
+				close: async () => {},
+				send: async envelope => {
+					sent.push(envelope);
+					return { kind: "delivered", messageId: envelope.id };
+				},
+			};
+			const remoteBus = new IrcBus({ registry, transport, localAddress: registry.localAddress });
+			const receipt = await remoteBus.send({ from: "0-Worker", to: sessionId, body: "ping remote" });
+			expect(receipt).toEqual({ to: "0-Remote", outcome: "injected" });
+			expect(sent).toHaveLength(1);
+			expect(sent[0]?.destination).toEqual(ref.address);
 		});
 
 		it("send surfaces recipient delivery errors as failed", async () => {
@@ -1088,6 +1143,24 @@ describe("IRC", () => {
 			expect(result.isError).toBe(true);
 			const details = result.details as CoordinationDetails | undefined;
 			expect(details?.receipts?.[0]?.outcome).toBe("failed");
+		});
+
+		it("op=send delivers to a published bridge-address session id", async () => {
+			const sessionId = "0196c8d2-7a3f-7e11-9b4c-2f6d8a0c1e5b";
+			const main = makeFakeSession();
+			registry.register({
+				id: "Main",
+				displayName: "main",
+				kind: "main",
+				session: main.session,
+				address: { ...registry.localAddress, session: sessionId },
+			});
+			const tool = new HubTool(makeToolSession(registry, "0-Sub"));
+			const result = await tool.execute("call-1", { op: "send", to: sessionId, message: "ping" });
+			expect(result.isError).toBeFalsy();
+			const details = result.details as CoordinationDetails | undefined;
+			expect(details?.receipts).toEqual([{ to: "Main", outcome: "injected" }]);
+			expect(main.delivered.map(msg => msg.body)).toEqual(["ping"]);
 		});
 
 		it("op=wait returns a clean non-error timeout result", async () => {
