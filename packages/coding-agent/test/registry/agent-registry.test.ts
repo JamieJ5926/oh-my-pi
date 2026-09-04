@@ -1,6 +1,6 @@
 import { describe, expect, it, setSystemTime, vi } from "bun:test";
 import { InMemorySessionDirectory, createSessionAddress } from "@oh-my-pi/pi-coding-agent/bridge/index";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 
 const base = createSessionAddress({
   namespace: "omp",
@@ -30,6 +30,30 @@ function input(id: string) {
     expect(slash.address.session.length).toBeLessThanOrEqual(128);
     expect(hyphen.address.session.length).toBeLessThanOrEqual(128);
     expect(registry.register(input("a/b")).address.session).toBe(slash.address.session);
+  });
+  it("publishes the real session id for Main and derives subagent sessions from it", () => {
+    const { registry } = makeRegistry();
+    const sessionId = "0196c8d2-7a3f-7e11-9b4c-2f6d8a0c1e5b";
+    const main = registry.register({
+      ...input(MAIN_AGENT_ID),
+      kind: "main" as const,
+      address: { ...base, session: sessionId },
+    });
+    expect(main.address.session).toBe(sessionId);
+
+    const sessionBase = createSessionAddress({
+      namespace: "omp",
+      host: "registry-test",
+      process: "publication",
+      backend: "coding-agent",
+      session: sessionId,
+      generation: 1,
+    });
+    const sessionRegistry = new AgentRegistry({ localAddress: sessionBase });
+    const sub = sessionRegistry.register(input("worker"));
+    expect(sub.address.session).not.toBe(sessionId);
+    expect(sub.address.session).toContain(sessionId);
+    expect(sub.address.session.length).toBeLessThanOrEqual(128);
   });
 
 describe("AgentRegistry publication lifecycle", () => {
