@@ -180,7 +180,7 @@ function isGenerationAllocator(
 
 const MAX_ADDRESS_SEGMENT_LENGTH = 128;
 
-function addressSegment(value: string, baseSession: string): string {
+export function addressSegment(value: string, baseSession: string): string {
 	const normalized = value.replace(/[^A-Za-z0-9._~-]/g, "-") || "agent";
 	const digest = createHash("sha256").update(value, "utf8").digest("hex");
 	const suffix = `-${digest}`;

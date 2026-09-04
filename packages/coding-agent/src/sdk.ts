@@ -140,7 +140,7 @@ import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
+import { addressSegment, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,
@@ -3316,6 +3316,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// so that subagents launched in the same parallel batch can see each other in
 		// their initial `# IRC Peers` block (rendered inside `rebuildSystemPrompt`).
 		// The session reference is attached after construction below.
+		// Publish the real session id as the top-level Main address so the directory
+		// identity follows the session instead of the hardcoded "main" default.
+		// Subagents keep an addressSegment-derived session on the same real id and
+		// never the raw id, so sibling lanes cannot collide on one address.
+		const registrationBaseAddress = agentRegistry.localAddress;
+		const registrationSessionId = sessionManager.getSessionId();
 		const registrationInput = {
 			id: resolvedAgentId,
 			displayName: resolvedAgentDisplayName,
@@ -3324,6 +3330,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			session: null,
 			sessionFile: sessionManager.getSessionFile() ?? null,
 			status: "running" as const,
+			address:
+				resolvedAgentId === MAIN_AGENT_ID
+					? { ...registrationBaseAddress, session: registrationSessionId }
+					: { ...registrationBaseAddress, session: addressSegment(resolvedAgentId, registrationSessionId) },
 		};
 		registeredAgentRef = productionPublication
 			? await agentRegistry.registerPublished(registrationInput)
