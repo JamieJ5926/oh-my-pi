@@ -1162,6 +1162,34 @@ describe("IRC", () => {
 			expect(details?.receipts).toEqual([{ to: "Main", outcome: "injected" }]);
 			expect(main.delivered.map(msg => msg.body)).toEqual(["ping"]);
 		});
+		it("op=send by session id to a session-less ref routes via the transport", async () => {
+			const sessionId = "0196c8d2-7a3f-7e11-9b4c-2f6d8a0c1e5c";
+			const ref = registry.register({
+				id: "0-Remote",
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				address: { ...registry.localAddress, session: sessionId },
+			});
+			const sent: MessageEnvelope[] = [];
+			const transport: TransportAdapter = {
+				register: async () => {},
+				unregister: async () => {},
+				close: async () => {},
+				send: async envelope => {
+					sent.push(envelope);
+					return { kind: "delivered", messageId: envelope.id };
+				},
+			};
+			await bus.attachTransport({ transport, localAddress: registry.localAddress });
+			const tool = new HubTool(makeToolSession(registry, "0-Worker"));
+			const result = await tool.execute("call-1", { op: "send", to: sessionId, message: "ping remote" });
+			expect(result.isError).toBeFalsy();
+			const details = result.details as CoordinationDetails | undefined;
+			expect(details?.receipts).toEqual([{ to: "0-Remote", outcome: "injected" }]);
+			expect(sent).toHaveLength(1);
+			expect(sent[0]?.destination).toEqual(ref.address);
+		});
 
 		it("op=wait returns a clean non-error timeout result", async () => {
 			const fake = makeFakeSession();

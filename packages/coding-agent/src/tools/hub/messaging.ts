@@ -309,7 +309,11 @@ export async function executeSend(
 		const receipts = await Promise.all(
 			targets.map(target =>
 				bus.send(
-					{ from: senderId, to: target, body: message, replyTo: params.replyTo },
+					// Direct sends keep the original `to` so the bus sees a session string
+					// and can take the sessionRef transport branch for session-less refs
+					// (the bus re-canonicalizes to the id internally). Reply matching and
+					// monitoring above still use canonicalTo. Broadcasts fan out by id.
+					{ from: senderId, to: isBroadcast ? target : to, body: message, replyTo: params.replyTo },
 					// Awaited sends mark the sender as blocked on an answer so a
 					// busy recipient that cannot reach a step boundary (async
 					// disabled) auto-replies instead of stranding the sender.
