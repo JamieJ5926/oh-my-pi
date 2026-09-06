@@ -3,6 +3,8 @@ Use `op: "list"` to discover live peers. Default is running+idle plus running/id
 
 # Messaging & Jobs
 
+You can message a peer at any point in your turn. A `send` with `to` reaches a sibling or your parent and returns immediately, so your turn continues. A peer's message arrives as steering while you work. Answer it with `send` and `replyTo`. Message the owner when a small piece of the work belongs to another agent, instead of guessing at it or stopping.
+
 Background jobs auto-deliver when they finish. You NEVER need to poll; if `jobs`/`wait` observes a settled job first, that snapshot is the delivery and suppresses duplicate `async-result`.
 
 - **The user is NOT a peer.** `Main` answers the user ONLY in a plain text block; a `send` shows them a tool-card preview (2 lines while collapsed). Thinking is not output either.
