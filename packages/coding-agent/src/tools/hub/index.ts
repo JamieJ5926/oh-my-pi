@@ -137,6 +137,49 @@ interface MessagingDeps {
 }
 
 const PROGRESS_INTERVAL_MS = 500;
+type WaitKind = "supervised-process" | "agent-message";
+type EffectiveWaitPolicy = {
+	callerRole: import("..").CallerRoleClass;
+	waitKind: WaitKind;
+	timeoutMs: number;
+};
+
+const NON_WATCHER_WAIT_CAP_MS = 120_000;
+const WATCHER_REMEDY = "Dispatch one watcher that holds the long wait and yields once on the event.";
+
+function resolveWaitPolicy(
+	session: ToolSession,
+	waitKind: WaitKind,
+	requestedTimeoutMs: number | undefined,
+	configuredTimeoutMs: number,
+): EffectiveWaitPolicy | AgentToolResult<HubDetails> {
+	const callerRole = session.getCallerRole?.() ?? "non-watcher";
+	const timeoutMs = requestedTimeoutMs ?? configuredTimeoutMs;
+	if (callerRole === "non-watcher" && (timeoutMs === 0 || timeoutMs > NON_WATCHER_WAIT_CAP_MS)) {
+		return hubErrorResult(
+			`hub wait timeout must be at most 120 seconds for a non-watcher (${waitKind}); ${WATCHER_REMEDY}`,
+			{ op: "wait" },
+		);
+	}
+	return {
+		callerRole,
+		waitKind,
+		timeoutMs: callerRole === "watcher" ? timeoutMs : Math.min(timeoutMs, NON_WATCHER_WAIT_CAP_MS),
+	};
+}
+
+function isWaitPolicyError(
+	value: EffectiveWaitPolicy | AgentToolResult<HubDetails>,
+): value is AgentToolResult<HubDetails> {
+	return "content" in value;
+}
+
+function processWaitPolicyError(session: ToolSession, params: HubParams): AgentToolResult<HubDetails> | undefined {
+	const requestedSeconds = params.timeout;
+	const requestedTimeoutMs = requestedSeconds === undefined ? undefined : requestedSeconds * 1_000;
+	const policy = resolveWaitPolicy(session, "supervised-process", requestedTimeoutMs, 30_000);
+	return isWaitPolicyError(policy) ? policy : undefined;
+}
 
 /** Mutating process ops require exec approval; messaging, jobs, and inspection are read-only. */
 function hubApproval(params: unknown): ToolApprovalDecision {
@@ -304,9 +347,12 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "inbox" });
 				return executeInbox(messaging.registry, messaging.senderId, params.peek);
 			}
-			case "wait":
+			case "wait": {
+				const policyError = processWaitPolicyError(this.session, params);
+				if (policyError) return policyError;
 				if (params.name?.trim()) return this.#launch(params, "wait", signal);
 				return this.#executeWait(params, signal, onUpdate);
+			}
 			case "cancel": {
 				const manager = this.session.asyncJobManager;
 				if (!manager) return this.#asyncDisabled("cancel");
