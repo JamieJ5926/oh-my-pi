@@ -119,6 +119,8 @@ export * from "./yield";
 
 /** Tool type (AgentTool from pi-ai) */
 export type Tool = AgentTool<any, any, any>;
+/** Runtime caller class used by hub wait policy. */
+export type CallerRoleClass = "watcher" | "non-watcher";
 
 export type ContextFileEntry = {
 	path: string;
@@ -269,6 +271,8 @@ export interface ToolSession {
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
+	/** Caller role supplied by the resolved agent definition, never inferred from model or id. */
+	getCallerRole?: () => CallerRoleClass;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
 	/** Look up an enabled tool through the eval bridge's normal permission pipeline. */
