@@ -145,13 +145,17 @@ export function createPersistedSubagentReviverFactory(
 				restrictToolNames: restrictToolNames || undefined,
 				requireYieldTool: true,
 				systemPrompt: [init.systemPrompt],
-				...(init.roleProfile ? {
-					contextFiles: init.roleProfile.contextFiles,
-					rules: init.roleProfile.rules,
-					skills: init.roleProfile.skills,
-					preloadedExtensionPaths: init.roleProfile.extensionPaths,
-					extensionRoots: init.roleProfile.extensionRoots ? () => init.roleProfile!.extensionRoots! : undefined,
-				} : {}),
+				...(init.roleProfile
+					? {
+							contextFiles: init.roleProfile.contextFiles,
+							rules: init.roleProfile.rules,
+							skills: init.roleProfile.skills,
+							preloadedExtensionPaths: init.roleProfile.extensionPaths,
+							extensionRoots: init.roleProfile.extensionRoots
+								? () => init.roleProfile!.extensionRoots!
+								: undefined,
+						}
+					: {}),
 				// Old files predate persisted spawns: deny re-spawning rather than let
 				// createAgentSession default to wildcard ("*").
 				spawns: init.spawns ?? "",

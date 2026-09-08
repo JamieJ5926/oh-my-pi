@@ -369,9 +369,11 @@ async function resolveRoleInputs(session: ToolSession, agent: AgentDefinition) {
 		selector === undefined || selector === "shared"
 			? values
 			: values.filter(value => names(value).some(name => selector.includes(name)));
-	const contextFiles = select(agent.instructions,
+	const contextFiles = select(
+		agent.instructions,
 		session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md") ?? [],
-		file => [file.path, path.basename(file.path)]);
+		file => [file.path, path.basename(file.path)],
+	);
 	const rules = select(agent.instructions, session.rules ?? [], rule => [rule.name, rule.path]);
 	const skills = select(agent.skills, session.skills ?? [], skill => [skill.name, skill.filePath]);
 	const autoloadSkills = agent.autoloadSkills?.flatMap(name => skills.filter(skill => skill.name === name)) ?? [];
@@ -380,11 +382,14 @@ async function resolveRoleInputs(session: ToolSession, agent: AgentDefinition) {
 		: [];
 	const extensionPaths = [...new Set([...(session.extensionPaths ?? []), ...roleHooks])];
 	const extensionRoots = session.effectiveExtensionRoots?.();
-	const content = agent.filePath ? await fs.readFile(agent.filePath, "utf8") : JSON.stringify(agent);
+	const content =
+		agent.filePath && !agent.filePath.startsWith("embedded:")
+			? await fs.readFile(agent.filePath, "utf8")
+			: JSON.stringify(agent);
 	const roleProfile = {
 		path: agent.filePath,
 		contentHash: createHash("sha256").update(content).digest("hex"),
-		mode: agent.minimalPrompt ? "minimal" as const : "full" as const,
+		mode: agent.minimalPrompt ? ("minimal" as const) : ("full" as const),
 		sources: {
 			prompt: agent.filePath ?? `bundled:${agent.name}`,
 			instructions: [...contextFiles.map(file => file.path), ...rules.map(rule => rule.path)],
@@ -392,7 +397,11 @@ async function resolveRoleInputs(session: ToolSession, agent: AgentDefinition) {
 			hooks: extensionPaths,
 			tools: agent.tools ?? [],
 		},
-		contextFiles, rules, skills, extensionPaths, extensionRoots,
+		contextFiles,
+		rules,
+		skills,
+		extensionPaths,
+		extensionRoots,
 	};
 	return { contextFiles, rules, skills, autoloadSkills, roleHooks, extensionPaths, roleProfile };
 }

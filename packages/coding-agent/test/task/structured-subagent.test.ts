@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
@@ -687,7 +688,12 @@ describe("role profile inputs", () => {
 	];
 	const source = { provider: "test", providerName: "test", path: "/rules", level: "user" as const };
 	const ROLE_RULES: Rule[] = [
-		{ name: "naming", path: "/rules/naming.md", content: "Use names.", _source: { ...source, path: "/rules/naming.md" } },
+		{
+			name: "naming",
+			path: "/rules/naming.md",
+			content: "Use names.",
+			_source: { ...source, path: "/rules/naming.md" },
+		},
 		{ name: "other", path: "/rules/other.md", content: "Other.", _source: { ...source, path: "/rules/other.md" } },
 	];
 	const ROLE_FILES: ContextFileEntry[] = [
@@ -787,10 +793,7 @@ describe("role profile inputs", () => {
 			await Bun.write(filePath, "---\nname: worker\ndescription: Test worker.\n---\n\nDo work.\n");
 			const options = await dispatch({ ...AGENT, filePath, hooks: ["./hooks/role.ts"] });
 			expect(options.roleProfile?.path).toBe(filePath);
-			expect(options.preloadedExtensionPaths).toEqual([
-				"/ext/shared-hook.ts",
-				path.join(root, "hooks", "role.ts"),
-			]);
+			expect(options.preloadedExtensionPaths).toEqual(["/ext/shared-hook.ts", path.join(root, "hooks", "role.ts")]);
 			expect(options.roleProfile?.sources.hooks).toEqual([
 				"/ext/shared-hook.ts",
 				path.join(root, "hooks", "role.ts"),
@@ -813,5 +816,13 @@ describe("role profile inputs", () => {
 	it("keeps the persisted profile JSON-serializable", async () => {
 		const options = await dispatch({ ...AGENT, instructions: ["CONTEXT.md"], skills: ["swarm"] });
 		expect(JSON.parse(JSON.stringify(options.roleProfile))).toEqual(options.roleProfile);
+	});
+
+	it("hashes bundled agents without touching the synthetic embedded path", async () => {
+		const bundled = { ...AGENT, filePath: "embedded:worker.md" };
+		const options = await dispatch(bundled);
+		const expected = createHash("sha256").update(JSON.stringify(bundled)).digest("hex");
+		expect(options.roleProfile?.contentHash).toBe(expected);
+		expect(options.roleProfile?.path).toBe("embedded:worker.md");
 	});
 });

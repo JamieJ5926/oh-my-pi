@@ -221,4 +221,50 @@ describe("createAgentSession systemPrompt rebuild path", () => {
 			defaulted.authStorage.close();
 		}
 	});
+
+	it("keeps advisor context wiring when an explicit prompt overrides the default", async () => {
+		using tempDir = TempDir.createSync("@omp-system-prompt-advisor-override-");
+		const contextPath = tempDir.join("AGENTS.md");
+		await Bun.write(contextPath, INITIAL_CONTEXT);
+		const authStorage = await AuthStorage.create(`${tempDir.join("explicit")}/auth.db`);
+		const model = getBundledModel("openai", "gpt-4o-mini");
+		authStorage.setRuntimeApiKey("openai", "test-key");
+		const settings = Settings.isolated({});
+		settings.set("advisor.enabled", true);
+		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		const modelRegistry = new ModelRegistry(authStorage, `${tempDir.join("explicit")}/models.json`);
+		const sessionManager = SessionManager.inMemory(tempDir.join("explicit"));
+		const { session } = await createAgentSession({
+			cwd: tempDir.join("explicit"),
+			agentDir: tempDir.path(),
+			modelRegistry,
+			sessionManager,
+			settings,
+			model,
+			disableExtensionDiscovery: true,
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			toolNames: [],
+			restrictToolNames: true,
+			skipPythonPreflight: true,
+			systemPrompt: "explicit override prompt",
+		});
+		try {
+			const advisorPrompt = () => session.getAdvisorAgent()?.state.systemPrompt.join("\n") ?? "";
+			expect(session.systemPrompt).toEqual(["explicit override prompt"]);
+			expect(session.isAdvisorActive()).toBe(true);
+			expect(advisorPrompt()).toContain(INITIAL_CONTEXT);
+			await Bun.write(contextPath, UPDATED_CONTEXT);
+			await session.refreshSkills();
+			expect(session.systemPrompt).toEqual(["explicit override prompt"]);
+			const refreshed = advisorPrompt();
+			expect(refreshed).toContain(UPDATED_CONTEXT);
+			expect(refreshed).not.toContain(INITIAL_CONTEXT);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
 });

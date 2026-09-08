@@ -3038,7 +3038,34 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			rebuildOptions?: { directToolNames?: readonly string[] },
 		): Promise<BuildSystemPromptResult> => {
 			if (options.systemPrompt !== undefined && typeof options.systemPrompt !== "function") {
-				return { systemPrompt: typeof options.systemPrompt === "string" ? [options.systemPrompt] : options.systemPrompt };
+				// An explicit prompt overrides the primary system prompt but must not
+				// strip the advisor's background knowledge. The revive path passes
+				// `systemPrompt: [init.systemPrompt]` while restoring advisor opt-in,
+				// so mirror the advisor wiring here: the memory assignment feeds the
+				// session constructor on the initial build, and the setters refresh
+				// the live session on later rebuilds.
+				if (hasSession && options.contextFiles === undefined) {
+					contextFiles = await logger.time(
+						"discoverContextFiles",
+						discoverContextFiles,
+						sessionManager.getCwd(),
+						agentDir,
+						[...(settings.get("disabledExtensions") ?? [])],
+					);
+					toolSession.contextFiles = contextFiles;
+				}
+				const explicitMemoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
+				const explicitMemoryInstructions = explicitMemoryBackend
+					? await explicitMemoryBackend.buildDeveloperInstructions(agentDir, settings, session)
+					: undefined;
+				advisorMemoryPrompt = formatAdvisorMemoryPrompt(explicitMemoryInstructions);
+				if (hasSession) {
+					session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
+					session.setAdvisorMemoryPrompt(advisorMemoryPrompt);
+				}
+				return {
+					systemPrompt: typeof options.systemPrompt === "string" ? [options.systemPrompt] : options.systemPrompt,
+				};
 			}
 			const promptCwd = sessionManager.getCwd();
 			const activeRepoContext = hasSession
