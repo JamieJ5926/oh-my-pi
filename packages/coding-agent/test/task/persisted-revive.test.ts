@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { rm } from "node:fs/promises";
 import * as path from "node:path";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -510,5 +511,18 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.skills).toBeUndefined();
 		expect(capturedOptions?.preloadedExtensionPaths).toBeUndefined();
 		expect(capturedOptions?.extensionRoots).toBeUndefined();
+	});
+	it("leaves transcripts whose persisted cwd is gone transcript-only", async () => {
+		const gone = makeTempDir("@pi-revive-gone-cwd-");
+		const keep = makeTempDir("@pi-revive-gone-cwd-sessions-");
+		const manager = SessionManager.create(gone, path.join(keep, "sessions"));
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		manager.appendSessionInit({ systemPrompt: "persisted prompt", task: "persisted task", tools: ["read", "yield"] });
+		await manager.close();
+		await rm(gone, { recursive: true, force: true });
+
+		const reviver = await createFactory(keep)(createRef(sessionFile));
+		expect(reviver).toBeUndefined();
 	});
 });

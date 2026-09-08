@@ -7,6 +7,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initializeWithSettings } from "@oh-my-pi/pi-coding-agent/discovery";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -158,6 +159,66 @@ describe("context-file prompt refresh", () => {
 		} finally {
 			await session.dispose();
 			authStorage.close();
+		}
+	});
+});
+
+describe("createAgentSession systemPrompt rebuild path", () => {
+	async function createPromptSession(cwd: string, systemPrompt?: CreateAgentSessionOptions["systemPrompt"]) {
+		const authStorage = await AuthStorage.create(`${cwd}/auth.db`);
+		const model = getBundledModel("openai", "gpt-4o-mini");
+		const modelRegistry = new ModelRegistry(authStorage, `${cwd}/models.json`);
+		const sessionManager = SessionManager.inMemory(cwd);
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir: cwd,
+			modelRegistry,
+			sessionManager,
+			settings: Settings.isolated({}),
+			model,
+			disableExtensionDiscovery: true,
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			toolNames: [],
+			restrictToolNames: true,
+			skipPythonPreflight: true,
+			...(systemPrompt !== undefined ? { systemPrompt } : {}),
+		});
+		return { session, authStorage };
+	}
+
+	it("wraps a string, passes an array through, and builds the default otherwise", async () => {
+		using tempDir = TempDir.createSync("@omp-system-prompt-rebuild-");
+		const stringed = await createPromptSession(tempDir.join("string"), "custom string prompt");
+		try {
+			expect(stringed.session.systemPrompt).toEqual(["custom string prompt"]);
+		} finally {
+			await stringed.session.dispose();
+			stringed.authStorage.close();
+		}
+		const arrayed = await createPromptSession(tempDir.join("array"), ["block-a", "block-b"]);
+		try {
+			expect(arrayed.session.systemPrompt).toEqual(["block-a", "block-b"]);
+		} finally {
+			await arrayed.session.dispose();
+			arrayed.authStorage.close();
+		}
+		const viaCallback = await createPromptSession(tempDir.join("callback"), () => ["wrapped default"]);
+		try {
+			expect(viaCallback.session.systemPrompt).toEqual(["wrapped default"]);
+		} finally {
+			await viaCallback.session.dispose();
+			viaCallback.authStorage.close();
+		}
+		const defaulted = await createPromptSession(tempDir.join("default"));
+		try {
+			expect(defaulted.session.systemPrompt.length).toBeGreaterThan(0);
+			expect(defaulted.session.systemPrompt).not.toEqual(["wrapped default"]);
+		} finally {
+			await defaulted.session.dispose();
+			defaulted.authStorage.close();
 		}
 	});
 });

@@ -324,11 +324,15 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		.filter(Boolean);
 	const selector = (value: unknown): "shared" | string[] | undefined => {
 		if (value === undefined || value === null) return undefined;
-		if (value === "shared") return "shared";
-		if (Array.isArray(value) && value.every(item => typeof item === "string")) {
-			return [...new Set(value.map(item => item.trim()).filter(Boolean))];
+		if (typeof value === "string") {
+			if (value.trim() === "shared") return "shared";
+			return parseArrayOrCSV(value) ?? [];
 		}
-		if (typeof value === "string") return parseArrayOrCSV(value) ?? [];
+		if (Array.isArray(value) && value.every(item => typeof item === "string")) {
+			const normalized = [...new Set(value.map(item => item.trim()).filter(Boolean))];
+			if (normalized.length === 1 && normalized[0] === "shared") return "shared";
+			return normalized;
+		}
 		throw new Error("Agent input selectors must be shared, a string, or a string array");
 	};
 	return {

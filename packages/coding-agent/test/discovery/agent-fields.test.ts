@@ -229,6 +229,20 @@ describe("parseAgentFields", () => {
 			]);
 		}
 	});
+	test("normalizes single-element shared selectors to the sentinel", () => {
+		for (const field of ["instructions", "skills", "hooks"] as const) {
+			expect(parseAgentFields({ name: "worker", description: "desc", [field]: ["shared"] })?.[field]).toBe(
+				"shared",
+			);
+			expect(parseAgentFields({ name: "worker", description: "desc", [field]: [" shared "] })?.[field]).toBe(
+				"shared",
+			);
+			expect(parseAgentFields({ name: "worker", description: "desc", [field]: " shared " })?.[field]).toBe(
+				"shared",
+			);
+		}
+	});
+
 
 	test("keeps explicit-empty selectors distinct from absent ones", () => {
 		for (const field of ["instructions", "skills", "hooks"] as const) {

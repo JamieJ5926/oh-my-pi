@@ -58,13 +58,13 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 - `instructions` matches context files by path or basename (except `AGENTS.md`, which never forwards) and rules by name or path.
 - `skills` matches session skills by name or file path. `autoloadSkills` then resolves against that subset.
 - `hooks` resolves relative to the role file, or to the session directory for bundled roles, and appends to the shared extension paths. Restricted tool mode still clears every preloaded extension path.
-- The resolved set is hashed with the role file content into `roleProfile.contentHash`. `mode` records `minimal` or `full`.
+- The role file content is hashed into `roleProfile.contentHash` (file bytes only, not the resolved set). `mode` records `minimal` or `full`.
 
 `runSubprocess` (`src/task/executor.ts`) renders `minimalPrompt` roles from an empty default prompt and full roles around it. It persists `roleProfile` in `session_init` with `sources.tools` corrected to the enabled set minus synthetic `write` when the role never granted it (`src/session/session-entries.ts`, `src/session/session-manager.ts`).
 
 Cold revival (`src/task/persisted-revive.ts`) replays the persisted prompt verbatim as a fixed array and restores the persisted context files, rules, skills, extension paths, and extension roots. Sessions persisted before role profiles revive with the verbatim prompt and no role inputs.
 
-`createAgentSession` (`src/sdk.ts`) passes a string or array `systemPrompt` through unchanged and only builds the default prompt when `systemPrompt` is absent or a callback.
+`createAgentSession` (`src/sdk.ts`) wraps a bare string `systemPrompt` into a single-element array, passes an array through unchanged, and only builds the default prompt when `systemPrompt` is absent or a callback.
 
 ## Role-backed custom agents
 
