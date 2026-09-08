@@ -2419,12 +2419,14 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			softRequestBudgetNotice: false,
 			maxRuntimeMs,
 		});
+		turnMonitor.progress.canDelegate = session.getEnabledToolNames().includes("task");
 
 		const startedPayload = {
 			id,
 			agent: agent.name,
 			parentToolCallId: options.parentToolCallId,
 			detached: true,
+			canDelegate: turnMonitor.progress.canDelegate,
 			agentSource: agent.source,
 			description: options.description,
 			status: "started",
@@ -2681,12 +2683,14 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		softRequestBudgetNotice: false,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
 	});
+	monitor.progress.canDelegate = session.getEnabledToolNames().includes("task");
 
 	const startedPayload = {
 		id,
 		agent: agent.name,
 		parentToolCallId: options.parentToolCallId,
 		detached: true,
+		canDelegate: monitor.progress.canDelegate,
 		agentSource: agent.source,
 		description: options.description,
 		status: "started",
@@ -3312,12 +3316,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				};
 			}
 
+			progress.canDelegate = session.getEnabledToolNames().includes("task");
 			// Emit lifecycle start event
 			const startedPayload = {
 				id,
 				agent: agent.name,
 				parentToolCallId: options.parentToolCallId,
 				detached: options.detached,
+				canDelegate: progress.canDelegate,
 				agentSource: agent.source,
 				description: options.description,
 				status: "started" as const,

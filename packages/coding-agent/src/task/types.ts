@@ -101,6 +101,7 @@ export interface SubagentLifecyclePayload {
 	 * unset — surfaces like the subagent HUD only list detached spawns.
 	 */
 	detached?: boolean;
+	canDelegate?: boolean;
 }
 
 /** Display cap for a normalized one-line label (roster line, registry `displayName`, prompt field). */
@@ -400,6 +401,7 @@ export interface AgentProgress {
 	id: string;
 	agent: string;
 	agentSource: AgentSource;
+	canDelegate?: boolean;
 	status: "pending" | "running" | "completed" | "failed" | "aborted";
 	task: string;
 	assignment?: string;

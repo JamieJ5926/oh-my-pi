@@ -50,6 +50,7 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 	let observer: IrcWakeObserver | undefined;
 	const session = {
 		getMountedXdevToolNames: () => [],
+		getEnabledToolNames: () => activeToolNames.at(-1) ?? [],
 		setActiveToolsByName: async (names: string[]) => {
 			activeToolNames.push(names);
 		},

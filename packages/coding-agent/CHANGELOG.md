@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Completed subagents now appear under an explicit Completed heading as one outcome-dot and name chain in task order above Todo and Subagents. The chain restores its names after terminal expansion. Child details remain in Agent Hub, active delegators retain named hierarchy rows, and HUD token displays use compact k/m/b units. Direct compact rows omit redundant role badges and task prompt excerpts.
+
 ### Fixed
 
 - Claude marketplace MCP servers now resolve environment placeholders in stdio environment values instead of passing strings such as `${NAME:-}` literally ([#10481](https://github.com/can1357/oh-my-pi/pull/10481) by [@mrexodia](https://github.com/mrexodia)).

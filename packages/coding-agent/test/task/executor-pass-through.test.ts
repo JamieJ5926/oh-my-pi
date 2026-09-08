@@ -15,11 +15,20 @@ import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import type { ToolPathWithSource } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { LoadExtensionsResult, PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import {
+	attachIrcWakeTurnMonitor,
+	runSubagentFollowUpTurn,
+	runSubprocess,
+} from "@oh-my-pi/pi-coding-agent/task/executor";
+import {
+	type AgentDefinition,
+	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+	TASK_SUBAGENT_PROGRESS_CHANNEL,
+} from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void): AgentSession {
@@ -203,6 +212,83 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(absentResult.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["yield", "hub"]);
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
+	});
+
+	it("publishes delegation capability from resolved enabled tools before child execution", async () => {
+		for (const canDelegate of [true, false]) {
+			const session = yieldEmittingSession();
+			vi.spyOn(session, "getEnabledToolNames").mockReturnValue(
+				canDelegate ? ["read", "task", "yield"] : ["read", "yield"],
+			);
+			vi.spyOn(session, "getActiveToolNames").mockReturnValue(["eval", "yield"]);
+			vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+			const bus = new EventBus();
+			const lifecycle: unknown[] = [];
+			const progress: unknown[] = [];
+			bus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload => lifecycle.push(payload));
+			bus.on(TASK_SUBAGENT_PROGRESS_CHANNEL, payload => progress.push(payload));
+			const prompt = vi.spyOn(session, "prompt");
+			bus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload => {
+				if (
+					payload !== null &&
+					typeof payload === "object" &&
+					"status" in payload &&
+					payload.status === "started"
+				) {
+					expect(prompt).not.toHaveBeenCalled();
+				}
+			});
+			const result = await runSubprocess({
+				...baseOptions,
+				id: `resolved-delegation-${canDelegate}`,
+				eventBus: bus,
+				agent: { ...baseAgent, tools: canDelegate ? ["read", "yield"] : ["read", "task", "yield"] },
+			});
+			expect(result.exitCode).toBe(0);
+			expect(lifecycle).toContainEqual(expect.objectContaining({ status: "started", canDelegate }));
+			expect(progress).toContainEqual(
+				expect.objectContaining({ progress: expect.objectContaining({ canDelegate }) }),
+			);
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("publishes current resolved capability on IRC wake and revived follow-up turns", async () => {
+		for (const canDelegate of [true, false]) {
+			const session = yieldEmittingSession();
+			vi.spyOn(session, "getEnabledToolNames").mockReturnValue(canDelegate ? ["task", "yield"] : ["yield"]);
+			const bus = new EventBus();
+			const lifecycle: unknown[] = [];
+			const progress: unknown[] = [];
+			bus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload => lifecycle.push(payload));
+			bus.on(TASK_SUBAGENT_PROGRESS_CHANNEL, payload => progress.push(payload));
+			const observer = vi.spyOn(session, "setIrcWakeTurnObserver");
+			attachIrcWakeTurnMonitor(session, { id: `wake-${canDelegate}`, agent: baseAgent, eventBus: bus });
+			const onWake = observer.mock.calls.at(-1)?.[0];
+			if (!onWake) throw new Error("Expected installed wake monitor");
+			const finish = onWake([]);
+			expect(lifecycle).toContainEqual(expect.objectContaining({ status: "started", canDelegate }));
+			await session.prompt("wake");
+			await finish?.();
+			expect(progress).toContainEqual(
+				expect.objectContaining({ progress: expect.objectContaining({ canDelegate }) }),
+			);
+			lifecycle.length = 0;
+			progress.length = 0;
+			vi.spyOn(AgentLifecycleManager.global(), "ensureLive").mockResolvedValue(session);
+			const result = await runSubagentFollowUpTurn({
+				id: `revived-${canDelegate}`,
+				agent: baseAgent,
+				message: "follow up",
+				eventBus: bus,
+			});
+			expect(result.exitCode).toBe(0);
+			expect(lifecycle).toContainEqual(expect.objectContaining({ status: "started", canDelegate }));
+			expect(progress).toContainEqual(
+				expect.objectContaining({ progress: expect.objectContaining({ canDelegate }) }),
+			);
+			vi.restoreAllMocks();
+		}
 	});
 
 	it("records the spawning agent as parentAgentId, distinct from the child's own id and prefix", async () => {
