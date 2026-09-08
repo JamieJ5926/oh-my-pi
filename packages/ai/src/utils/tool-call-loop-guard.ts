@@ -91,6 +91,7 @@ export class ToolCallLoopGuard {
 		}
 
 		const turnHash = toolCalls
+			.filter(tc => !this.#exemptTools.has(tc.name))
 			.map(tc => `${tc.name}:${JSON.stringify(canonicalizeToolCallValue(tc.arguments))}`)
 			.join("|");
 		if (turnHash === this.#lastHash) {
