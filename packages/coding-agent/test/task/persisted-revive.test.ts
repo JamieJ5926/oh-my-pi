@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -13,6 +15,7 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { ResolvedRoleProfile } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -71,6 +74,7 @@ async function createPersistedSession(
 	modelRole?: string,
 	advisor?: string,
 	contract?: { tools?: string[]; readOnly?: boolean },
+	roleProfile?: ResolvedRoleProfile,
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -84,6 +88,7 @@ async function createPersistedSession(
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
 		advisor,
 		readOnly: contract?.readOnly,
+		roleProfile,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -431,5 +436,79 @@ describe("persisted subagent revival", () => {
 		expect(await Bun.file(artifactPath).text()).toBe(completedReport);
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("cold-revives the persisted role profile inputs verbatim", async () => {
+		const cwd = makeTempDir("@pi-roleprofile-revive-");
+		const source = { provider: "test", providerName: "test", path: "/rules/naming.md", level: "user" as const };
+		const skill: Skill = {
+			name: "swarm",
+			description: "Fanout",
+			filePath: "/skills/swarm/SKILL.md",
+			baseDir: "/skills/swarm",
+			source: "user",
+		};
+		const rule: Rule = { name: "naming", path: "/rules/naming.md", content: "Use names.", _source: source };
+		const profile: ResolvedRoleProfile = {
+			path: "/agents/worker.md",
+			contentHash: "0".repeat(64),
+			mode: "minimal",
+			sources: {
+				prompt: "/agents/worker.md",
+				instructions: ["/project/CONTEXT.md", "/rules/naming.md"],
+				skills: ["/skills/swarm/SKILL.md"],
+				hooks: ["/ext/hook.ts"],
+				tools: ["read", "yield"],
+			},
+			contextFiles: [{ path: "/project/CONTEXT.md", content: "Context." }],
+			rules: [rule],
+			skills: [skill],
+			extensionPaths: ["/ext/hook.ts"],
+			extensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
+		};
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, undefined, profile);
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		const activeToolNames: string[][] = [];
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(Array.isArray(capturedOptions?.systemPrompt)).toBe(true);
+		expect(capturedOptions?.systemPrompt).toEqual(["persisted prompt"]);
+		expect(capturedOptions?.contextFiles).toEqual(profile.contextFiles);
+		expect(capturedOptions?.rules).toEqual(profile.rules);
+		expect(capturedOptions?.skills).toEqual(profile.skills);
+		expect(capturedOptions?.preloadedExtensionPaths).toEqual(profile.extensionPaths);
+		expect(typeof capturedOptions?.extensionRoots).toBe("function");
+		expect(capturedOptions?.extensionRoots?.()).toEqual(profile.extensionRoots);
+	});
+
+	it("replays legacy sessions with a verbatim prompt and no role inputs", async () => {
+		const cwd = makeTempDir("@pi-legacy-revive-");
+		const sessionFile = await createPersistedSession(cwd);
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.systemPrompt).toEqual(["persisted prompt"]);
+		expect(capturedOptions?.contextFiles).toBeUndefined();
+		expect(capturedOptions?.rules).toBeUndefined();
+		expect(capturedOptions?.skills).toBeUndefined();
+		expect(capturedOptions?.preloadedExtensionPaths).toBeUndefined();
+		expect(capturedOptions?.extensionRoots).toBeUndefined();
 	});
 });

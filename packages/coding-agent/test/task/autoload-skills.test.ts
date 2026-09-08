@@ -6,6 +6,7 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
+import type { ResolvedRoleProfile } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -269,5 +270,61 @@ describe("autoloadSkills in executor", () => {
 		});
 
 		expect(callOrder).toEqual(["sendCustomMessage", "prompt"]);
+	});
+
+	it("carries the role profile through session_init without disturbing autoload injection", async () => {
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-1",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+		const inits: Array<{ tools: string[]; roleProfile: ResolvedRoleProfile }> = [];
+		session.sessionManager.appendSessionInit = init => {
+			if (init.roleProfile) inits.push({ tools: init.tools, roleProfile: init.roleProfile });
+			return "test-init-id";
+		};
+
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const mockSkill: Skill = {
+			name: "user-created-skill",
+			description: "A custom skill",
+			filePath: "/skills/user-created-skill/SKILL.md",
+			baseDir: "/skills/user-created-skill",
+			source: "user",
+		};
+		vi.spyOn(skillsModule, "buildSkillPromptMessage").mockResolvedValue({
+			message: "Skill content\n\n---\n\nSkill: /skills/user-created-skill/SKILL.md",
+			details: { name: "user-created-skill", path: "/skills/user-created-skill/SKILL.md", lineCount: 1 },
+		});
+
+		const profile: ResolvedRoleProfile = {
+			contentHash: "abc",
+			mode: "minimal",
+			sources: { prompt: "test", instructions: [], skills: [mockSkill.filePath], hooks: [], tools: [] },
+			contextFiles: [],
+			rules: [],
+			skills: [mockSkill],
+			extensionPaths: [],
+		};
+		await runSubprocess({
+			...baseOptions,
+			skills: [mockSkill],
+			autoloadSkills: [mockSkill],
+			roleProfile: profile,
+		});
+
+		expect(session.sendCustomMessage as Mock<any>).toHaveBeenCalledTimes(1);
+		expect(inits).toHaveLength(1);
+		expect(inits[0]?.roleProfile.mode).toBe("minimal");
+		expect(inits[0]?.roleProfile.contentHash).toBe("abc");
+		expect(inits[0]?.roleProfile.sources.tools).toEqual(inits[0]?.tools);
 	});
 });
