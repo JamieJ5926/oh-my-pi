@@ -5766,7 +5766,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#btwController.dispose();
 		this.#omfgController.dispose();
 		this.#cleanseController.dispose();
-		this.resetObserverRegistry();
 		await this.#selectorController.handleResumeSession(sessionPath, { settingsFlushed: true });
 	}
 

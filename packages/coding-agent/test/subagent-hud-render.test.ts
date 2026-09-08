@@ -1,6 +1,11 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { unlink } from "node:fs/promises";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
+import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
+import { COLLAB_PROTO, type CollabFrame, formatCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode, renderSubagentHudLines } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
@@ -8,7 +13,7 @@ import {
 	type ObservableSession,
 	SessionObserverRegistry,
 } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -21,6 +26,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/in-memory-relay";
 
 function makeSession(overrides: Partial<ObservableSession> & { id: string }): ObservableSession {
 	return {
@@ -451,6 +457,161 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		vi.restoreAllMocks();
 		resetSettingsForTest();
 	});
+
+	it("preserves same-session guest progress and idle rows but retires a changed host session", async () => {
+		vi.useFakeTimers();
+		await mode.init({ suppressWelcomeIntro: true });
+		installInMemoryRelay();
+		const roomId = `hud-${crypto.randomUUID()}`;
+		const roomKey = generateRoomKey();
+		const host = new CollabSocket({
+			wsUrl: `ws://localhost:8788/r/${roomId}`,
+			role: "host",
+			key: await importRoomKey(roomKey),
+		});
+		const opened = Promise.withResolvers<void>();
+		host.onOpen = () => opened.resolve();
+		const welcome = (id: string): CollabFrame => ({
+			t: "welcome",
+			proto: COLLAB_PROTO,
+			header: { type: "session", id, timestamp: new Date().toISOString(), cwd: tempDir.path() },
+			state: { isStreaming: false, queuedMessageCount: 0, cwd: tempDir.path(), participants: [] },
+			agents: [],
+			entryCount: 0,
+		});
+		host.onFrame = frame => {
+			if (frame.t === "hello") host.send(welcome("host-a"));
+		};
+		const guest = new CollabGuestLink(mode);
+		const resume = vi.spyOn(mode, "handleResumeSession");
+		const observedSessions = vi.spyOn(SessionObserverRegistry.prototype, "getSessions");
+		const reset = vi.spyOn(mode, "resetObserverRegistry");
+		const status = vi.spyOn(mode, "showStatus");
+		const hud = () => Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
+		let replicaPath: string | undefined;
+		const send = async (frame: CollabFrame) => {
+			const applied = Promise.withResolvers<void>();
+			const unsubscribe = eventBus.on("hud-test-barrier", () => applied.resolve());
+			try {
+				host.send(frame);
+				host.send({ t: "bus", channel: "hud-test-barrier", data: {} });
+				await applied.promise;
+				vi.advanceTimersByTime(200);
+				await Promise.resolve();
+			} finally {
+				unsubscribe();
+			}
+		};
+		const lifecycle = { ...makeLifecycle("LiveChild", 0, "live work", true), sessionFile: "/host/child.jsonl" };
+		try {
+			host.connect();
+			await opened.promise;
+			await guest.join(formatCollabLink("ws://localhost:8788", roomId, roomKey));
+			replicaPath = session.sessionManager.getSessionFile() ?? undefined;
+			expect(session.sessionManager.getSessionId()).toBe("host-a");
+			expect(reset).toHaveBeenCalledTimes(1);
+			await send({ t: "bus", channel: TASK_SUBAGENT_LIFECYCLE_CHANNEL, data: lifecycle });
+			expect(hud()).toContain("LiveChild");
+			await send(welcome("host-a"));
+			expect(status.mock.calls.some(([message]) => message.startsWith("Reconnected"))).toBe(true);
+			expect(reset).toHaveBeenCalledTimes(1);
+			expect(hud()).toContain("LiveChild");
+			await send({ t: "bus", channel: TASK_SUBAGENT_PROGRESS_CHANNEL, data: {
+				...makeProgressPayload("LiveChild", 0, "recovered progress", true),
+				sessionFile: lifecycle.sessionFile,
+			} });
+			expect(hud()).toContain("recovered progress");
+			await send({ t: "bus", channel: TASK_SUBAGENT_LIFECYCLE_CHANNEL, data: { ...lifecycle, status: "completed" } });
+			await send(welcome("host-a"));
+			expect(reset).toHaveBeenCalledTimes(1);
+			expect(hud()).toContain("LiveChild");
+			expect(mode.subagentContainer.render(120).join("\n")).toContain(
+				`${theme.styledSymbol("status.enabled", "success")} ${theme.bold("LiveChild")}`,
+			);
+			const observed = observedSessions.mock.results.at(-1);
+			if (observed?.type !== "return") throw new Error("Expected rendered observer sessions");
+			expect(observed.value.find(row => row.id === "LiveChild")?.status).toBe("completed");
+			await send(welcome("host-b"));
+			expect(session.sessionManager.getSessionId()).toBe("host-b");
+			expect(reset).toHaveBeenCalledTimes(2);
+			expect(hud()).not.toContain("LiveChild");
+			await send({ t: "bus", channel: TASK_SUBAGENT_LIFECYCLE_CHANNEL, data: { ...lifecycle, status: "completed" } });
+			await send({ t: "bus", channel: TASK_SUBAGENT_PROGRESS_CHANNEL, data: {
+				...makeProgressPayload("LiveChild", 0, "stale progress", true), sessionFile: lifecycle.sessionFile,
+			} });
+			expect(hud()).not.toContain("LiveChild");
+			await send({ t: "bus", channel: TASK_SUBAGENT_LIFECYCLE_CHANNEL, data: {
+				...lifecycle, parentToolCallId: "host-b-call", sessionFile: "/host/b-child.jsonl", description: "new generation",
+			} });
+			expect(hud()).toContain("new generation");
+		} finally {
+			host.close();
+			try {
+				await guest.leave("test cleanup");
+				for (const result of resume.mock.results) {
+					if (result.type === "return") await result.value;
+				}
+			} finally {
+				uninstallInMemoryRelay();
+				if (replicaPath) await unlink(replicaPath);
+				vi.useRealTimers();
+			}
+		}
+	}, 20000);
+
+	it("clears A only after the actual picker successfully adopts B", async () => {
+		// The real picker combines filesystem discovery with UI timers; retain the standalone repro's platform-clock polling.
+		await mode.init({ suppressWelcomeIntro: true });
+		const target = SessionManager.create(tempDir.path(), tempDir.path());
+		target.appendMessage({ role: "user", content: "PickerTargetB", timestamp: Date.now() });
+		await target.ensureOnDisk();
+		await target.flush();
+		const targetPath = target.getSessionFile();
+		await target.close();
+		if (!targetPath) throw new Error("Expected persisted picker target");
+		const lifecycle = (id: string, status: SubagentLifecyclePayload["status"]) =>
+			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...makeLifecycle(id, 0, `${id} work`, true), status });
+		const hud = () => Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
+		lifecycle("SessionAChild", "started");
+		lifecycle("SessionAChild", "completed");
+		await Bun.sleep(200);
+		expect(hud()).toContain("SessionAChild");
+		const overlay = vi.spyOn(mode.ui, "showOverlay");
+		const openPicker = async () => {
+			overlay.mockClear();
+			mode.showSessionSelector();
+			for (let i = 0; i < 100 && !overlay.mock.calls.length; i++) await Bun.sleep(20);
+			const picker = overlay.mock.calls.at(-1)?.[0];
+			if (!picker?.handleInput) throw new Error("Expected actual session picker");
+			picker.handleInput("PickerTargetB");
+			return picker;
+		};
+		const switchSession = vi.spyOn(session, "switchSession");
+		const cancelled = await openPicker();
+		cancelled.handleInput?.("\u001b");
+		expect(switchSession).not.toHaveBeenCalled();
+		expect(hud()).toContain("SessionAChild");
+		for (const outcome of ["cancelled", "failed", "unchanged"] as const) {
+			if (outcome === "failed") switchSession.mockRejectedValueOnce(new Error("expected switch failure"));
+			else switchSession.mockResolvedValueOnce(outcome === "unchanged");
+			const calls = switchSession.mock.calls.length;
+			(await openPicker()).handleInput?.("\r");
+			for (let i = 0; i < 100 && switchSession.mock.calls.length === calls; i++) await Bun.sleep(20);
+			await Bun.sleep(200);
+			expect(switchSession.mock.calls.length).toBe(calls + 1);
+			expect(hud()).toContain("SessionAChild");
+		}
+		switchSession.mockRestore();
+		(await openPicker()).handleInput?.("\r");
+		for (let i = 0; i < 100 && session.sessionManager.getSessionFile() !== targetPath; i++) await Bun.sleep(20);
+		await Bun.sleep(300);
+		expect(session.sessionManager.getSessionFile()).toBe(targetPath);
+		expect(hud()).not.toContain("SessionAChild");
+		lifecycle("SessionBChild", "started");
+		await Bun.sleep(200);
+		expect(hud()).toContain("SessionBChild");
+		expect(hud()).not.toContain("SessionAChild");
+	}, 20000);
 
 	it("coalesces a burst of progress observer changes into one HUD rebuild and render request", async () => {
 		await mode.init({ suppressWelcomeIntro: true });

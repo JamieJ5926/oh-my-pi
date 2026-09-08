@@ -438,6 +438,8 @@ export class CollabGuestLink {
 		const lines = [pending.header, ...pending.entries].map(entry => JSON.stringify(entry)).join("\n");
 		await Bun.write(replicaPath, `${lines}\n`);
 
+		const sameSessionResync =
+			pending.isResync && this.#ctx.sessionManager.getSessionId() === pending.header.id;
 		// Resume through AgentSession without adopting the host's cwd.
 		const switched = await this.#ctx.session.switchSession(replicaPath, { preserveLocalCwd: true });
 		if (switched === false) {
@@ -448,7 +450,7 @@ export class CollabGuestLink {
 		this.state = pending.state;
 		reconcileGuestSnapshotHostState(this.#ctx, pending.state.isStreaming);
 		this.#applyHostState(pending.state);
-		this.#ctx.resetObserverRegistry();
+		if (!sameSessionResync) this.#ctx.resetObserverRegistry();
 		this.#applyAgentSnapshots(pending.agents);
 		this.#ctx.syncRunningSubagentBadge();
 		this.#assistantStreamSynced = false;

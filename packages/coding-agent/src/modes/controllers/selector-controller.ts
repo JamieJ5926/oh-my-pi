@@ -1901,6 +1901,7 @@ export class SelectorController {
 				return false;
 			}
 		}
+		const previousSessionId = this.ctx.sessionManager.getSessionId();
 		// AgentSession owns the transaction. It restores the complete source state
 		// if applying the target project's cwd fails, including in-memory sessions.
 		if (
@@ -1912,6 +1913,9 @@ export class SelectorController {
 			})) === false
 		) {
 			return false;
+		}
+		if (this.ctx.sessionManager.getSessionId() !== previousSessionId) {
+			this.ctx.resetObserverRegistry();
 		}
 		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();

@@ -576,7 +576,9 @@ export function jobsRenderResult(
 
 	const headerIcon: ToolUIStatus =
 		counts.failed > 0 ? "warning" : counts.running > 0 || agents.length > 0 ? "info" : "success";
-	const jobNames = jobs.map(job => (job.type === "task" ? job.label || job.id : job.id)).join(", ");
+	const jobNames = (counts.running > 0 ? jobs.filter(job => job.status === "running") : jobs)
+		.map(job => (job.type === "task" ? job.label || job.id : job.id))
+		.join(", ");
 	const description =
 		jobs.length === 0
 			? `${agents.map(agent => agent.id).join(", ")} — no jobs`
