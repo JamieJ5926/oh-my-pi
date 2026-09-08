@@ -153,7 +153,7 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
-	it("re-sorts rows by most-recent activity while the hub is open", () => {
+	it("keeps row order stable as agents heartbeat and appends new agents", () => {
 		vi.useFakeTimers();
 		let hub: AgentHubOverlayComponent | undefined;
 		try {
@@ -172,19 +172,50 @@ describe("Agent hub row ordering", () => {
 			agents.register({ id: "C", displayName: "Gamma", kind: "sub", session: sessionC });
 
 			hub = makeHub(agents);
+			// Captured once on open: status then recency (most-recent first).
 			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A"]);
-			// Bump A's lastActivity far ahead of the others; recency wins live.
+
+			// A heartbeats far ahead of the others; a stable roster must NOT bubble
+			// it to the top while the hub is open (issue #10524).
 			setSystemTime(4000);
 			agents.setActivity("A", "still running");
 
-			// A parked agent sorts below live ones by status order.
+			// A new agent appears and forces a refresh: existing rows keep their
+			// captured order, and the newcomer appends at the end.
 			setSystemTime(5000);
 			const sessionD = {} as AgentSession;
 			agents.register({ id: "D", displayName: "Delta", kind: "sub", session: sessionD, status: "parked" });
 			// Renders coalesce: the immediate frame still shows the captured order.
 			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A"]);
 			vi.advanceTimersByTime(100);
-			expect(renderedAgentIds(hub)).toEqual(["A", "C", "B", "D"]);
+			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A", "D"]);
+		} finally {
+			hub?.dispose();
+			vi.useRealTimers();
+			setSystemTime();
+		}
+	});
+	it("reseeds an empty capture so a restored aborted agent does not top running rows", () => {
+		vi.useFakeTimers();
+		let hub: AgentHubOverlayComponent | undefined;
+		try {
+			geometry = stubStdoutGeometry(120);
+			const agents = new AgentRegistry();
+			// Resumed session: hub opens before the persisted roster loads,
+			// capturing an empty order map on first refresh.
+			hub = makeHub(agents);
+			expect(renderedAgentIds(hub)).toEqual([]);
+			// Persisted batch arrives: aborted agent with older activity plus a
+			// running agent. The first non-empty refresh must seed by
+			// status+recency rank, not append in insertion order.
+			const heldSession = {} as AgentSession;
+			agents.register({ id: "held-reviewer", displayName: "Held", kind: "sub", session: null, status: "aborted", lastActivity: 1000 });
+			const liveSession = {} as AgentSession;
+			agents.register({ id: "live-runner", displayName: "Live", kind: "sub", session: liveSession, lastActivity: 2000 });
+			vi.advanceTimersByTime(100);
+			const ids = renderedAgentIds(hub);
+			expect(ids.indexOf("held-reviewer")).toBeGreaterThan(ids.indexOf("live-runner"));
+			expect(ids).toEqual(["live-runner", "held-reviewer"]);
 		} finally {
 			hub?.dispose();
 			vi.useRealTimers();
