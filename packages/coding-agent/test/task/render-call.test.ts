@@ -25,6 +25,18 @@ describe("task renderer: streaming call preview", () => {
 		return Bun.stripANSI(component.render(160).join("\n"));
 	}
 
+	it("tolerates malformed partial batch headers", () => {
+		for (const tasks of [[null], "x"]) {
+			const args: TaskParams = { name: "Streaming" };
+			Object.defineProperty(args, "tasks", { value: tasks });
+			expect(() =>
+				taskToolRenderer
+					.renderCall(args, { expanded: false, isPartial: true, renderContext: { hasResult: true } }, theme)
+					.render(160),
+			).not.toThrow();
+		}
+	});
+
 	// The preview must surface the dispatched agent type + name while args
 	// stream in: the flat header carries the agent type, and the agent row's
 	// secondary text is the FIRST line of the task brief only.
@@ -38,7 +50,7 @@ describe("task renderer: streaming call preview", () => {
 		const lines = out.split("\n");
 
 		expect(lines[0]).toContain("reviewer");
-		const row = lines.find(line => line.includes("ReviewAuth"));
+		const row = lines.slice(1).find(line => line.includes("ReviewAuth"));
 		expect(row).toBeDefined();
 		expect(row).toContain("Review packages/server/src/auth for missing 401 handling.");
 		expect(row).not.toContain("Report findings.");
@@ -54,6 +66,7 @@ describe("task renderer: streaming call preview", () => {
 		};
 		const row = render(args)
 			.split("\n")
+			.slice(1)
 			.find(line => line.includes("CapCheck"));
 
 		expect(row).toBeDefined();
@@ -120,12 +133,15 @@ describe("task renderer: streaming call preview", () => {
 		const out = render(args);
 
 		const contextAt = out.indexOf("Fix the bench branches.");
-		const firstAgentAt = out.indexOf("Fix01Foundation");
+		const firstAgentAt = out.indexOf("Fix01Foundation", contextAt);
 		expect(contextAt).toBeGreaterThanOrEqual(0);
 		expect(firstAgentAt).toBeGreaterThan(contextAt);
-		expect(out.indexOf("Fix02Setup")).toBeGreaterThan(firstAgentAt);
+		expect(out.indexOf("Fix02Setup", contextAt)).toBeGreaterThan(firstAgentAt);
 		// Each item row carries its own first task line as secondary text.
-		const row = out.split("\n").find(line => line.includes("Fix01Foundation"));
+		const row = out
+			.split("\n")
+			.slice(1)
+			.find(line => line.includes("Fix01Foundation"));
 		expect(row).toContain("Fix bench/01-foundation-memory");
 	});
 
@@ -141,8 +157,7 @@ describe("task renderer: streaming call preview", () => {
 
 		expect(out).toContain(`${theme.format.bracketLeft}scout${theme.format.bracketRight}`);
 		expect(out).not.toContain(`${theme.format.bracketLeft}task${theme.format.bracketRight}`);
-		// Agent types live on the item rows; the batch header no longer joins them.
-		expect(out.split("\n")[0]).not.toContain("scout");
+		expect(out.split("\n")[0]).toContain("scout");
 	});
 
 	// Early in the stream only `context` has parsed; the (empty) agent-list
@@ -177,6 +192,7 @@ describe("task renderer: streaming call preview", () => {
 		const out = Bun.stripANSI(component.render(160).join("\n"));
 
 		expect(out).not.toContain("Review the auth module.");
-		expect(out).not.toContain("ReviewAuth");
+		expect(out.split("\n")[0]).toContain("ReviewAuth");
+		expect(out.split("\n").slice(1).join("\n")).not.toContain("ReviewAuth");
 	});
 });

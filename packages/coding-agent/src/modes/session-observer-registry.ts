@@ -36,6 +36,7 @@ const STATUS_MAP: Record<string, ObservableSession["status"]> = {
 
 export class SessionObserverRegistry {
 	#sessions = new Map<string, ObservableSession>();
+	#retiredSessions = new Map<string, Array<Pick<ObservableSession, "sessionFile" | "parentToolCallId">>>();
 	#listeners = new Set<(kind: SessionObserverChangeKind) => void>();
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#sortOrderById = new Map<string, number>();
@@ -125,6 +126,12 @@ export class SessionObserverRegistry {
 
 	/** Clear all tracked sessions (e.g. on session switch). Keeps EventBus subscriptions and listeners. */
 	resetSessions(): void {
+		for (const session of this.#sessions.values()) {
+			if (session.kind !== "subagent") continue;
+			const retired = this.#retiredSessions.get(session.id) ?? [];
+			retired.push({ sessionFile: session.sessionFile, parentToolCallId: session.parentToolCallId });
+			this.#retiredSessions.set(session.id, retired);
+		}
 		this.#sessions.clear();
 		this.#sortOrderById.clear();
 		this.#parentSortOrderById.clear();
@@ -136,6 +143,7 @@ export class SessionObserverRegistry {
 		for (const unsub of this.#eventBusUnsubscribers) unsub();
 		this.#eventBusUnsubscribers = [];
 		this.#sessions.clear();
+		this.#retiredSessions.clear();
 		this.#sortOrderById.clear();
 		this.#parentSortOrderById.clear();
 		this.#nextSortOrder = 0;
@@ -171,6 +179,16 @@ export class SessionObserverRegistry {
 						const payload = data as SubagentLifecyclePayload;
 						const status = STATUS_MAP[payload.status];
 						if (!status) return;
+						const retired = this.#retiredSessions.get(payload.id);
+						if (
+							retired?.some(
+								previous =>
+									(payload.sessionFile === undefined || payload.sessionFile === previous.sessionFile) &&
+									(payload.parentToolCallId === undefined ||
+										payload.parentToolCallId === previous.parentToolCallId),
+							)
+						)
+							return;
 
 						const sortOrder = this.#ensureSortOrder(payload.id);
 						this.#ensureParentSortOrder(payload.parentToolCallId, sortOrder);
@@ -210,6 +228,16 @@ export class SessionObserverRegistry {
 						const payload = data as SubagentProgressPayload;
 						const progress = payload.progress;
 						const id = progress.id;
+						const retired = this.#retiredSessions.get(id);
+						if (
+							retired?.some(
+								previous =>
+									(payload.sessionFile === undefined || payload.sessionFile === previous.sessionFile) &&
+									(payload.parentToolCallId === undefined ||
+										payload.parentToolCallId === previous.parentToolCallId),
+							)
+						)
+							return;
 						const existing = this.#sessions.get(id);
 
 						const sortOrder = this.#ensureSortOrder(id);

@@ -576,15 +576,15 @@ export function jobsRenderResult(
 
 	const headerIcon: ToolUIStatus =
 		counts.failed > 0 ? "warning" : counts.running > 0 || agents.length > 0 ? "info" : "success";
-	const jobsNoun = jobs.length === 1 ? "job" : "jobs";
+	const jobNames = (counts.running > 0 ? jobs.filter(job => job.status === "running") : jobs)
+		.map(job => (job.type === "task" ? job.label || job.id : job.id))
+		.join(", ");
 	const description =
 		jobs.length === 0
-			? `${agents.length} running agent${agents.length === 1 ? "" : "s"} — no jobs`
+			? `${agents.map(agent => agent.id).join(", ")} — no jobs`
 			: counts.running > 0
-				? counts.running === jobs.length
-					? `waiting on ${jobs.length} ${jobsNoun}`
-					: `waiting on ${counts.running} of ${jobs.length} ${jobsNoun}`
-				: `${jobs.length} ${jobsNoun} settled`;
+				? `waiting on ${jobNames}`
+				: `${jobNames} settled`;
 
 	const header = renderStatusLine(
 		{

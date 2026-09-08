@@ -1171,6 +1171,12 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.subagentSiblingCollapseThreshold": {
+		type: "number",
+		default: 4,
+		description: "Collapse same-role siblings above this count.",
+	},
+
 	"terminal.showProgress": {
 		type: "boolean",
 		default: false,

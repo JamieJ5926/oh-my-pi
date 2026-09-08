@@ -118,14 +118,14 @@ describe("job renderer task-result preview", () => {
 				id: "Job1",
 				type: "task" as const,
 				status: "running" as const,
-				label: "Job1 running",
+				label: "A",
 				durationMs: 1200,
 			},
 			{
 				id: "Job2",
 				type: "task" as const,
 				status: "completed" as const,
-				label: "Job2 completed",
+				label: "B",
 				durationMs: 3400,
 				resultText: "Job2 result",
 			},
@@ -133,7 +133,7 @@ describe("job renderer task-result preview", () => {
 				id: "Job3",
 				type: "task" as const,
 				status: "running" as const,
-				label: "Job3 running",
+				label: "C",
 				durationMs: 500,
 			},
 		];
@@ -147,13 +147,14 @@ describe("job renderer task-result preview", () => {
 				result,
 				{ expanded: true, isPartial: true } as Parameters<typeof hubToolRenderer.renderResult>[1],
 				theme,
-				{ op: "wait", ids: [] },
+				{ op: "wait", ids: ["Job1", "Job2", "Job3"] },
 			);
 			const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
-			expect(output).toContain("Job1 running");
-			expect(output).toContain("Job2 completed");
-			expect(output).toContain("Job3 running");
-			expect(output).toContain("waiting on 2 of 3 jobs");
+			expect(output).toContain("Job1");
+			expect(output).toContain("Job2");
+			expect(output).toContain("Job3");
+			expect(output).toContain("Job2 result");
+			expect(output.split("\n")[0]).toContain("waiting on A, C 1 done");
 		});
 
 		it("shows only finished jobs when isPartial is false and it is a poll call", () => {
@@ -168,10 +169,10 @@ describe("job renderer task-result preview", () => {
 				{ op: "wait", ids: [] },
 			);
 			const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
-			expect(output).not.toContain("Job1 running");
-			expect(output).toContain("Job2 completed");
-			expect(output).not.toContain("Job3 running");
-			expect(output).toContain("1 job settled");
+			expect(output).not.toContain("Job1");
+			expect(output).toContain("Job2");
+			expect(output).not.toContain("Job3");
+			expect(output.split("\n")[0]).toContain("B settled 1 done");
 		});
 
 		it("shows nothing when isPartial is false and all jobs are running and it is a poll call", () => {
@@ -210,10 +211,11 @@ describe("job renderer task-result preview", () => {
 				{ op: "jobs" },
 			);
 			const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
-			expect(output).toContain("Job1 running");
-			expect(output).toContain("Job2 completed");
-			expect(output).toContain("Job3 running");
-			expect(output).toContain("waiting on 2 of 3 jobs");
+			expect(output).toContain("Job1");
+			expect(output).toContain("Job2");
+			expect(output).toContain("Job3");
+			expect(output).toContain("Job2 result");
+			expect(output.split("\n")[0]).toContain("waiting on A, C 1 done");
 		});
 
 		it("does not collapse running jobs when isPartial is false and cancel-only is true", () => {
@@ -228,10 +230,10 @@ describe("job renderer task-result preview", () => {
 				{ op: "cancel", ids: ["Job1"] },
 			);
 			const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
-			expect(output).toContain("Job1 running");
-			expect(output).toContain("Job2 completed");
-			expect(output).toContain("Job3 running");
-			expect(output).toContain("waiting on 2 of 3 jobs");
+			expect(output).toContain("Job1");
+			expect(output).toContain("Job2");
+			expect(output).toContain("Job3");
+			expect(output.split("\n")[0]).toContain("waiting on A, C 1 done");
 		});
 
 		it("renders agent rows for running agents outside job control", () => {
@@ -250,7 +252,7 @@ describe("job renderer task-result preview", () => {
 				{ op: "jobs" },
 			);
 			const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
-			expect(output).toContain("1 running agent — no jobs");
+			expect(output.split("\n")[0]).toContain("Worker — no jobs");
 			expect(output).toContain("Worker");
 			expect(output).toContain("grepping the tree");
 		});
