@@ -63,6 +63,20 @@ describe("subagent HUD golden render", () => {
 		expect(out.subagents.map(line => Bun.stripANSI(line).trimEnd())).toEqual(GOLDEN_SUBAGENTS);
 	});
 
+	it("wraps completed tracks at 60 columns without losing content", () => {
+		const completed = ["SkillsTrack", "ScriptsTrack", "RulesTrack", "ModelsTrack", "工具Track", "ReviewTrack"]
+			.map(id => session(id, "poteto-agent", "completed", 0));
+		const out = renderSubagentHudLines(completed, 60);
+		const lines = out.completed.map(Bun.stripANSI);
+		expect(lines.length).toBeGreaterThan(1);
+		for (const line of out.completed) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(60);
+		expect(lines).toEqual([
+			"● SkillsTrack -> ● ScriptsTrack -> ● RulesTrack",
+			"-> ● ModelsTrack -> ● 工具Track -> ● ReviewTrack",
+		]);
+		expect(lines.join(" ")).toBe(completed.map(item => `● ${item.id}`).join(" -> "));
+	});
+
 	it("never renders task prompt text on any row", () => {
 		const text = Bun.stripANSI(renderSubagentHudLines(sessions, 120, ancestry).subagents.join("\n"));
 		expect(text).not.toContain("ROLE_MARK");

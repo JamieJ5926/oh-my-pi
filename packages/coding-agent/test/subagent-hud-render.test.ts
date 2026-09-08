@@ -526,7 +526,7 @@ describe("subagent HUD lines", () => {
 		expect(text).toContain("1 active below");
 		expect(text).not.toContain("Deep");
 	});
-	it("chains completed roots in task order rather than settlement order on one narrow line", () => {
+	it("chains completed roots in task order across narrow wrapped lines", () => {
 		const bus = new EventBus();
 		const registry = new SessionObserverRegistry();
 		registry.subscribeToEventBus(bus, bus);
@@ -553,9 +553,13 @@ describe("subagent HUD lines", () => {
 		expect(Bun.stripANSI(full.completed[0])).toBe("● First -> ● Second -> ● Third");
 		for (const width of [0, 1, 12, 20]) {
 			const narrow = renderSubagentHudLines(registry.getSessions(), width);
-			expect(narrow.completed).toHaveLength(1);
-			expect(narrow.completed).toEqual(full.completed);
-			expect(narrow.completed[0]).not.toContain("\n");
+			expect(narrow.completed.length).toBeGreaterThan(1);
+			for (const line of narrow.completed) {
+				expect(Bun.stringWidth(line)).toBeLessThanOrEqual(Math.max(1, width));
+				expect(line).not.toContain("\n");
+			}
+			expect(Bun.stripANSI(narrow.completed.join("")).replace(/\s/g, ""))
+				.toBe(Bun.stripANSI(full.completed.join("")).replace(/\s/g, ""));
 		}
 		expect(registry.getSessions()).toEqual(before);
 		registry.dispose();
@@ -775,7 +779,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(mode.subagentContainer.render(120)).toEqual([]);
 	});
 
-	it("keeps Completed single-line through shrink and expansion without observer events", async () => {
+	it("wraps Completed through shrink and expansion without observer events", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		vi.useFakeTimers();
 		for (const [index, id] of ["FirstCompleted", "SecondCompleted", "ThirdCompleted"].entries()) {
@@ -791,9 +795,11 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(Bun.stripANSI(wide[0]).trim()).toBe("Completed");
 		expect(Bun.stripANSI(wide[1])).toContain("ThirdCompleted");
 		const narrow = mode.completedContainer.render(20);
-		expect(narrow).toHaveLength(2);
+		expect(narrow.length).toBeGreaterThan(2);
 		expect(Bun.stripANSI(narrow[0]).trim()).toBe("Completed");
 		for (const line of narrow) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(20);
+		expect(Bun.stripANSI(narrow.slice(1).join("")).replace(/\s/g, ""))
+			.toBe(Bun.stripANSI(wide.slice(1).join("")).replace(/\s/g, ""));
 		expect(mode.completedContainer.render(120)).toEqual(wide);
 	});
 

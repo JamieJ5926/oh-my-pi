@@ -34,9 +34,9 @@ import {
 	setTuiTight,
 	TERMINAL,
 	Text,
-	TruncatedText,
 	type TUI,
 	visibleWidth,
+	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
@@ -685,8 +685,21 @@ export function renderSubagentHudLines(
 		});
 		return ["", truncateToWidth(theme.bold(theme.fg("accent", title)), Math.max(0, columns)), ...guided];
 	};
+	const completedLines: string[] = [];
+	const completedWidth = Math.max(1, columns);
+	let completedLine = "";
+	for (const entry of completed) {
+		const next = `${completedLine ? " -> " : ""}${entry}`;
+		if (completedLine && visibleWidth(completedLine + next) > completedWidth) {
+			completedLines.push(...wrapTextWithAnsi(completedLine, completedWidth));
+			completedLine = `-> ${entry}`;
+		} else {
+			completedLine += next;
+		}
+	}
+	if (completedLine) completedLines.push(...wrapTextWithAnsi(completedLine, completedWidth));
 	return {
-		completed: completed.length > 0 ? [completed.join(" -> ")] : [],
+		completed: completedLines,
 		subagents: section(activeRows, "Subagents"),
 	};
 }
@@ -2892,7 +2905,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		]);
 		if (lines.completed.length > 0) {
 			this.completedContainer.addChild(new Text(theme.bold(theme.fg("accent", "Completed")), 1, 0));
-			this.completedContainer.addChild(new TruncatedText(lines.completed.join(""), 1, 0));
+			this.completedContainer.addChild(new Text(lines.completed.join("\n"), 1, 0));
 		}
 		if (lines.subagents.length > 0) this.subagentContainer.addChild(new Text(lines.subagents.join("\n"), 1, 0));
 	}
