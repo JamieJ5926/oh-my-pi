@@ -329,31 +329,31 @@ export class FileSessionDirectory implements SessionDirectory, SessionGeneration
 						if (!(ownerError instanceof Error) || !("code" in ownerError) || ownerError.code !== "ENOENT") throw ownerError;
 						abandoned = Date.now() - lock.mtimeMs > 30_000;
 					}
-				if (abandoned) {
-					const aside = `${this.#lockPath}.stale-${process.pid}-${randomUUID()}`;
-					try {
-						await rename(this.#lockPath, aside);
-					} catch (stealError) {
-						if (stealError instanceof Error && "code" in stealError && stealError.code === "ENOENT") continue;
-						throw stealError;
-					}
-					try {
-						const moved = await stat(aside);
-						if (moved.ino !== lock.ino) {
-							try {
-								await rename(aside, this.#lockPath);
-							} catch {
-								await rm(aside, { recursive: true, force: true });
+					if (abandoned) {
+						const aside = `${this.#lockPath}.stale-${process.pid}-${randomUUID()}`;
+						try {
+							await rename(this.#lockPath, aside);
+						} catch (stealError) {
+							if (stealError instanceof Error && "code" in stealError && stealError.code === "ENOENT") continue;
+							throw stealError;
+						}
+						try {
+							const moved = await stat(aside);
+							if (moved.ino !== lock.ino) {
+								try {
+									await rename(aside, this.#lockPath);
+								} catch {
+									await rm(aside, { recursive: true, force: true });
+								}
+								continue;
 							}
+							await rm(aside, { recursive: true, force: true });
+						} catch {
+							await rm(aside, { recursive: true, force: true });
 							continue;
 						}
-						await rm(aside, { recursive: true, force: true });
-					} catch {
-						await rm(aside, { recursive: true, force: true });
 						continue;
 					}
-					continue;
-				}
 				} catch (lockError) {
 					if (!(lockError instanceof Error) || !("code" in lockError) || lockError.code !== "ENOENT") throw lockError;
 				}

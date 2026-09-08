@@ -236,6 +236,7 @@ it("tombstones the live publication when its agent is unregistered", async () =>
 	registry.configurePublication(directory, identity, 30);
 	const ref = registry.register({ id: "Main", displayName: "main", kind: "main", session: Object.create(null) });
 	const publication = await registry.publishSession(ref, "unregister-close");
+	if (!publication) throw new Error("missing publication");
 	const address = publication.address;
 	expect((await directory.lookup(address))?.kind).toBe("active");
 	expect(registry.unregister("Main")).toBe(true);
