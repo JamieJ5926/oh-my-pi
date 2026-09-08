@@ -3,6 +3,8 @@ import { parseDaemonWireResponse } from "./protocol";
 
 export const DAEMON_BUILD_ID = process.env.OMP_BUILD_ID ?? "dev";
 
+export class StaleDaemonBrokerError extends Error {}
+
 export async function verifyDaemonBrokerVersion(socket: net.Socket, token: string, projectDir: string): Promise<void> {
 	const id = crypto.randomUUID();
 	await new Promise<void>((resolve, reject) => {
@@ -34,7 +36,7 @@ export async function verifyDaemonBrokerVersion(socket: net.Socket, token: strin
 				}
 				const actual = "buildId" in result ? result.buildId : undefined;
 				if (typeof actual !== "string" || actual !== DAEMON_BUILD_ID) {
-					throw new Error(`Stale daemon broker build ${typeof actual === "string" ? actual : "missing or malformed"}; expected ${DAEMON_BUILD_ID}. Stop broker-owned workloads and close all sessions using this project before restarting the broker. No shutdown was requested.`);
+					throw new StaleDaemonBrokerError(`Stale daemon broker build ${typeof actual === "string" ? actual : "missing or malformed"}; expected ${DAEMON_BUILD_ID}. Stop broker-owned workloads and close all sessions using this project before restarting the broker. No shutdown was requested.`);
 				}
 				finish();
 			} catch (error) {

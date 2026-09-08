@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
-import { verifyDaemonBrokerVersion } from "./broker-version";
+import { StaleDaemonBrokerError, verifyDaemonBrokerVersion } from "./broker-version";
 import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
 	DAEMON_BROKER_WORKER_ARG,
@@ -253,7 +253,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 
 	#publishCompletionOwners(): void {
 		if (this.#closed) return;
-		void this.request({ op: "ping" }).catch(() => this.#scheduleCompletionReconnect());
+		void this.request({ op: "ping" }).catch(error => {
+			if (error instanceof StaleDaemonBrokerError) {
+				logger.warn("Daemon completion subscription refused", { error: error.message, projectDir: this.projectDir });
+				return;
+			}
+			this.#scheduleCompletionReconnect();
+		});
 	}
 
 	#scheduleCompletionReconnect(): void {
