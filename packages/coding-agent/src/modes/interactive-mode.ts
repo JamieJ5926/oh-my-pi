@@ -645,7 +645,17 @@ export function renderSubagentHudLines(
 				continue;
 			}
 			if (!isSubtreeActive(session)) {
-				if (parent === undefined) completed.push(`${dot(session.status)} ${theme.bold(formatTaskId(session.id))}`);
+				if (parent === undefined) {
+					let leads = "";
+					for (const child of children.get(session.id) ?? []) {
+						const childRole = roleOf(child);
+						if (childRole !== "poteto-agent" && childRole !== "poteto-agent-deep") continue;
+						leads += `${leads ? ", " : ""}${dot(child.status)} ${theme.bold(localName(child))}`;
+					}
+					completed.push(
+						`${dot(session.status)} ${theme.bold(formatTaskId(session.id))}${leads ? ` (${leads})` : ""}`,
+					);
+				}
 				continue;
 			}
 			const name = parent === undefined ? formatTaskId(session.id) : localName(session);
