@@ -698,15 +698,15 @@ function taskFirstLine(task: unknown): string {
 	return newline === -1 ? trimmed : trimmed.slice(0, newline);
 }
 
-/**
- * Header label for a task call while nothing has spawned yet: the flat form's
- * `agent` type. Batch calls return undefined — each item row carries its own
- * `⟨agent⟩` badge, so a joined list in the header would just repeat them.
- */
-function formatAgentHeaderLabel(args: Partial<TaskParams> | undefined): string | undefined {
+function formatAgentHeaderLabel(args: Partial<TaskParams> | undefined, theme: Theme): string | undefined {
 	if (!args) return undefined;
-	const flat = typeof args.agent === "string" ? args.agent.trim() : "";
-	return flat || undefined;
+	const lanes: unknown[] = Array.isArray(args.tasks) && args.tasks.length ? args.tasks : [args];
+	return lanes.map(lane => {
+		if (lane === null || typeof lane !== "object") return "";
+		const name = "name" in lane && typeof lane.name === "string" ? lane.name.trim() : "";
+		const role = "agent" in lane && typeof lane.agent === "string" ? lane.agent.trim() : "";
+		return name ? `${formatTaskId(name)}${role && role !== "task" ? ` ${theme.format.bracketLeft}${role}${theme.format.bracketRight}` : ""}` : role;
+	}).filter(Boolean).join(", ") || undefined;
 }
 
 /** Dim `⟨agent⟩` badge for a non-default agent type; empty for the generic worker. */
@@ -843,7 +843,7 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 		{
 			iconOverride: theme.styledSymbol("tool.task", "accent"),
 			title: "Task",
-			description: formatAgentHeaderLabel(args),
+			description: formatAgentHeaderLabel(args, theme),
 		},
 		theme,
 	);
@@ -1488,7 +1488,7 @@ export function renderResult(
 ): Component {
 	const fallbackText = result.content.find(c => c.type === "text")?.text ?? "";
 	const details = result.details;
-	const agentLabel = formatAgentHeaderLabel(args);
+	const agentLabel = formatAgentHeaderLabel(args, theme);
 	const assignmentSection = createAssignmentSectionRenderer(args, theme);
 	const contextSection = createContextSectionRenderer(args, theme);
 
@@ -1543,11 +1543,8 @@ export function renderResult(
 	const isError = aborted || failed;
 	const agentCount = hasResults ? details.results.length : (details.progress?.length ?? 0);
 	const icon: ToolUIStatus = options.isPartial ? "running" : isError ? "error" : mergeFailed ? "warning" : "success";
-	// Header meta is the spawn count only; each row carries its own ⟨agent⟩
-	// badge, so a joined type list here would repeat them. Before anything
-	// spawns, fall back to the flat form's agent type from the call args.
 	const countLabel = agentCount > 0 ? `${agentCount} ${agentCount === 1 ? "agent" : "agents"}` : undefined;
-	const metaLabel = countLabel ?? agentLabel;
+	const metaLabel = agentLabel ?? countLabel;
 	const header = renderStatusLine(
 		{
 			icon: icon === "success" || icon === "running" ? undefined : icon,

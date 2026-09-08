@@ -1,10 +1,3 @@
-/**
- * Contract: the anchored subagent HUD (rendered above the editor, next to the
- * Todos block) lists exactly the running *detached* subagents as
- * `Id: description` rows and yields no output once nothing qualifies, so the
- * block self-clears. Sync task spawns and eval `agent()` spawns are excluded:
- * their progress is already rendered inline (tool block / eval cell).
- */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -158,17 +151,17 @@ describe("subagent HUD lines", () => {
 		expect(defaultWorker).not.toMatch(/SchemaMigrator.*task/);
 	});
 
-	it("only shows active subagents and clears once everything finished", () => {
+	it("retains current-run terminal rows while idle", () => {
 		const finishedStates = ["completed", "failed", "aborted"] as const;
 		const sessions: ObservableSession[] = [
 			{ id: "main", kind: "main", label: "Main Session", status: "active", lastUpdate: Date.now() },
 			...finishedStates.map(status => makeSession({ id: `Done-${status}`, status, description: "old work" })),
 		];
-		expect(renderSubagentHudLines(sessions, 120)).toEqual([]);
+		for (const status of finishedStates) expect(render(sessions)).toContain(`Done-${status}`);
 
 		const out = render([...sessions, makeSession({ id: "StillRunning", description: "live work" })]);
 		expect(out).toContain("StillRunning: live work");
-		expect(out).not.toContain("Done-");
+		expect(out).toContain("Done-");
 		expect(out).not.toContain("Main Session");
 	});
 
@@ -299,7 +292,7 @@ describe("subagent HUD lines", () => {
 		expect(activeIds()).toEqual(["SelectorSurfaces", "BlastRadius", "VariantsSurvey"]);
 	});
 
-	it("renders the first eight active detached subagents and summarizes the rest", () => {
+	it("renders every top-level parent without a global cap", () => {
 		const active = Array.from({ length: 10 }, (_, index) =>
 			makeSession({
 				id: `Worker${index}`,
@@ -309,13 +302,41 @@ describe("subagent HUD lines", () => {
 
 		const out = render(active, 120);
 
-		for (const session of active.slice(0, 8)) {
+		for (const session of active) {
 			expect(out).toContain(`${session.id}: ${session.description}`);
 		}
-		for (const session of active.slice(8)) {
-			expect(out).not.toContain(`${session.id}: ${session.description}`);
+		expect(out).not.toContain("more running");
+	});
+	it("keeps staggered terminal siblings compact with child tags and own usage", () => {
+		const parent = makeSession({ id: "Lead", progress: makeProgress({ id: "Lead", tokens: 7 }) });
+		const members = Array.from({ length: 6 }, (_, index) => makeSession({ id: `Lead.Child${index}`, agent: "explorer", status: index === 4 ? "failed" : index === 5 ? "aborted" : "completed", progress: makeProgress({ id: `Lead.Child${index}`, tokens: index }) }));
+		const ancestry = members.map(member => ({ id: member.id, parentId: "Lead" }));
+		for (let count = 1; count <= 6; count++) {
+			const out = Bun.stripANSI(renderSubagentHudLines([parent, ...members.slice(0, count)], 160, ancestry).join("\n"));
+			expect(out.includes(`explorer x${count}`)).toBe(count > 4);
+			for (let index = 0; index < count; index++) expect(out).toContain(`Child${index}`);
 		}
-		expect(out).toContain("2 more running");
+		parent.status = "completed";
+		const out = Bun.stripANSI(renderSubagentHudLines([parent, ...members], 160, ancestry).join("\n"));
+		expect(out).toContain("Lead · 7 tok");
+		expect(out).toContain("15 tok");
+		expect(out).toContain("1 cancelled");
+		expect(out).toContain("1 failed");
+		const narrow = renderSubagentHudLines([parent, ...members, makeSession({ id: "DeepWork" })], 42, [...ancestry, { id: "DeepWork", parentId: members[0].id }]);
+		for (const line of narrow) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(42);
+		for (let index = 0; index < 6; index++) expect(Bun.stripANSI(narrow.join("\n"))).toContain(`Child${index}`);
+		expect(Bun.stripANSI(narrow.join("\n"))).toContain("DeepWork");
+	});
+	it("clears current rows at observer reset without showing registry history", () => {
+		const bus = new EventBus();
+		const registry = new SessionObserverRegistry();
+		registry.subscribeToEventBus(bus, bus);
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle("Current", 0, "current work", true));
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...makeLifecycle("Current", 0, "current work", true), status: "completed" });
+		expect(render(registry.getSessions())).toContain("Current");
+		registry.resetSessions();
+		expect(renderSubagentHudLines(registry.getSessions(), 120, [{ id: "Stale" }])).toEqual([]);
+		registry.dispose();
 	});
 });
 

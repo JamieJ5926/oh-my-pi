@@ -121,7 +121,7 @@ import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
-import { agentTypeBadge, formatTaskId } from "../task/render";
+import { formatTaskId } from "../task/render";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
@@ -490,66 +490,83 @@ const DEFERRED_PREVIEW_VIEWPORT_FRACTION = 0.4;
  *  before it auto-clears, mirroring the todo HUD's auto-clear timer. */
 const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
 
-const SUBAGENT_HUD_VISIBLE_LIMIT = 8;
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
 
-/**
- * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
- * a bounded set of running-agent rows in the same `Id ⟨role⟩: description` shape
- * the inline task rows use (muted task preview when no description was given).
- * Layout mirrors the Todos HUD exactly: unindented header, then
- * `renderTreeList` rows (dim connectors) shifted right by one space.
- * Only detached background spawns are listed: a sync task call blocks the
- * parent turn and its inline tool block already renders progress live, and
- * eval `agent()` spawns are rendered by their own eval cell tree.
- * Returns an empty array when nothing is running so the container can clear.
- */
-export function renderSubagentHudLines(sessions: ObservableSession[], columns: number): string[] {
-	const running = sessions.filter(
-		session => session.kind === "subagent" && session.status === "active" && session.detached === true,
-	);
-	if (running.length === 0) return [];
-
-	const dot = theme.styledSymbol("status.done", "accent");
-	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
-	const hiddenCount = running.length - visible.length;
-	const rows = renderTreeList(
-		{
-			items: visible,
-			expanded: true,
-			renderItem: session => {
-				const displayId = formatTaskId(session.id);
-				const role = session.agent ?? session.progress?.agent;
-				const badge = agentTypeBadge(role, theme);
-				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}${badge}`;
-				const description = session.description?.trim() || session.progress?.description?.trim();
-				const distinctDescription =
-					description && !labelEchoesHandle(session.id, description) ? description : undefined;
-				if (distinctDescription) {
-					const budget = Math.max(
-						TRUNCATE_LENGTHS.SHORT,
-						columns - visibleWidth(displayId) - visibleWidth(Bun.stripANSI(badge)) - 10,
-					);
-					const formatted = replaceTabs(distinctDescription).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-					line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
-				} else {
-					// No spawn description: fall back to a muted task preview, same as
-					// the inline task rows when a row has no label.
-					const taskPreview = session.progress?.task?.trim();
-					if (taskPreview && !labelEchoesHandle(session.id, taskPreview)) {
-						const formatted = replaceTabs(taskPreview).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-						line += ` ${theme.fg("muted", truncateToWidth(formatted, TRUNCATE_LENGTHS.SHORT))}`;
-					}
-				}
-				return line;
-			},
-		},
-		theme,
-	);
-	if (hiddenCount > 0) {
-		rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
+export function renderSubagentHudLines(
+	sessions: readonly ObservableSession[],
+	columns: number,
+	ancestry: readonly { id: string; parentId?: string }[] = [],
+	siblingCollapseThreshold = 4,
+): string[] {
+	const candidates = new Map(sessions.filter(session => session.kind === "subagent" && session.detached === true).map(session => [session.id, session]));
+	if (candidates.size === 0) return [];
+	const refs = new Map(ancestry.map(ref => [ref.id, ref]));
+	const children = new Map<string | undefined, ObservableSession[]>();
+	for (const session of candidates.values()) {
+		let parent = refs.get(session.id)?.parentId;
+		const seen = new Set([session.id]);
+		let cursor = parent;
+		while (cursor !== undefined) {
+			if (seen.has(cursor)) { parent = undefined; break; }
+			seen.add(cursor);
+			cursor = refs.get(cursor)?.parentId;
+		}
+		if (parent === undefined || !candidates.has(parent)) parent = undefined;
+		const siblings = children.get(parent);
+		if (siblings) siblings.push(session);
+		else children.set(parent, [session]);
 	}
-	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
+	const roleOf = (session: ObservableSession) => session.agent ?? session.progress?.agent ?? "task";
+	const dot = (status: ObservableSession["status"]) => theme.styledSymbol("status.enabled", status === "active" ? "warning" : status === "completed" ? "success" : status === "failed" ? "error" : "muted");
+	const localName = (session: ObservableSession) => session.id.split(".").pop() ?? session.id;
+	const tokens = (session: ObservableSession) => session.progress?.tokens ?? 0;
+	const rows: string[] = [];
+	const add = (text: string, depth: number) => {
+		const prefix = " ".repeat(Math.min(depth * 3, Math.max(0, columns - 8)));
+		rows.push(`${prefix}${truncateToWidth(text, Math.max(0, columns - prefix.length - 1))}`);
+	};
+	const renderChildren = (parent: string | undefined, depth: number): void => {
+		const siblings = children.get(parent) ?? [];
+		const groups = new Map<string, ObservableSession[]>();
+		if (parent !== undefined) for (const session of siblings) {
+			const role = roleOf(session);
+			const group = groups.get(role);
+			if (group) group.push(session); else groups.set(role, [session]);
+		}
+		const emitted = new Set<string>();
+		for (const session of siblings) {
+			const role = roleOf(session);
+			const group = groups.get(role);
+			if (group && group.length > siblingCollapseThreshold) {
+				if (emitted.has(role)) continue;
+				emitted.add(role);
+				const counts = { active: 0, completed: 0, failed: 0, aborted: 0 };
+				let sum = 0;
+				for (const member of group) { counts[member.status]++; sum += tokens(member); }
+				const state = counts.failed ? "failed" : counts.active ? "active" : counts.aborted ? "aborted" : "completed";
+				add(`${dot(state)} ${theme.bold(role)} x${group.length} · ${counts.completed} done · ${counts.active} running · ${counts.failed} failed · ${counts.aborted} cancelled · ${sum} tok`, depth);
+				let tags = "";
+				const width = Math.max(1, columns - Math.min((depth + 1) * 3, Math.max(0, columns - 8)) - 1);
+				for (const member of group) {
+					const tag = `${dot(member.status)} ${truncateToWidth(localName(member), Math.max(1, width - 2))}`;
+					if (tags && visibleWidth(`${tags}  ${tag}`) > width) { add(tags, depth + 1); tags = ""; }
+					tags += `${tags ? "  " : ""}${tag}`;
+				}
+				if (tags) add(tags, depth + 1);
+				for (const member of group) renderChildren(member.id, depth + 1);
+				continue;
+			}
+			const name = parent === undefined ? formatTaskId(session.id) : localName(session);
+			const badge = role === "task" ? "" : ` ${theme.format.bracketLeft}${theme.bold(role)}${theme.format.bracketRight}`;
+			const description = session.description?.trim() || session.progress?.description?.trim();
+			const task = session.progress?.task?.trim();
+			const preview = description && !labelEchoesHandle(session.id, description) ? `: ${description}` : task && !labelEchoesHandle(session.id, task) ? ` ${truncateToWidth(replaceTabs(task).replace(/\s*[\r\n]+\s*/g, " ↵ "), TRUNCATE_LENGTHS.SHORT)}` : "";
+			add(`${dot(session.status)} ${theme.bold(name)}${badge}${replaceTabs(preview).replace(/\s*[\r\n]+\s*/g, " ↵ ")} · ${tokens(session)} tok`, depth);
+			renderChildren(session.id, depth + 1);
+		}
+	};
+	renderChildren(undefined, 0);
+	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(row => ` ${row}`)];
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
@@ -2732,18 +2749,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return [...leadingLines, combinedLine];
 	}
 
-	/**
-	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
-
-	/**
-	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
-	 * editor. Driven entirely by observer-registry change events, so rows appear
-	 * on spawn and the whole block clears itself once the last subagent leaves
-	 * the "active" state.
-	 */
+	/** Current observer generation remains visible until session reset. */
 	#renderSubagentList(): void {
 		this.subagentContainer.clear();
-		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
+		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), Math.max(0, this.ui.terminal.columns - 2), getRunningSubagentBadgeRegistry(this.collabGuest).list(), this.settings.get("tui.subagentSiblingCollapseThreshold"));
 		if (lines.length === 0) return;
 		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
 	}
