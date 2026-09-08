@@ -327,6 +327,18 @@ describe("subagent HUD lines", () => {
 		for (let index = 0; index < 6; index++) expect(Bun.stripANSI(narrow.join("\n"))).toContain(`Child${index}`);
 		expect(Bun.stripANSI(narrow.join("\n"))).toContain("DeepWork");
 	});
+	it("draws branches and continuing guides through nested rows to the next parent", () => {
+		const sessions = [makeSession({ id: "Lead" }), makeSession({ id: "Lead.Child" }), makeSession({ id: "Peer" })];
+		const out = Bun.stripANSI(renderSubagentHudLines(sessions, 120, [{ id: "Lead.Child", parentId: "Lead" }]).join("\n"));
+		expect(out).toContain("├─ ● Lead");
+		expect(out).toContain("│  └─ ● Child");
+		expect(out).toContain("└─ ● Peer");
+		const children = Array.from({ length: 6 }, (_, index) => makeSession({ id: `Lead.Child${index}`, agent: "explorer" }));
+		const frame = Bun.stripANSI(renderSubagentHudLines([sessions[0], ...children, makeSession({ id: "DemoPeer" })], 160, children.map(child => ({ id: child.id, parentId: "Lead" }))).join("\n"));
+		expect(frame).toContain("│  └─ ● explorer x6");
+		expect(frame).toContain("│     └─ ● Child0");
+		if (process.env.SUBAGENT_HUD_FRAME) console.log(frame);
+	});
 	it("clears current rows at observer reset without showing registry history", () => {
 		const bus = new EventBus();
 		const registry = new SessionObserverRegistry();

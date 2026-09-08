@@ -521,9 +521,10 @@ export function renderSubagentHudLines(
 	const localName = (session: ObservableSession) => session.id.split(".").pop() ?? session.id;
 	const tokens = (session: ObservableSession) => session.progress?.tokens ?? 0;
 	const rows: string[] = [];
+	const rowDepths: number[] = [];
 	const add = (text: string, depth: number) => {
-		const prefix = " ".repeat(Math.min(depth * 3, Math.max(0, columns - 8)));
-		rows.push(`${prefix}${truncateToWidth(text, Math.max(0, columns - prefix.length - 1))}`);
+		rowDepths.push(depth);
+		rows.push(truncateToWidth(text, Math.max(0, columns - (depth + 1) * 3 - 1)));
 	};
 	const renderChildren = (parent: string | undefined, depth: number): void => {
 		const siblings = children.get(parent) ?? [];
@@ -546,7 +547,7 @@ export function renderSubagentHudLines(
 				const state = counts.failed ? "failed" : counts.active ? "active" : counts.aborted ? "aborted" : "completed";
 				add(`${dot(state)} ${theme.bold(role)} x${group.length} · ${counts.completed} done · ${counts.active} running · ${counts.failed} failed · ${counts.aborted} cancelled · ${sum} tok`, depth);
 				let tags = "";
-				const width = Math.max(1, columns - Math.min((depth + 1) * 3, Math.max(0, columns - 8)) - 1);
+				const width = Math.max(1, columns - (depth + 2) * 3 - 1);
 				for (const member of group) {
 					const tag = `${dot(member.status)} ${truncateToWidth(localName(member), Math.max(1, width - 2))}`;
 					if (tags && visibleWidth(`${tags}  ${tag}`) > width) { add(tags, depth + 1); tags = ""; }
@@ -566,14 +567,32 @@ export function renderSubagentHudLines(
 			const task = session.progress?.task?.trim();
 			const preview = description && !labelEchoesHandle(session.id, description) ? `: ${description}` : task && !labelEchoesHandle(session.id, task) ? ` ${truncateToWidth(replaceTabs(task).replace(/\s*[\r\n]+\s*/g, " ↵ "), TRUNCATE_LENGTHS.SHORT)}` : "";
 			const usage = ` · ${tokens(session)} tok`;
-			const width = Math.max(0, columns - Math.min(depth * 3, Math.max(0, columns - 8)) - 1);
+			const width = Math.max(0, columns - (depth + 1) * 3 - 1);
 			const body = `${dot(session.status)} ${theme.bold(name)}${badge}${replaceTabs(preview).replace(/\s*[\r\n]+\s*/g, " ↵ ")}`;
 			add(`${truncateToWidth(body, Math.max(0, width - visibleWidth(usage)))}${usage}`, depth);
 			renderChildren(session.id, depth + 1);
 		}
 	};
 	renderChildren(undefined, 0);
-	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(row => ` ${row}`)];
+	const followingSibling = new Set<number>();
+	const pending: number[] = [];
+	for (let index = rows.length - 1; index >= 0; index--) {
+		while (pending.length && rowDepths[pending[pending.length - 1]] > rowDepths[index]) pending.pop();
+		if (pending.length && rowDepths[pending[pending.length - 1]] === rowDepths[index]) followingSibling.add(index);
+		pending.push(index);
+	}
+	const continuations: boolean[] = [];
+	const guided = rows.map((row, index) => {
+		const depth = rowDepths[index];
+		let prefix = "";
+		for (let level = 0; level < depth; level++) prefix += continuations[level] ? `${theme.tree.vertical}  ` : "   ";
+		const hasSibling = followingSibling.has(index);
+		prefix += `${hasSibling ? theme.tree.branch : theme.tree.last} `;
+		continuations[depth] = hasSibling;
+		continuations.length = depth + 1;
+		return ` ${theme.fg("dim", prefix)}${row}`;
+	});
+	return ["", theme.bold(theme.fg("accent", "Subagents")), ...guided];
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
