@@ -649,7 +649,7 @@ export function renderSubagentHudLines(
 					let leads = "";
 					for (const child of children.get(session.id) ?? []) {
 						const childRole = roleOf(child);
-						if (parents.get(child.id) !== session.id || (childRole !== "poteto-agent" && childRole !== "poteto-agent-deep")) continue;
+						if (childRole !== "poteto-agent" && childRole !== "poteto-agent-deep") continue;
 						leads += `${leads ? ", " : ""}${dot(child.status)} ${theme.bold(localName(child))}`;
 					}
 					completed.push(`${dot(session.status)} ${theme.bold(formatTaskId(session.id))}${leads ? ` (${leads})` : ""}`);

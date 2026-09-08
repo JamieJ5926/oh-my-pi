@@ -531,6 +531,19 @@ describe("subagent HUD lines", () => {
 		expect(settled.completed[0]).toContain(`${theme.styledSymbol("status.enabled", "error")} ${theme.bold("Two")}`);
 	});
 
+	it("lists a settled Poteto lead promoted past a non-detached parent", () => {
+		const parent = makeSession({ id: "Lead", status: "completed" });
+		const middle = makeSession({ id: "Lead.Middle", agent: "poteto-agent", detached: false, status: "completed" });
+		const leaf = makeSession({ id: "Lead.Middle.Leaf", agent: "poteto-agent", status: "completed" });
+		const ancestry = [
+			{ id: middle.id, parentId: parent.id },
+			{ id: leaf.id, parentId: middle.id },
+		];
+		const settled = renderSubagentHudLines([parent, middle, leaf], 120, ancestry);
+		expect(settled.subagents).toEqual([]);
+		expect(settled.completed.map(Bun.stripANSI)).toEqual(["● Lead (● Leaf)"]);
+	});
+
 	it("keeps an actual delegator named while a hidden descendant is active", () => {
 		const sessions = [
 			makeSession({ id: "Lead" }),
