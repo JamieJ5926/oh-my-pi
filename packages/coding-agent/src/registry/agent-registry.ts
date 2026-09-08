@@ -344,6 +344,11 @@ export class AgentRegistry {
 	unregister(id: string, expected?: AgentRefExpectation): boolean {
 		const ref = this.#refs.get(id);
 		if (!ref || !this.#matchesExpected(ref, expected)) return false;
+		const publication = this.#published.get(ref);
+		if (publication) {
+			this.#published.delete(ref);
+			void publication.close().catch(error => logger.warn("Session publication close on unregister failed", { error: String(error) }));
+		}
 		this.#refs.delete(id);
 		this.#emit({ type: "removed", ref });
 		return true;

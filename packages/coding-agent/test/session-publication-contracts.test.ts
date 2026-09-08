@@ -229,3 +229,41 @@ describe("production session publication", () => {
 		}
 	});
 });
+
+it("tombstones the live publication when its agent is unregistered", async () => {
+	const directory = new InMemorySessionDirectory();
+	const registry = new AgentRegistry();
+	registry.configurePublication(directory, identity, 30);
+	const ref = registry.register({ id: "Main", displayName: "main", kind: "main", session: Object.create(null) });
+	const publication = await registry.publishSession(ref, "unregister-close");
+	const address = publication.address;
+	expect((await directory.lookup(address))?.kind).toBe("active");
+	expect(registry.unregister("Main")).toBe(true);
+	let observed: string | undefined;
+	for (let i = 0; i < 100; i++) {
+		observed = (await directory.lookup(address))?.kind;
+		if (observed === "tombstone") break;
+		await Promise.resolve();
+	}
+	expect(observed).toBe("tombstone");
+	expect(await directory.listActive()).toEqual([]);
+	expect(() => registry.configurePublication(directory, identity)).not.toThrow();
+});
+
+it("prunes expired actives and retained tombstones in InMemory claimNext", async () => {
+	const directory = new InMemorySessionDirectory();
+	const realNow = Date.now;
+	try {
+		let now = 1_700_000_000_000;
+		Date.now = () => now;
+		const expiring = await directory.claimNext({ identity: { ...identity, session: "prune-expiring" }, ttlMs: 1000 });
+		const retained = await directory.claimNext({ identity: { ...identity, session: "prune-retained" }, ttlMs: 1000 });
+		await directory.tombstone(retained.address, "closed");
+		now += 86_400_002;
+		await directory.claimNext({ identity: { ...identity, session: "prune-fresh" }, ttlMs: 10_000 });
+		expect(await directory.lookup(expiring.address)).toBeNull();
+		expect(await directory.lookup(retained.address)).toBeNull();
+	} finally {
+		Date.now = realNow;
+	}
+});

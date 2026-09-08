@@ -133,6 +133,9 @@ export class InMemorySessionDirectory implements SessionDirectory, SessionGenera
 		if (observed >= Number.MAX_SAFE_INTEGER) throw new Error("Session generation exhausted");
 		const address = createSessionAddress({ ...identity, generation: observed + 1 });
 		const now = Date.now();
+		for (const [key, existing] of this.#records) {
+			if (existing.kind === "active" ? existing.expiresAt <= now : existing.tombstonedAt + TOMBSTONE_RETENTION_MS <= now) this.#records.delete(key);
+		}
 		const record: ClaimResult = Object.freeze({ kind: "active", address, registeredAt: now, lastHeartbeatAt: now, expiresAt: now + ttlMs, revival });
 		this.#records.set(identityKey(identity), record);
 		this.#lastGeneration = address.generation;
@@ -326,11 +329,31 @@ export class FileSessionDirectory implements SessionDirectory, SessionGeneration
 						if (!(ownerError instanceof Error) || !("code" in ownerError) || ownerError.code !== "ENOENT") throw ownerError;
 						abandoned = Date.now() - lock.mtimeMs > 30_000;
 					}
-					if (abandoned) {
-						const current = await stat(this.#lockPath);
-						if (current.ino === lock.ino) await rm(this.#lockPath, { recursive: true, force: true });
+				if (abandoned) {
+					const aside = `${this.#lockPath}.stale-${process.pid}-${randomUUID()}`;
+					try {
+						await rename(this.#lockPath, aside);
+					} catch (stealError) {
+						if (stealError instanceof Error && "code" in stealError && stealError.code === "ENOENT") continue;
+						throw stealError;
+					}
+					try {
+						const moved = await stat(aside);
+						if (moved.ino !== lock.ino) {
+							try {
+								await rename(aside, this.#lockPath);
+							} catch {
+								await rm(aside, { recursive: true, force: true });
+							}
+							continue;
+						}
+						await rm(aside, { recursive: true, force: true });
+					} catch {
+						await rm(aside, { recursive: true, force: true });
 						continue;
 					}
+					continue;
+				}
 				} catch (lockError) {
 					if (!(lockError instanceof Error) || !("code" in lockError) || lockError.code !== "ENOENT") throw lockError;
 				}
