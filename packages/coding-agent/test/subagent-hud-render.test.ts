@@ -504,8 +504,31 @@ describe("subagent HUD lines", () => {
 		child.detached = false;
 		const resettled = renderSubagentHudLines([parent, middle, child], 120, ancestry);
 		expect(resettled.subagents).toEqual([]);
-		expect(Bun.stripANSI(resettled.completed.join("\n"))).toBe("● Lead");
+		expect(Bun.stripANSI(resettled.completed.join("\n"))).toBe("● Lead (● Middle)");
 		expect(renderSubagentHudLines([], 120, ancestry)).toEqual({ completed: [], subagents: [] });
+	});
+
+	it("lists settled direct Poteto leads under their completed parent without worker leaves", () => {
+		const parent = makeSession({ id: "Lead", agent: "poteto-agent-deep", status: "completed" });
+		const first = makeSession({ id: "Lead.One", agent: "poteto-agent", status: "completed" });
+		const second = makeSession({
+			id: "Lead.Two",
+			status: "failed",
+			progress: makeProgress({ id: "Lead.Two", agent: "poteto-agent-deep" }),
+		});
+		const leaf = makeSession({ id: "Lead.One.Owner", agent: "owner", status: "completed" });
+		const explorer = makeSession({ id: "Lead.Scout", agent: "explorer", status: "completed" });
+		const ancestry = [
+			{ id: first.id, parentId: parent.id },
+			{ id: second.id, parentId: parent.id },
+			{ id: leaf.id, parentId: first.id },
+			{ id: explorer.id, parentId: parent.id },
+		];
+		const settled = renderSubagentHudLines([parent, first, second, leaf, explorer], 120, ancestry);
+		expect(settled.subagents).toEqual([]);
+		expect(settled.completed.map(Bun.stripANSI)).toEqual(["● Lead (● One, ● Two)"]);
+		expect(settled.completed[0]).toContain(`${theme.styledSymbol("status.enabled", "success")} ${theme.bold("One")}`);
+		expect(settled.completed[0]).toContain(`${theme.styledSymbol("status.enabled", "error")} ${theme.bold("Two")}`);
 	});
 
 	it("keeps an actual delegator named while a hidden descendant is active", () => {
