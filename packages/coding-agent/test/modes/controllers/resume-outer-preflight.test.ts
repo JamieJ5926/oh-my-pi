@@ -88,16 +88,22 @@ describe("InteractiveMode.handleResumeSession outer preflight flush", () => {
 		}
 	});
 
-	it("disposes controllers and delegates to SelectorController with settingsFlushed on success", async () => {
+	it.each([true, false])("delegates after flush and resets only for changed identity (changed=%s)", async changed => {
 		const { mode, session, cleanup } = await createMode({ flushFails: false });
 		try {
 			const resetSpy = vi.spyOn(mode, "resetObserverRegistry");
-			const switchSpy = vi.spyOn(session, "switchSession").mockResolvedValue(true);
+			let sessionId = mode.sessionManager.getSessionId();
+			vi.spyOn(mode.sessionManager, "getSessionId").mockImplementation(() => sessionId);
+			const switchSpy = vi.spyOn(session, "switchSession").mockImplementation(async () => {
+				expect(resetSpy).not.toHaveBeenCalled();
+				if (changed) sessionId = "target-session";
+				return true;
+			});
 
 			await mode.handleResumeSession("/tmp/some-session.jsonl");
 
 			expect(mode.settings.flush).toHaveBeenCalled();
-			expect(resetSpy).toHaveBeenCalled();
+			expect(resetSpy).toHaveBeenCalledTimes(changed ? 1 : 0);
 			expect(switchSpy).toHaveBeenCalledWith(
 				"/tmp/some-session.jsonl",
 				expect.objectContaining({ onCwdChange: expect.any(Function) }),

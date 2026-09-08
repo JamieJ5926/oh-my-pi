@@ -191,6 +191,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		collabGuest: undefined as CollabGuestLink | undefined,
 		settings: { get: () => "" },
 		sessionManager: {
+			getSessionId: () => "remote-session",
 			getSessionFile: () => null,
 			getSessionName: () => "local session",
 			getCwd: () => "/local",
