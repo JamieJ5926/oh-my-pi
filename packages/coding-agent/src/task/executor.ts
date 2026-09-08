@@ -2290,12 +2290,16 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	if (runtimeLimitExceeded && exitCode === 0) {
 		exitCode = 1;
 	}
+	const hasTerminalYield = yieldItems?.some(item => !Array.isArray(item.type)) ?? false;
+	const yieldSurvives = hasTerminalYield && !monitor.yieldInvalidatedByAsync();
 	const wasAborted =
-		runtimeLimitExceeded || Boolean(done.aborted) || abortedViaYield || (!hasYield && Boolean(signal?.aborted));
+		runtimeLimitExceeded ||
+		abortedViaYield ||
+		(!yieldSurvives && (Boolean(done.aborted) || Boolean(signal?.aborted)));
 	const finalAbortReason = wasAborted
 		? runtimeLimitExceeded
 			? monitor.resolveAbortReasonText()
-			: done.aborted
+			: done.aborted && !yieldSurvives
 				? (done.abortReason ?? monitor.resolveAbortReasonText())
 				: abortedViaYield
 					? yieldAbortReason
