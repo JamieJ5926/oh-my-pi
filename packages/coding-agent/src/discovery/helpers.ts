@@ -323,7 +323,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		?.map(s => s.trim())
 		.filter(Boolean);
 	const selector = (value: unknown): "shared" | string[] | undefined => {
-		if (value === undefined) return undefined;
+		if (value === undefined || value === null) return undefined;
 		if (value === "shared") return "shared";
 		if (Array.isArray(value) && value.every(item => typeof item === "string")) {
 			return [...new Set(value.map(item => item.trim()).filter(Boolean))];
