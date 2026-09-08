@@ -24,7 +24,9 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { FileSessionDirectory } from "./bridge/core/directory";
-import { canonicalProjectDir, daemonRuntimeDir, daemonBridgeDirectoryPath } from "./launch/paths";
+import { canonicalProjectDir, daemonRuntimeDir, daemonBridgeDirectoryPath, daemonBridgeTransportEndpoint, daemonBridgeTransportClientJournalPath } from "./launch/paths";
+import { BrokerBackedTransportAdapter } from "./bridge/transport/transport";
+import { IrcBus } from "./irc/bus";
 import { AgentRegistry } from "./registry/agent-registry";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
@@ -1854,11 +1856,20 @@ export async function runRootCommand(
 		}
 
 		const createAgentSessionImpl = deps.createAgentSession ?? createAgentSession;
-		const publicationProjectDir = await canonicalProjectDir(cwd);
-		AgentRegistry.global().configurePublication(
-			new FileSessionDirectory(daemonBridgeDirectoryPath(daemonRuntimeDir(publicationProjectDir))),
-			{ namespace: "omp", host: "localhost", process: String(process.pid), backend: "pi" },
-		);
+		try {
+			const publicationProjectDir = await canonicalProjectDir(cwd);
+			const runtimeDir = daemonRuntimeDir(publicationProjectDir);
+			const directory = new FileSessionDirectory(daemonBridgeDirectoryPath(runtimeDir));
+			await directory.purgeExpired();
+			AgentRegistry.global().configurePublication(directory, { namespace: "omp", host: "localhost", process: String(process.pid), backend: "pi" });
+			if (!IrcBus.global().hasTransport()) {
+				const transport = new BrokerBackedTransportAdapter({ socketPath: daemonBridgeTransportEndpoint(publicationProjectDir, runtimeDir), journalPath: daemonBridgeTransportClientJournalPath(runtimeDir) });
+				IrcBus.global().attachTransport(transport);
+				postmortem.register("irc-transport-cleanup", () => transport.close());
+			}
+		} catch (error) {
+			logger.warn("Cross-process IRC initialization failed", { error: String(error) });
+		}
 		const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
 			// Kick off background model discovery only after createAgentSession finishes its parallel

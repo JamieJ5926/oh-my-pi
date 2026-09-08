@@ -22,6 +22,7 @@ import type {
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
+import { IrcBus } from "./irc/bus";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import {
 	getOpenAICodexTransportDetails,
@@ -3986,11 +3987,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 			};
 		}
-		publication = await agentRegistry.publishSession(registeredAgentRef, sessionManager.getSessionId());
-		if (publication) {
-			const ownedPublication = publication;
-			unregisterPublicationPostmortem = postmortem.register("session-publication-cleanup", () => ownedPublication.close());
-		}
 
 		if (model?.api === "openai-codex-responses") {
 			// `.api` equality doesn't narrow the generic; the guard makes this cast sound.
@@ -4264,6 +4260,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			await session.initializeCodeMode();
 		} catch (error) {
 			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
+		}
+
+		try {
+			publication = await agentRegistry.publishSession(registeredAgentRef, sessionManager.getSessionId());
+			if (publication) {
+				const directoryPublication = publication;
+				const unregister = await IrcBus.global().registerPublished(resolvedAgentId, directoryPublication.address);
+				publication = {
+					address: directoryPublication.address,
+					close: async () => {
+						try { await unregister?.(); } finally { await directoryPublication.close(); }
+					},
+				};
+				const ownedPublication = publication;
+				unregisterPublicationPostmortem = postmortem.register("session-publication-cleanup", () => ownedPublication.close());
+			}
+		} catch (error) {
+			logger.warn("Session publication failed", { error: String(error) });
+			try { await publication?.close(); } catch (cleanupError) {
+				logger.warn("Failed publication cleanup rejected", { error: String(cleanupError) });
+			}
 		}
 
 		return {

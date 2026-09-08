@@ -11,7 +11,7 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { formatAge, formatDuration } from "@oh-my-pi/pi-utils";
+import { formatAge, formatDuration, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcAwaitTargetStopped, IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
@@ -20,7 +20,7 @@ import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry
 import { formatSessionAddress } from "../../bridge/core/address";
 import type { ClaimResult } from "../../bridge/core/directory";
 
-export type PublishedPeer = ClaimResult & { readonly remote: true; readonly reachable: false };
+export type PublishedPeer = ClaimResult & { readonly remote: true; readonly reachable: boolean };
 export type PublishedRosterDetails = CoordinationDetails & { readonly publishedPeers: PublishedPeer[] };
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../../registry/persisted-agents";
 import { canSpawnAtDepth } from "../../task/types";
@@ -208,14 +208,18 @@ export async function executeList(
 		].filter(Boolean);
 		lines.push(`- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}] — ${extras.join(", ")}`);
 	}
-	const publishedPeers: PublishedPeer[] = params.status ? [] : (await registry.listPublishedSessions())
-		.slice(0, Math.max(0, limit - shownRefs.length))
-		.map(record => ({ ...record, remote: true, reachable: false }));
-	if (publishedPeers.length > 0) {
-		for (const record of publishedPeers) {
-			lines.push(`- ${formatSessionAddress(record.address)} [remote · unreachable]`);
+	let publishedPeers: PublishedPeer[] = [];
+	if (!params.status) {
+		try {
+			publishedPeers = (await registry.listPublishedSessions()).map(record => ({ ...record, remote: true, reachable: bus.hasTransport() }));
+		} catch (error) {
+			logger.warn("Published session listing failed", { error: String(error) });
 		}
 	}
+	for (const record of publishedPeers.slice(0, limit)) {
+		lines.push(`- ${formatSessionAddress(record.address)} [remote · ${record.reachable ? "reachable" : "unreachable"}]`);
+	}
+	if (publishedPeers.length > limit) lines.push(`${publishedPeers.length - limit} remote sessions truncated (${publishedPeers.length} total).`);
 	if (counts.parked > 0) {
 		lines.push("");
 		lines.push(
@@ -274,8 +278,13 @@ export async function executeSend(
 	if (!isBroadcast && sessionFileHint) {
 		await ensurePersistedRoster(registry, sessionFileHint);
 	}
-	if (!isBroadcast && !registry.get(to) && await registry.findPublishedSession(to)) {
-		return hubErrorResult(`Remote session "${to}" is unreachable: cross-process transport is not attached.`, { op: "send", from: senderId, to });
+	let remote: ClaimResult | undefined;
+	if (!isBroadcast && !registry.get(to)) {
+		try { remote = await registry.findPublishedSession(to); } catch (error) {
+			if (error instanceof Error && error.message.startsWith("Ambiguous remote session")) return hubErrorResult(error.message, { op: "send", from: senderId, to });
+			logger.warn("Published session lookup failed", { error: String(error) });
+		}
+		if (remote && !IrcBus.global().hasTransport()) return hubErrorResult(`Remote session "${to}" is unreachable: cross-process transport is not attached.`, { op: "send", from: senderId, to });
 	}
 
 	const bus = IrcBus.global();
@@ -286,9 +295,9 @@ export async function executeSend(
 	let removeAwaitAbortListener: (() => void) | undefined;
 	const waiting = params.await
 		? bus
-				.wait(senderId, { from: to }, timeoutMs ?? DEFAULT_IRC_TIMEOUT_MS, awaitAbort?.signal, {
+				.wait(senderId, { from: remote ? formatSessionAddress(remote.address) : to }, timeoutMs ?? DEFAULT_IRC_TIMEOUT_MS, awaitAbort?.signal, {
 					drainPending: false,
-					awaitTarget: { registry, target: to },
+					awaitTarget: remote ? undefined : { registry, target: to },
 				})
 				.then(
 					message => ({ message, error: null as Error | null }),
@@ -338,7 +347,9 @@ export async function executeSend(
 		} else if (delivered.length === 0) {
 			lines.push("No recipients received the message.");
 		} else {
-			lines.push(`Delivered to ${delivered.length} peer(s):`);
+			const queued = delivered.filter(receipt => receipt.outcome === "queued").length;
+			if (delivered.length > queued) lines.push(`Delivered to ${delivered.length - queued} peer(s):`);
+			if (queued > 0) lines.push(`Queued for ${queued} remote peer(s), not yet delivered:`);
 		}
 		for (const receipt of receipts) {
 			lines.push(
@@ -367,7 +378,7 @@ export async function executeSend(
 						// so the agent loop keeps this tool as "sent" instead of marking it
 						// skipped, which would prompt a duplicate resend on the next turn.
 						lines.push(
-							`Send delivered but the reply wait was interrupted before ${to} answered. ` +
+							`Send accepted but the reply wait was interrupted before ${to} answered. ` +
 								"Check `inbox` or `wait` again after handling the interrupt.",
 						);
 					} else {
@@ -418,12 +429,17 @@ export async function executeMessageWait(
 	const { registry, senderId, settings } = deps;
 	const from = params.from?.trim() || undefined;
 	const timeoutMs = resolveMessageTimeoutMs(settings, params.timeoutMs);
-	if (from && !registry.get(from) && await registry.findPublishedSession(from)) {
-		return hubErrorResult(`Remote session "${from}" is unreachable: cross-process transport is not attached.`, { op: "wait", from: senderId });
+	let remote: ClaimResult | undefined;
+	if (from && !registry.get(from)) {
+		try { remote = await registry.findPublishedSession(from); } catch (error) {
+			if (error instanceof Error && error.message.startsWith("Ambiguous remote session")) return hubErrorResult(error.message, { op: "wait", from: senderId });
+			logger.warn("Published session lookup failed", { error: String(error) });
+		}
+		if (remote && !IrcBus.global().hasTransport()) return hubErrorResult(`Remote session "${from}" is unreachable: cross-process transport is not attached.`, { op: "wait", from: senderId });
 	}
 	try {
-		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
-			liveness: { registry, senderId },
+		const waited = await IrcBus.global().wait(senderId, { from: remote ? formatSessionAddress(remote.address) : from }, timeoutMs, signal, {
+			liveness: remote ? undefined : { registry, senderId },
 		});
 		if (!waited) {
 			const filterNote = from ? ` from ${from}` : "";
@@ -486,6 +502,7 @@ function outcomeColor(outcome: IrcDeliveryReceipt["outcome"]): ToolUIColor {
 		case "woken":
 			return "success";
 		case "revived":
+		case "queued":
 			return "warning";
 		case "injected":
 			return "accent";
@@ -658,7 +675,9 @@ function renderSendResult(
 		const receipt = receipts[0]!;
 		meta.push(theme.fg(outcomeColor(receipt.outcome), receipt.outcome));
 	} else {
-		if (delivered.length > 0) meta.push(theme.fg("success", `${delivered.length} delivered`));
+		const queued = delivered.filter(receipt => receipt.outcome === "queued").length;
+		if (delivered.length > queued) meta.push(theme.fg("success", `${delivered.length - queued} delivered`));
+		if (queued > 0) meta.push(theme.fg("warning", `${queued} queued`));
 		if (failedCount > 0) meta.push(theme.fg("error", `${failedCount} failed`));
 	}
 	if (timedOut) meta.push(theme.fg("warning", "no reply"));
@@ -770,6 +789,17 @@ function renderListResult(details: Partial<CoordinationDetails>, expanded: boole
 			(LIST_STATUS_ORDER[a.status] ?? 9) - (LIST_STATUS_ORDER[b.status] ?? 9) || b.lastActivity - a.lastActivity,
 	);
 	const rosterCounts = details.counts;
+	const remote = details.publishedPeers ?? [];
+	const remoteLines = remote.length === 0 ? [] : [
+		renderStatusLine({ icon: "info", title: "Remote sessions", meta: [`${remote.length} published`] }, theme),
+		...renderTreeList({
+			items: remote,
+			expanded,
+			maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
+			itemType: "remote session",
+			renderItem: peer => `${formatSessionAddress(peer.address)} [remote · ${peer.reachable ? "reachable" : "unreachable"}]`,
+		}, theme),
+	];
 	if (peers.length === 0) {
 		const meta =
 			rosterCounts && rosterCounts.running + rosterCounts.idle + rosterCounts.parked > 0
@@ -780,7 +810,7 @@ function renderListResult(details: Partial<CoordinationDetails>, expanded: boole
 						...(rosterCounts.truncated > 0 ? [`${rosterCounts.truncated} truncated`] : []),
 					]
 				: ["no other agents"];
-		return [renderStatusLine({ icon: "info", title: "IRC peers", meta }, theme)];
+		return [renderStatusLine({ icon: "info", title: "IRC peers", meta }, theme), ...remoteLines];
 	}
 	const counts = new Map<string, number>();
 	for (const peer of peers) counts.set(peer.status, (counts.get(peer.status) ?? 0) + 1);
@@ -812,7 +842,7 @@ function renderListResult(details: Partial<CoordinationDetails>, expanded: boole
 		},
 		theme,
 	);
-	return [header, ...items];
+	return [header, ...items, ...remoteLines];
 }
 function buildResultLines(
 	result: { content: Array<{ type: string; text?: string }>; isError?: boolean },

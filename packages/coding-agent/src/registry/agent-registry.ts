@@ -162,7 +162,11 @@ export class AgentRegistry {
 			heartbeat = heartbeat.then(async () => {
 				if (closing) return;
 				const result = await directory.heartbeat(record.address, ttlMs);
-				if (!result.ok) clearInterval(timer);
+				if (!result.ok) {
+					logger.warn("Session publication heartbeat rejected", { address: formatSessionAddress(record.address), reason: result.reason });
+					clearInterval(timer);
+					this.#published.delete(ref);
+				}
 			}).catch(error => logger.warn("Session publication heartbeat failed", { error: String(error) }));
 		}, Math.floor(ttlMs / 3));
 		timer.unref();
@@ -172,8 +176,15 @@ export class AgentRegistry {
 				if (closing) return closing;
 				clearInterval(timer);
 				closing = heartbeat.then(async () => {
-					await directory.tombstone(record.address, "session disposed");
-					this.#published.delete(ref);
+					try {
+						const result = await directory.tombstone(record.address, "session disposed");
+						if (!result.ok) logger.warn("Session publication tombstone rejected", { address: formatSessionAddress(record.address), reason: result.reason });
+					} finally {
+						this.#published.delete(ref);
+					}
+				}).catch(error => {
+					closing = undefined;
+					throw error;
 				});
 				return closing;
 			},
