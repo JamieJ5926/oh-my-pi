@@ -138,6 +138,11 @@ export class InMemorySessionDirectory implements SessionDirectory, SessionGenera
 		return record;
 	}
 
+	async listActive(): Promise<ClaimResult[]> {
+		const now = Date.now();
+		return [...this.#records.values()].filter((record): record is ClaimResult => record.kind === "active" && record.expiresAt > now);
+	}
+
 	async heartbeat(address: SessionAddress, ttlMs: number): Promise<HeartbeatResult> {
 		const checked = validateAddress(address);
 		const current = this.#records.get(identityKey(checked));
@@ -365,6 +370,11 @@ export class FileSessionDirectory implements SessionDirectory, SessionGeneration
 		const records = await this.#read();
 		const current = records.get(identityKey(address));
 		return current?.kind === "active" && current.expiresAt <= Date.now() ? null : current ?? null;
+	}
+
+	async listActive(): Promise<ClaimResult[]> {
+		const now = Date.now();
+		return [...(await this.#read()).values()].filter((record): record is ClaimResult => record.kind === "active" && record.expiresAt > now);
 	}
 
 	async compareAndSwap(address: SessionAddress, expectedGeneration: number, replacement: SessionRecord): Promise<CasResult> {

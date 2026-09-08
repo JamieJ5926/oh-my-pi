@@ -23,6 +23,9 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { FileSessionDirectory } from "./bridge/core/directory";
+import { canonicalProjectDir, daemonRuntimeDir, daemonBridgeDirectoryPath } from "./launch/paths";
+import { AgentRegistry } from "./registry/agent-registry";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
@@ -1851,6 +1854,11 @@ export async function runRootCommand(
 		}
 
 		const createAgentSessionImpl = deps.createAgentSession ?? createAgentSession;
+		const publicationProjectDir = await canonicalProjectDir(cwd);
+		AgentRegistry.global().configurePublication(
+			new FileSessionDirectory(daemonBridgeDirectoryPath(daemonRuntimeDir(publicationProjectDir))),
+			{ namespace: "omp", host: "localhost", process: String(process.pid), backend: "pi" },
+		);
 		const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
 			// Kick off background model discovery only after createAgentSession finishes its parallel

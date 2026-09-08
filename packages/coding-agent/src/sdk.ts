@@ -141,7 +141,7 @@ import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID, type SessionPublication } from "./registry/agent-registry";
 import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,
@@ -1722,6 +1722,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
 	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
 	let registeredAgentRef: AgentRef | undefined;
+	let publication: SessionPublication | undefined;
+	let unregisterPublicationPostmortem: (() => void) | undefined;
 	/**
 	 * Forget the agent ref on teardown — unless it is a retained terminal ref.
 	 * Parking disposes the session but keeps the ref addressable (history://,
@@ -3944,6 +3946,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// begins — the lifecycle await below opens an async gap before
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
+					try {
+						await publication?.close();
+					} catch (error) {
+						logger.warn("Session publication cleanup failed", { error: String(error) });
+					} finally {
+						unregisterPublicationPostmortem?.();
+					}
 					if (agentKind === "main") {
 						// Top-level teardown owns the global agent lifecycle: park timers,
 						// adopted subagent sessions, revivers. Tear it down while shared
@@ -3976,6 +3985,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					unregisterMcpPostmortem = undefined;
 				}
 			};
+		}
+		publication = await agentRegistry.publishSession(registeredAgentRef, sessionManager.getSessionId());
+		if (publication) {
+			const ownedPublication = publication;
+			unregisterPublicationPostmortem = postmortem.register("session-publication-cleanup", () => ownedPublication.close());
 		}
 
 		if (model?.api === "openai-codex-responses") {

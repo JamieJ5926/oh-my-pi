@@ -17,6 +17,11 @@ import type { RenderResultOptions } from "../../extensibility/custom-tools/types
 import { IrcAwaitTargetStopped, IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { formatSessionAddress } from "../../bridge/core/address";
+import type { ClaimResult } from "../../bridge/core/directory";
+
+export type PublishedPeer = ClaimResult & { readonly remote: true; readonly reachable: false };
+export type PublishedRosterDetails = CoordinationDetails & { readonly publishedPeers: PublishedPeer[] };
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../../registry/persisted-agents";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
@@ -159,7 +164,7 @@ export async function executeList(
 	senderId: string,
 	params: HubListParams = {},
 	sessionFileHint?: string | null,
-): Promise<AgentToolResult<CoordinationDetails>> {
+): Promise<AgentToolResult<PublishedRosterDetails>> {
 	const rootSessionFile = await ensurePersistedRoster(
 		registry,
 		sessionFileHint ?? registry.get(senderId)?.sessionFile,
@@ -203,6 +208,14 @@ export async function executeList(
 		].filter(Boolean);
 		lines.push(`- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}] — ${extras.join(", ")}`);
 	}
+	const publishedPeers: PublishedPeer[] = params.status ? [] : (await registry.listPublishedSessions())
+		.slice(0, Math.max(0, limit - shownRefs.length))
+		.map(record => ({ ...record, remote: true, reachable: false }));
+	if (publishedPeers.length > 0) {
+		for (const record of publishedPeers) {
+			lines.push(`- ${formatSessionAddress(record.address)} [remote · unreachable]`);
+		}
+	}
 	if (counts.parked > 0) {
 		lines.push("");
 		lines.push(
@@ -213,7 +226,7 @@ export async function executeList(
 	}
 	return {
 		content: [{ type: "text", text: lines.join("\n") }],
-		details: { op: "list", from: senderId, peers, counts },
+		details: { op: "list", from: senderId, peers, counts, publishedPeers },
 	};
 }
 
@@ -260,6 +273,9 @@ export async function executeSend(
 	// root is guessed from the registry or cwd.
 	if (!isBroadcast && sessionFileHint) {
 		await ensurePersistedRoster(registry, sessionFileHint);
+	}
+	if (!isBroadcast && !registry.get(to) && await registry.findPublishedSession(to)) {
+		return hubErrorResult(`Remote session "${to}" is unreachable: cross-process transport is not attached.`, { op: "send", from: senderId, to });
 	}
 
 	const bus = IrcBus.global();
@@ -402,6 +418,9 @@ export async function executeMessageWait(
 	const { registry, senderId, settings } = deps;
 	const from = params.from?.trim() || undefined;
 	const timeoutMs = resolveMessageTimeoutMs(settings, params.timeoutMs);
+	if (from && !registry.get(from) && await registry.findPublishedSession(from)) {
+		return hubErrorResult(`Remote session "${from}" is unreachable: cross-process transport is not attached.`, { op: "wait", from: senderId });
+	}
 	try {
 		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
 			liveness: { registry, senderId },
