@@ -553,7 +553,11 @@ export function renderSubagentHudLines(
 					tags += `${tags ? "  " : ""}${tag}`;
 				}
 				if (tags) add(tags, depth + 1);
-				for (const member of group) renderChildren(member.id, depth + 1);
+				for (const member of group) {
+					if (!children.has(member.id)) continue;
+					add(`${dot(member.status)} ${localName(member)}`, depth + 1);
+					renderChildren(member.id, depth + 2);
+				}
 				continue;
 			}
 			const name = parent === undefined ? formatTaskId(session.id) : localName(session);
@@ -561,7 +565,10 @@ export function renderSubagentHudLines(
 			const description = session.description?.trim() || session.progress?.description?.trim();
 			const task = session.progress?.task?.trim();
 			const preview = description && !labelEchoesHandle(session.id, description) ? `: ${description}` : task && !labelEchoesHandle(session.id, task) ? ` ${truncateToWidth(replaceTabs(task).replace(/\s*[\r\n]+\s*/g, " ↵ "), TRUNCATE_LENGTHS.SHORT)}` : "";
-			add(`${dot(session.status)} ${theme.bold(name)}${badge}${replaceTabs(preview).replace(/\s*[\r\n]+\s*/g, " ↵ ")} · ${tokens(session)} tok`, depth);
+			const usage = ` · ${tokens(session)} tok`;
+			const width = Math.max(0, columns - Math.min(depth * 3, Math.max(0, columns - 8)) - 1);
+			const body = `${dot(session.status)} ${theme.bold(name)}${badge}${replaceTabs(preview).replace(/\s*[\r\n]+\s*/g, " ↵ ")}`;
+			add(`${truncateToWidth(body, Math.max(0, width - visibleWidth(usage)))}${usage}`, depth);
 			renderChildren(session.id, depth + 1);
 		}
 	};
@@ -1247,6 +1254,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
 		this.syncRunningSubagentBadge();
 		this.#observerRegistry.onChange(kind => {
+			if (kind === "reset") this.#subagentHudAncestry.clear();
 			this.#scheduleObserverUiSync(kind);
 		});
 		// Let the transient todo tool result light up pending todos executed by a
@@ -2749,10 +2757,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		return [...leadingLines, combinedLine];
 	}
 
+	#subagentHudAncestry = new Map<string, { id: string; parentId?: string }>();
+
 	/** Current observer generation remains visible until session reset. */
 	#renderSubagentList(): void {
 		this.subagentContainer.clear();
-		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), Math.max(0, this.ui.terminal.columns - 2), getRunningSubagentBadgeRegistry(this.collabGuest).list(), this.settings.get("tui.subagentSiblingCollapseThreshold"));
+		const sessions = this.#observerRegistry.getSessions();
+		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
+		for (const session of sessions) {
+			const ref = registry.get(session.id);
+			if (ref) this.#subagentHudAncestry.set(session.id, { id: ref.id, parentId: ref.parentId });
+		}
+		const lines = renderSubagentHudLines(sessions, Math.max(0, this.ui.terminal.columns - 2), [...this.#subagentHudAncestry.values()], this.settings.get("tui.subagentSiblingCollapseThreshold"));
 		if (lines.length === 0) return;
 		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
 	}

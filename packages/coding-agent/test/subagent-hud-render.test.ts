@@ -336,6 +336,18 @@ describe("subagent HUD lines", () => {
 		expect(render(registry.getSessions())).toContain("Current");
 		registry.resetSessions();
 		expect(renderSubagentHudLines(registry.getSessions(), 120, [{ id: "Stale" }])).toEqual([]);
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...makeLifecycle("Current", 0, "old work", true), status: "completed" });
+		bus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Current", 0, "old work", true));
+		expect(render(registry.getSessions())).toBe("");
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...makeLifecycle("FreshTerminal", 0, "fresh work", true), status: "completed" });
+		expect(render(registry.getSessions())).toContain("FreshTerminal");
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...makeLifecycle("Current", 0, "new generation", true), parentToolCallId: "new-tool-call" });
+		expect(render(registry.getSessions())).toContain("new generation");
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...makeLifecycle("Current", 0, "old overwrite", true), status: "completed" });
+		bus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Current", 0, "old overwrite", true));
+		expect(registry.getSession("Current")?.status).toBe("active");
+		expect(registry.getSession("Current")?.parentToolCallId).toBe("new-tool-call");
+		expect(render(registry.getSessions())).not.toContain("old overwrite");
 		registry.dispose();
 	});
 });
