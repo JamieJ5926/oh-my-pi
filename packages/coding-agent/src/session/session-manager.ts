@@ -2393,6 +2393,7 @@ export class SessionManager {
 		spawns?: string;
 		readSummarize?: boolean;
 		advisor?: string;
+		roleProfile?: SessionInitEntry["roleProfile"];
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
@@ -2958,6 +2959,7 @@ export class SessionManager {
 			spawns?: string;
 			readSummarize?: boolean;
 			advisor?: string;
+			roleProfile?: SessionInitEntry["roleProfile"];
 		} | null;
 	} | null> {
 		let header: SessionHeader | undefined;
@@ -2975,6 +2977,7 @@ export class SessionManager {
 			spawns?: string;
 			readSummarize?: boolean;
 			advisor?: string;
+			roleProfile?: SessionInitEntry["roleProfile"];
 		} | null = null;
 		const visit = (entry: FileEntry): void => {
 			if (entry.type === "session") {
@@ -2996,6 +2999,7 @@ export class SessionManager {
 					readSummarize: entry.readSummarize,
 					spawns: entry.spawns,
 					advisor: entry.advisor,
+					roleProfile: entry.roleProfile,
 				};
 			}
 		};

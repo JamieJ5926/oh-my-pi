@@ -3037,6 +3037,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			tools: Map<string, AgentTool>,
 			rebuildOptions?: { directToolNames?: readonly string[] },
 		): Promise<BuildSystemPromptResult> => {
+			if (options.systemPrompt !== undefined && typeof options.systemPrompt !== "function") {
+				return { systemPrompt: typeof options.systemPrompt === "string" ? [options.systemPrompt] : options.systemPrompt };
+			}
 			const promptCwd = sessionManager.getCwd();
 			const activeRepoContext = hasSession
 				? await logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd)

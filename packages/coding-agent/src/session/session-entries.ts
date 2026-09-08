@@ -8,6 +8,9 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import type { StructuredSubagentSchemaMode } from "../task/types";
+import type { Rule } from "../capability/rule";
+import type { EffectiveExtensionRoots } from "../capability/types";
+import type { Skill } from "../extensibility/skills";
 import type { CompactionMethod } from "./compaction-methods";
 
 export const CURRENT_SESSION_VERSION = 3;
@@ -228,6 +231,24 @@ export interface CredentialPinEntry extends SessionEntryBase {
 	hash: string;
 }
 
+export interface ResolvedRoleProfile {
+	path?: string;
+	contentHash: string;
+	mode: "minimal" | "full";
+	sources: {
+		prompt: string;
+		instructions: string[];
+		skills: string[];
+		hooks: string[];
+		tools: string[];
+	};
+	contextFiles: Array<{ path: string; content: string }>;
+	rules: Rule[];
+	skills: Skill[];
+	extensionPaths: string[];
+	extensionRoots?: EffectiveExtensionRoots;
+}
+
 /** Session init entry - captures initial context for subagent sessions (debugging/replay). */
 export interface SessionInitEntry extends SessionEntryBase {
 	type: "session_init";
@@ -257,6 +278,7 @@ export interface SessionInitEntry extends SessionEntryBase {
 	readSummarize?: boolean;
 	/** Effective advisor for this subagent: `"on"` = advisor-role model, else an explicit model pattern; absent = unadvised. */
 	advisor?: string;
+	roleProfile?: ResolvedRoleProfile;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */
