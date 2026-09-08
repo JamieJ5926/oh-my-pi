@@ -203,9 +203,7 @@ describe("parseAgentFields", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc" })?.advisor).toBeUndefined();
 	});
 	test("parses minimalPrompt from boolean frontmatter", () => {
-		expect(parseAgentFields({ name: "worker", description: "desc", minimalPrompt: true })?.minimalPrompt).toBe(
-			true,
-		);
+		expect(parseAgentFields({ name: "worker", description: "desc", minimalPrompt: true })?.minimalPrompt).toBe(true);
 		expect(parseAgentFields({ name: "worker", description: "desc", minimalPrompt: false })?.minimalPrompt).toBe(
 			false,
 		);
@@ -217,12 +215,10 @@ describe("parseAgentFields", () => {
 
 	test("parses input selectors as shared, list, or CSV", () => {
 		for (const field of ["instructions", "skills", "hooks"] as const) {
-			expect(parseAgentFields({ name: "worker", description: "desc", [field]: "shared" })?.[field]).toBe(
-				"shared",
+			expect(parseAgentFields({ name: "worker", description: "desc", [field]: "shared" })?.[field]).toBe("shared");
+			expect(parseAgentFields({ name: "worker", description: "desc", [field]: ["b", " a ", "b"] })?.[field]).toEqual(
+				["b", "a"],
 			);
-			expect(
-				parseAgentFields({ name: "worker", description: "desc", [field]: ["b", " a ", "b"] })?.[field],
-			).toEqual(["b", "a"]);
 			expect(parseAgentFields({ name: "worker", description: "desc", [field]: "a, b" })?.[field]).toEqual([
 				"a",
 				"b",
@@ -231,18 +227,13 @@ describe("parseAgentFields", () => {
 	});
 	test("normalizes single-element shared selectors to the sentinel", () => {
 		for (const field of ["instructions", "skills", "hooks"] as const) {
-			expect(parseAgentFields({ name: "worker", description: "desc", [field]: ["shared"] })?.[field]).toBe(
-				"shared",
-			);
+			expect(parseAgentFields({ name: "worker", description: "desc", [field]: ["shared"] })?.[field]).toBe("shared");
 			expect(parseAgentFields({ name: "worker", description: "desc", [field]: [" shared "] })?.[field]).toBe(
 				"shared",
 			);
-			expect(parseAgentFields({ name: "worker", description: "desc", [field]: " shared " })?.[field]).toBe(
-				"shared",
-			);
+			expect(parseAgentFields({ name: "worker", description: "desc", [field]: " shared " })?.[field]).toBe("shared");
 		}
 	});
-
 
 	test("keeps explicit-empty selectors distinct from absent ones", () => {
 		for (const field of ["instructions", "skills", "hooks"] as const) {

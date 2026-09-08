@@ -26,7 +26,12 @@ import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
 import { obfuscateToolArguments } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import { type SessionEntry, type SessionHeader, TITLE_CHANGE_ENTRY_TYPE } from "../session/session-entries";
+import {
+	type ResolvedRoleProfile,
+	type SessionEntry,
+	type SessionHeader,
+	TITLE_CHANGE_ENTRY_TYPE,
+} from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { OutputMeta } from "../tools/output-meta";
 import { buildSessionData, type SessionData, type SubSession } from "./html";
@@ -189,6 +194,45 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 				return;
 		}
 	};
+	const addStrings = (values: ReadonlyArray<string> | undefined): void => {
+		if (!values) return;
+		for (const value of values) add(value);
+	};
+	const addRoleProfile = (roleProfile: ResolvedRoleProfile | undefined): void => {
+		if (!roleProfile) return;
+		add(roleProfile.path);
+		add(roleProfile.sources.prompt);
+		addStrings(roleProfile.sources.instructions);
+		addStrings(roleProfile.sources.skills);
+		addStrings(roleProfile.sources.hooks);
+		addStrings(roleProfile.sources.tools);
+		for (const file of roleProfile.contextFiles) {
+			add(file.path);
+			add(file.content);
+		}
+		for (const rule of roleProfile.rules) {
+			add(rule.name);
+			add(rule.path);
+			add(rule.content);
+			add(rule.description);
+			addStrings(rule.globs);
+			addStrings(rule.condition);
+			addStrings(rule.astCondition);
+			addStrings(rule.scope);
+		}
+		for (const skill of roleProfile.skills) {
+			add(skill.name);
+			add(skill.description);
+			add(skill.filePath);
+			add(skill.baseDir);
+			add(skill.source);
+			add(skill.containRoot);
+			add(skill._source?.path);
+		}
+		addStrings(roleProfile.extensionPaths);
+		addStrings(roleProfile.extensionRoots?.explicit);
+		addStrings(roleProfile.extensionRoots?.configured);
+	};
 	const addEntry = (entry: SessionEntry): void => {
 		switch (entry.type) {
 			case "message":
@@ -207,6 +251,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 			case "session_init":
 				add(entry.systemPrompt);
 				add(entry.task);
+				addRoleProfile(entry.roleProfile);
 				return;
 			case "label":
 				add(entry.label);
@@ -289,6 +334,75 @@ function redactShareSubSession(
 	};
 }
 
+/**
+ * Redact a resolved role profile for share. Role content (custom instructions,
+ * context files, rules) is author-controlled text that can carry pasted secrets,
+ * so every freeform string is rewritten through the obfuscator while the
+ * non-sensitive shape (`mode`, `contentHash`) is preserved for debugging.
+ */
+function redactShareRoleProfile(
+	o: SecretObfuscator,
+	profile: ResolvedRoleProfile,
+	sharedRegexSecretValues: ReadonlySet<string>,
+): ResolvedRoleProfile {
+	const strings = (values: ReadonlyArray<string>): string[] =>
+		values.map(value => o.obfuscate(value, sharedRegexSecretValues));
+	const optional = (value: string | undefined): string | undefined =>
+		value === undefined ? undefined : o.obfuscate(value, sharedRegexSecretValues);
+	return {
+		...profile,
+		path: optional(profile.path),
+		sources: {
+			prompt: o.obfuscate(profile.sources.prompt, sharedRegexSecretValues),
+			instructions: strings(profile.sources.instructions),
+			skills: strings(profile.sources.skills),
+			hooks: strings(profile.sources.hooks),
+			tools: strings(profile.sources.tools),
+		},
+		contextFiles: profile.contextFiles.map(file => ({
+			path: o.obfuscate(file.path, sharedRegexSecretValues),
+			content: o.obfuscate(file.content, sharedRegexSecretValues),
+		})),
+		rules: profile.rules.map(rule => ({
+			...rule,
+			name: o.obfuscate(rule.name, sharedRegexSecretValues),
+			path: o.obfuscate(rule.path, sharedRegexSecretValues),
+			content: o.obfuscate(rule.content, sharedRegexSecretValues),
+			globs: rule.globs?.map(value => o.obfuscate(value, sharedRegexSecretValues)),
+			description: optional(rule.description),
+			condition: rule.condition?.map(value => o.obfuscate(value, sharedRegexSecretValues)),
+			astCondition: rule.astCondition?.map(value => o.obfuscate(value, sharedRegexSecretValues)),
+			scope: rule.scope?.map(value => o.obfuscate(value, sharedRegexSecretValues)),
+		})),
+		skills: profile.skills.map(skill => ({
+			...skill,
+			name: o.obfuscate(skill.name, sharedRegexSecretValues),
+			description: o.obfuscate(skill.description, sharedRegexSecretValues),
+			filePath: o.obfuscate(skill.filePath, sharedRegexSecretValues),
+			baseDir: o.obfuscate(skill.baseDir, sharedRegexSecretValues),
+			source: o.obfuscate(skill.source, sharedRegexSecretValues),
+			containRoot: optional(skill.containRoot),
+			_source:
+				skill._source === undefined
+					? undefined
+					: { ...skill._source, path: o.obfuscate(skill._source.path, sharedRegexSecretValues) },
+		})),
+		extensionPaths: strings(profile.extensionPaths),
+		extensionRoots:
+			profile.extensionRoots === undefined
+				? undefined
+				: {
+						...profile.extensionRoots,
+						explicit: [...profile.extensionRoots.explicit].map(value =>
+							o.obfuscate(value, sharedRegexSecretValues),
+						),
+						configured: [...profile.extensionRoots.configured].map(value =>
+							o.obfuscate(value, sharedRegexSecretValues),
+						),
+					},
+	};
+}
+
 function redactShareEntry(
 	o: SecretObfuscator,
 	entry: SessionEntry,
@@ -324,6 +438,10 @@ function redactShareEntry(
 				systemPrompt: o.obfuscate(entry.systemPrompt, sharedRegexSecretValues),
 				task: o.obfuscate(entry.task, sharedRegexSecretValues),
 				outputSchema: undefined,
+				roleProfile:
+					entry.roleProfile === undefined
+						? undefined
+						: redactShareRoleProfile(o, entry.roleProfile, sharedRegexSecretValues),
 			};
 		case "label":
 			return {

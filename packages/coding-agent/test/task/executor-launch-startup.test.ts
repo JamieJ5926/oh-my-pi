@@ -183,7 +183,13 @@ function launchHarness(agent: AgentDefinition, enabledTools: string[]) {
 
 it("renders a minimal role prompt with no base prompt", async () => {
 	const harness = launchHarness(
-		{ name: "recorder", description: "test", systemPrompt: "Record the target.", source: "bundled", minimalPrompt: true },
+		{
+			name: "recorder",
+			description: "test",
+			systemPrompt: "Record the target.",
+			source: "bundled",
+			minimalPrompt: true,
+		},
 		["read", "yield"],
 	);
 	expect((await harness.run()).exitCode).toBe(0);
@@ -201,8 +207,7 @@ it("keeps the full render callback assembling around the default prompt", async 
 	expect((await harness.run()).exitCode).toBe(0);
 	const systemPrompt = harness.sessionOptions()?.systemPrompt;
 	expect(typeof systemPrompt).toBe("function");
-	const rendered =
-		typeof systemPrompt === "function" ? systemPrompt(["base-a", "base-b"]) : [];
+	const rendered = typeof systemPrompt === "function" ? systemPrompt(["base-a", "base-b"]) : [];
 	expect(rendered).toHaveLength(3);
 	expect(rendered[0]).toBe("base-a");
 	expect(rendered[2]).toBe("base-b");

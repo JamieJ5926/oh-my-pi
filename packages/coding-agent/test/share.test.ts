@@ -539,6 +539,65 @@ describe("buildShareSnapshot", () => {
 		expect(flat).not.toContain(regexSecret);
 		expect(flat).not.toContain(`${friendlyName}_`);
 	});
+
+	test("redacts session_init roleProfile payloads like other session_init context", () => {
+		const secret = "roleprofile-share-secret";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const entries: SessionEntry[] = [
+			{
+				type: "session_init",
+				id: "init-1",
+				parentId: null,
+				timestamp: ts,
+				systemPrompt: "system prompt",
+				task: "initial task",
+				tools: [],
+				roleProfile: {
+					contentHash: "abc123",
+					mode: "full",
+					sources: {
+						prompt: `role prompt ${secret}`,
+						instructions: [`instruction ${secret}`],
+						skills: [],
+						hooks: [],
+						tools: [],
+					},
+					contextFiles: [{ path: "/ctx/notes.md", content: `notes ${secret}` }],
+					rules: [{ name: "r", path: "/rules/r.md", content: `rule body ${secret}` }],
+					skills: [
+						{
+							name: "s",
+							description: `skill blurb ${secret}`,
+							filePath: "/skills/s/SKILL.md",
+							baseDir: "/skills/s",
+							source: "project",
+						},
+					],
+					extensionPaths: [],
+				},
+			} as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "init-1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+
+		const snapshot = buildShareSnapshot(sm, { obfuscator });
+		const flat = JSON.stringify(snapshot);
+
+		// Every roleProfile freeform string is redacted in the share...
+		expect(flat).not.toContain(secret);
+		// ...while the non-sensitive shape survives for debugging.
+		expect(flat).toContain("abc123");
+		expect(flat).toContain("/ctx/notes.md");
+		// Source entries keep the real values; redaction is share-only.
+		expect(JSON.stringify(entries)).toContain(secret);
+
+		// Without an obfuscator the snapshot passes through unredacted.
+		expect(JSON.stringify(buildShareSnapshot(sm, {}))).toContain(secret);
+	});
 });
 
 describe("normalizeShareServerUrl", () => {
