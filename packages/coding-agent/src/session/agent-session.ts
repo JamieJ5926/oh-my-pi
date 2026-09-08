@@ -867,7 +867,12 @@ export class AgentSession {
 	 *  the agent responds to the peer. Skip only when a queued steer/follow-up will itself drive a
 	 *  resume turn whose aside poll already consumes these (no double-wake). */
 	#resumeStrandedIrcAsides(): void {
-		if (this.#modeExitDrainSuppressionDepth > 0 || this.#isDisposed || this.isStreaming || !this.#irc.hasPending()) {
+		if (
+			this.#modeExitDrainSuppressionDepth > 0 ||
+			this.#isDisposed ||
+			this.isStreaming ||
+			!this.#irc.hasDrainablePending()
+		) {
 			return;
 		}
 		if (this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages()) return;
@@ -1028,7 +1033,8 @@ export class AgentSession {
 			!this.#queuedMessageDrainBlocked &&
 			this.#canAutoContinueForFollowUp() &&
 			this.agent.hasQueuedMessages();
-		const ircContinuation = canDrain && !this.#isDisposed && !this.#planModeState?.enabled && this.#irc.hasPending();
+		const ircContinuation =
+			canDrain && !this.#isDisposed && !this.#planModeState?.enabled && this.#irc.hasDrainablePending();
 		this.#emit(queuedContinuation || ircContinuation ? { ...pending, isTerminal: false } : pending);
 	}
 

@@ -28,6 +28,7 @@ export class IrcBridge {
 	readonly #host: IrcBridgeHost;
 	#interrupts: CustomMessage[] = [];
 	#asides: CustomMessage[] = [];
+	#inboxOnly: CustomMessage[] = [];
 	readonly #autoReplies = new Set<Promise<void>>();
 
 	constructor(host: IrcBridgeHost) {
@@ -41,6 +42,10 @@ export class IrcBridge {
 
 	/** Whether any undelivered IRC record remains queued. */
 	hasPending(): boolean {
+		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#inboxOnly.length > 0;
+	}
+
+	hasDrainablePending(): boolean {
 		return this.#interrupts.length > 0 || this.#asides.length > 0;
 	}
 
@@ -69,9 +74,11 @@ export class IrcBridge {
 		const messages: IrcMessage[] = [];
 		const remainingInterrupts: CustomMessage[] = [];
 		const remainingAsides: CustomMessage[] = [];
+		const remainingInboxOnly: CustomMessage[] = [];
 		const queues = [
 			{ records: this.#interrupts, remaining: remainingInterrupts },
 			{ records: this.#asides, remaining: remainingAsides },
+			{ records: this.#inboxOnly, remaining: remainingInboxOnly },
 		];
 		for (const queue of queues) {
 			for (const record of queue.records) {
@@ -112,6 +119,7 @@ export class IrcBridge {
 		}
 		this.#interrupts = remainingInterrupts;
 		this.#asides = remainingAsides;
+		this.#inboxOnly = remainingInboxOnly;
 		return messages;
 	}
 
@@ -148,6 +156,8 @@ export class IrcBridge {
 					timestamp: msg.ts,
 					steering: true,
 				});
+			} else if (IrcBus.global().hasFilteredWaiter(msg.to)) {
+				this.#inboxOnly.push(record);
 			} else {
 				this.#interrupts.push(record);
 			}
@@ -177,7 +187,9 @@ export class IrcBridge {
 
 	/** Persists queued IRC records that missed their step-boundary injection. */
 	flushPending(): void {
-		for (const record of this.drainPending()) {
+		const records = [...this.drainPending(), ...this.#inboxOnly];
+		this.#inboxOnly = [];
+		for (const record of records) {
 			this.#host.agent.emitExternalEvent({ type: "message_start", message: record });
 			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
 		}

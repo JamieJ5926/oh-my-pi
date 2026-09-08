@@ -173,3 +173,82 @@ describe("hub unified wait", () => {
 		).toEqual(["starting the edit"]);
 	});
 });
+
+test("streaming filtered waits retain decoys for two consecutive runs", async () => {
+	const { Agent } = await import("@oh-my-pi/pi-agent-core");
+	const { Settings } = await import("@oh-my-pi/pi-coding-agent/config/settings");
+	const { IrcBridge } = await import("@oh-my-pi/pi-coding-agent/session/irc-bridge");
+	const { SessionManager } = await import("@oh-my-pi/pi-coding-agent/session/session-manager");
+	for (const withJobs of [false, true]) {
+		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
+		const bridge = new IrcBridge({
+			agent: new Agent(),
+			settings: Settings.isolated(),
+			sessionManager: SessionManager.inMemory(),
+			isDisposed: () => false,
+			isStreaming: () => true,
+			planModeEnabled: () => false,
+			emitSessionEvent: async () => {},
+			wakeForIrc: () => {
+				throw new Error("unexpected wake");
+			},
+			runEphemeralTurn: async () => ({ replyText: "" }),
+		});
+		AgentRegistry.global().register({
+			id: SELF_ID,
+			displayName: "main",
+			kind: "main",
+			session: { deliverIrcMessage: bridge.deliver.bind(bridge) },
+		} as unknown as Parameters<AgentRegistry["register"]>[0]);
+		for (const id of ["Canonical", "Decoy"]) {
+			AgentRegistry.global().register({
+				id,
+				displayName: id,
+				kind: "sub",
+				session: { isStreaming: true },
+			} as unknown as Parameters<AgentRegistry["register"]>[0]);
+		}
+		const manager = withJobs ? new AsyncJobManager({ onJobComplete: () => {} }) : undefined;
+		const job = manager && registerHangingJob(manager, "still running");
+		try {
+			for (let run = 1; run <= 2; run++) {
+				const pending = new HubTool(makeSession(manager)).execute(`filtered_${run}`, {
+					op: "wait",
+					from: "Canonical",
+					timeoutMs: 1000,
+				});
+				expect(IrcBus.global().hasFilteredWaiter(SELF_ID)).toBe(true);
+				await IrcBus.global().send({ from: "Decoy", to: SELF_ID, body: `decoy ${run}` });
+				expect(bridge.hasInterrupts()).toBe(false);
+				expect(bridge.drainPending()).toEqual([]);
+				expect(bridge.hasPending()).toBe(true);
+				expect(bridge.hasDrainablePending()).toBe(false);
+				await IrcBus.global().send({ from: "Canonical", to: SELF_ID, body: `canonical ${run}` });
+				const details = (await pending).details as CoordinationDetails;
+				expect(details.waited?.from).toBe("Canonical");
+				expect(details.waited?.body).toBe(`canonical ${run}`);
+				expect(bridge.drainPending()).toEqual([]);
+				expect(bridge.drainInboxMessages(SELF_ID, { from: "Canonical" })).toEqual([]);
+				expect(bridge.drainInboxMessages(SELF_ID).map(message => message.body)).toEqual([`decoy ${run}`]);
+				expect(bridge.hasPending()).toBe(false);
+			}
+			const abort = new AbortController();
+			const cancelled = IrcBus.global().wait(SELF_ID, { from: "Canonical" }, 1000, abort.signal);
+			expect(IrcBus.global().hasFilteredWaiter(SELF_ID)).toBe(true);
+			await IrcBus.global().send({ from: "Decoy", to: SELF_ID, body: "before cancellation" });
+			abort.abort(new Error("cancelled"));
+			await expect(cancelled).rejects.toThrow("cancelled");
+			expect(IrcBus.global().hasFilteredWaiter(SELF_ID)).toBe(false);
+			expect(bridge.drainPending()).toEqual([]);
+			expect(bridge.drainInboxMessages(SELF_ID).map(message => message.body)).toEqual(["before cancellation"]);
+			await IrcBus.global().send({ from: "Decoy", to: SELF_ID, body: "after cancellation" });
+			expect(bridge.hasInterrupts()).toBe(true);
+			expect(bridge.drainPending()).toHaveLength(1);
+		} finally {
+			if (manager && job) manager.cancel(job.id);
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		}
+	}
+});

@@ -1362,5 +1362,62 @@ describe("IRC", () => {
 			expect(fireAndForget.outcome).toBe("injected");
 			expect(disabledSpy).not.toHaveBeenCalled();
 		});
+
+		it("preserves parent steering and flushes a filtered wait decoy on dispose", async () => {
+			const { session } = createRealSession();
+			registry.register({ id: "Child", displayName: "child", kind: "sub", parentId: "Parent", session });
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			const events: AgentSessionEvent[] = [];
+			session.subscribe(event => events.push(event));
+			const waiting = bus.wait("Child", { from: "Canonical" }, 1000);
+			expect(bus.hasFilteredWaiter("Child")).toBe(true);
+			await bus.send({ from: "Parent", to: "Child", body: "change approach" });
+			expect(session.agent.peekSteeringQueue()).toHaveLength(1);
+			expect(session.agent.peekSteeringQueue()[0]?.content).toContain("change approach");
+			await bus.send({ from: "Decoy", to: "Child", body: "retained decoy" });
+			expect(session.agent.hasIrcInterrupts?.()).toBe(false);
+			await bus.send({ from: "Canonical", to: "Child", body: "ready" });
+			expect((await waiting)?.body).toBe("ready");
+			Object.defineProperty(session, "isStreaming", { value: false, configurable: true });
+			await session.dispose();
+			const surfaced = events.filter(
+				event =>
+					event.type === "message_end" &&
+					event.message.role === "custom" &&
+					event.message.customType === "irc:incoming",
+			);
+			expect(surfaced).toHaveLength(1);
+		});
+
+		it("does not resume or mark a retained decoy as a continuation", async () => {
+			const { session } = createStreamingSession(modelRegistry, [{ content: ["finished"] }]);
+			sessions.push(session);
+			registry.register({ id: "Recipient", displayName: "recipient", kind: "sub", session });
+			const promptSpy = vi.spyOn(session.agent, "prompt");
+			const ends: AgentSessionEvent[] = [];
+			let delivered: Promise<unknown> | undefined;
+			const abort = new AbortController();
+			const waiting = bus.wait("Recipient", { from: "Canonical" }, 1000, abort.signal);
+			session.subscribe(event => {
+				if (event.type === "agent_end") ends.push(event);
+				if (!delivered && event.type === "message_end" && event.message.role === "assistant") {
+					expect(bus.hasFilteredWaiter("Recipient")).toBe(true);
+					delivered = bus.send({ from: "Decoy", to: "Recipient", body: "retained at tail" });
+				}
+			});
+			try {
+				await session.prompt("work");
+				await delivered;
+				expect(promptSpy).toHaveBeenCalledTimes(1);
+				expect(ends).toHaveLength(1);
+				expect(ends[0]).toMatchObject({ type: "agent_end", isTerminal: true });
+				expect(session.drainPendingIrcInboxMessages("Recipient").map(message => message.body)).toEqual([
+					"retained at tail",
+				]);
+			} finally {
+				abort.abort(new Error("fixture complete"));
+				await expect(waiting).rejects.toThrow("fixture complete");
+			}
+		});
 	});
 });

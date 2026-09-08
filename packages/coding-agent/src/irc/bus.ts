@@ -396,6 +396,10 @@ export class IrcBus {
 		return this.#mailboxes.get(agentId)?.length ?? 0;
 	}
 
+	hasFilteredWaiter(agentId: string): boolean {
+		return this.#waiters.get(agentId)?.some(waiter => !!waiter.from) ?? false;
+	}
+
 	#enqueue(message: IrcMessage): void {
 		let mailbox = this.#mailboxes.get(message.to);
 		if (!mailbox) {
