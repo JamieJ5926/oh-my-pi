@@ -701,12 +701,19 @@ function taskFirstLine(task: unknown): string {
 function formatAgentHeaderLabel(args: Partial<TaskParams> | undefined, theme: Theme): string | undefined {
 	if (!args) return undefined;
 	const lanes: unknown[] = Array.isArray(args.tasks) && args.tasks.length ? args.tasks : [args];
-	return lanes.map(lane => {
-		if (lane === null || typeof lane !== "object") return "";
-		const name = "name" in lane && typeof lane.name === "string" ? lane.name.trim() : "";
-		const role = "agent" in lane && typeof lane.agent === "string" ? lane.agent.trim() : "";
-		return name ? `${formatTaskId(name)}${role && role !== "task" ? ` ${theme.format.bracketLeft}${role}${theme.format.bracketRight}` : ""}` : role;
-	}).filter(Boolean).join(", ") || undefined;
+	return (
+		lanes
+			.map(lane => {
+				if (lane === null || typeof lane !== "object") return "";
+				const name = "name" in lane && typeof lane.name === "string" ? lane.name.trim() : "";
+				const role = "agent" in lane && typeof lane.agent === "string" ? lane.agent.trim() : "";
+				return name
+					? `${formatTaskId(name)}${role && role !== "task" ? ` ${theme.format.bracketLeft}${role}${theme.format.bracketRight}` : ""}`
+					: role;
+			})
+			.filter(Boolean)
+			.join(", ") || undefined
+	);
 }
 
 /** Dim `⟨agent⟩` badge for a non-default agent type; empty for the generic worker. */

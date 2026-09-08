@@ -153,7 +153,7 @@ describe("job renderer task-result preview", () => {
 			expect(output).toContain("Job1 running");
 			expect(output).toContain("Job2 completed");
 			expect(output).toContain("Job3 running");
-			expect(output).toContain("waiting on 2 of 3 jobs");
+			expect(output.split("\n")[0]).toContain("waiting on Job1 running, Job2 completed, Job3 running 1 done");
 		});
 
 		it("shows only finished jobs when isPartial is false and it is a poll call", () => {
@@ -171,7 +171,7 @@ describe("job renderer task-result preview", () => {
 			expect(output).not.toContain("Job1 running");
 			expect(output).toContain("Job2 completed");
 			expect(output).not.toContain("Job3 running");
-			expect(output).toContain("1 job settled");
+			expect(output.split("\n")[0]).toContain("Job2 completed settled 1 done");
 		});
 
 		it("shows nothing when isPartial is false and all jobs are running and it is a poll call", () => {
@@ -213,7 +213,7 @@ describe("job renderer task-result preview", () => {
 			expect(output).toContain("Job1 running");
 			expect(output).toContain("Job2 completed");
 			expect(output).toContain("Job3 running");
-			expect(output).toContain("waiting on 2 of 3 jobs");
+			expect(output.split("\n")[0]).toContain("waiting on Job1 running, Job2 completed, Job3 running 1 done");
 		});
 
 		it("does not collapse running jobs when isPartial is false and cancel-only is true", () => {
@@ -231,7 +231,7 @@ describe("job renderer task-result preview", () => {
 			expect(output).toContain("Job1 running");
 			expect(output).toContain("Job2 completed");
 			expect(output).toContain("Job3 running");
-			expect(output).toContain("waiting on 2 of 3 jobs");
+			expect(output.split("\n")[0]).toContain("waiting on Job1 running, Job2 completed, Job3 running 1 done");
 		});
 
 		it("renders agent rows for running agents outside job control", () => {
@@ -250,7 +250,7 @@ describe("job renderer task-result preview", () => {
 				{ op: "jobs" },
 			);
 			const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
-			expect(output).toContain("1 running agent — no jobs");
+			expect(output.split("\n")[0]).toContain("Worker — no jobs");
 			expect(output).toContain("Worker");
 			expect(output).toContain("grepping the tree");
 		});

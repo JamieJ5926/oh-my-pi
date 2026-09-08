@@ -498,7 +498,11 @@ export function renderSubagentHudLines(
 	ancestry: readonly { id: string; parentId?: string }[] = [],
 	siblingCollapseThreshold = 4,
 ): string[] {
-	const candidates = new Map(sessions.filter(session => session.kind === "subagent" && session.detached === true).map(session => [session.id, session]));
+	const candidates = new Map(
+		sessions
+			.filter(session => session.kind === "subagent" && session.detached === true)
+			.map(session => [session.id, session]),
+	);
 	if (candidates.size === 0) return [];
 	const refs = new Map(ancestry.map(ref => [ref.id, ref]));
 	const children = new Map<string | undefined, ObservableSession[]>();
@@ -507,7 +511,10 @@ export function renderSubagentHudLines(
 		const seen = new Set([session.id]);
 		let cursor = parent;
 		while (cursor !== undefined) {
-			if (seen.has(cursor)) { parent = undefined; break; }
+			if (seen.has(cursor)) {
+				parent = undefined;
+				break;
+			}
 			seen.add(cursor);
 			cursor = refs.get(cursor)?.parentId;
 		}
@@ -517,7 +524,11 @@ export function renderSubagentHudLines(
 		else children.set(parent, [session]);
 	}
 	const roleOf = (session: ObservableSession) => session.agent ?? session.progress?.agent ?? "task";
-	const dot = (status: ObservableSession["status"]) => theme.styledSymbol("status.enabled", status === "active" ? "warning" : status === "completed" ? "success" : status === "failed" ? "error" : "muted");
+	const dot = (status: ObservableSession["status"]) =>
+		theme.styledSymbol(
+			"status.enabled",
+			status === "active" ? "warning" : status === "completed" ? "success" : status === "failed" ? "error" : "muted",
+		);
 	const localName = (session: ObservableSession) => session.id.split(".").pop() ?? session.id;
 	const tokens = (session: ObservableSession) => session.progress?.tokens ?? 0;
 	const rows: string[] = [];
@@ -529,11 +540,13 @@ export function renderSubagentHudLines(
 	const renderChildren = (parent: string | undefined, depth: number): void => {
 		const siblings = children.get(parent) ?? [];
 		const groups = new Map<string, ObservableSession[]>();
-		if (parent !== undefined) for (const session of siblings) {
-			const role = roleOf(session);
-			const group = groups.get(role);
-			if (group) group.push(session); else groups.set(role, [session]);
-		}
+		if (parent !== undefined)
+			for (const session of siblings) {
+				const role = roleOf(session);
+				const group = groups.get(role);
+				if (group) group.push(session);
+				else groups.set(role, [session]);
+			}
 		const emitted = new Set<string>();
 		for (const session of siblings) {
 			const role = roleOf(session);
@@ -543,14 +556,29 @@ export function renderSubagentHudLines(
 				emitted.add(role);
 				const counts = { active: 0, completed: 0, failed: 0, aborted: 0 };
 				let sum = 0;
-				for (const member of group) { counts[member.status]++; sum += tokens(member); }
-				const state = counts.failed ? "failed" : counts.active ? "active" : counts.aborted ? "aborted" : "completed";
-				add(`${dot(state)} ${theme.bold(role)} x${group.length} · ${counts.completed} done · ${counts.active} running · ${counts.failed} failed · ${counts.aborted} cancelled · ${sum} tok`, depth);
+				for (const member of group) {
+					counts[member.status]++;
+					sum += tokens(member);
+				}
+				const state = counts.failed
+					? "failed"
+					: counts.active
+						? "active"
+						: counts.aborted
+							? "aborted"
+							: "completed";
+				add(
+					`${dot(state)} ${theme.bold(role)} x${group.length} · ${counts.completed} done · ${counts.active} running · ${counts.failed} failed · ${counts.aborted} cancelled · ${sum} tok`,
+					depth,
+				);
 				let tags = "";
 				const width = Math.max(1, columns - (depth + 2) * 3 - 1);
 				for (const member of group) {
 					const tag = `${dot(member.status)} ${truncateToWidth(localName(member), Math.max(1, width - 2))}`;
-					if (tags && visibleWidth(`${tags}  ${tag}`) > width) { add(tags, depth + 1); tags = ""; }
+					if (tags && visibleWidth(`${tags}  ${tag}`) > width) {
+						add(tags, depth + 1);
+						tags = "";
+					}
 					tags += `${tags ? "  " : ""}${tag}`;
 				}
 				if (tags) add(tags, depth + 1);
@@ -562,10 +590,16 @@ export function renderSubagentHudLines(
 				continue;
 			}
 			const name = parent === undefined ? formatTaskId(session.id) : localName(session);
-			const badge = role === "task" ? "" : ` ${theme.format.bracketLeft}${theme.bold(role)}${theme.format.bracketRight}`;
+			const badge =
+				role === "task" ? "" : ` ${theme.format.bracketLeft}${theme.bold(role)}${theme.format.bracketRight}`;
 			const description = session.description?.trim() || session.progress?.description?.trim();
 			const task = session.progress?.task?.trim();
-			const preview = description && !labelEchoesHandle(session.id, description) ? `: ${description}` : task && !labelEchoesHandle(session.id, task) ? ` ${truncateToWidth(replaceTabs(task).replace(/\s*[\r\n]+\s*/g, " ↵ "), TRUNCATE_LENGTHS.SHORT)}` : "";
+			const preview =
+				description && !labelEchoesHandle(session.id, description)
+					? `: ${description}`
+					: task && !labelEchoesHandle(session.id, task)
+						? ` ${truncateToWidth(replaceTabs(task).replace(/\s*[\r\n]+\s*/g, " ↵ "), TRUNCATE_LENGTHS.SHORT)}`
+						: "";
 			const usage = ` · ${tokens(session)} tok`;
 			const width = Math.max(0, columns - (depth + 1) * 3 - 1);
 			const body = `${dot(session.status)} ${theme.bold(name)}${badge}${replaceTabs(preview).replace(/\s*[\r\n]+\s*/g, " ↵ ")}`;
@@ -2787,7 +2821,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			const ref = registry.get(session.id);
 			if (ref) this.#subagentHudAncestry.set(session.id, { id: ref.id, parentId: ref.parentId });
 		}
-		const lines = renderSubagentHudLines(sessions, Math.max(0, this.ui.terminal.columns - 2), [...this.#subagentHudAncestry.values()], this.settings.get("tui.subagentSiblingCollapseThreshold"));
+		const lines = renderSubagentHudLines(
+			sessions,
+			Math.max(0, this.ui.terminal.columns - 2),
+			[...this.#subagentHudAncestry.values()],
+			this.settings.get("tui.subagentSiblingCollapseThreshold"),
+		);
 		if (lines.length === 0) return;
 		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
 	}

@@ -29,7 +29,11 @@ describe("task renderer: streaming call preview", () => {
 		for (const tasks of [[null], "x"]) {
 			const args: TaskParams = { name: "Streaming" };
 			Object.defineProperty(args, "tasks", { value: tasks });
-			expect(() => taskToolRenderer.renderCall(args, { expanded: false, isPartial: true, renderContext: { hasResult: true } }, theme).render(160)).not.toThrow();
+			expect(() =>
+				taskToolRenderer
+					.renderCall(args, { expanded: false, isPartial: true, renderContext: { hasResult: true } }, theme)
+					.render(160),
+			).not.toThrow();
 		}
 	});
 
@@ -62,7 +66,8 @@ describe("task renderer: streaming call preview", () => {
 		};
 		const row = render(args)
 			.split("\n")
-			.slice(1).find(line => line.includes("CapCheck"));
+			.slice(1)
+			.find(line => line.includes("CapCheck"));
 
 		expect(row).toBeDefined();
 		expect(row).toContain("…");
@@ -133,7 +138,10 @@ describe("task renderer: streaming call preview", () => {
 		expect(firstAgentAt).toBeGreaterThan(contextAt);
 		expect(out.indexOf("Fix02Setup", contextAt)).toBeGreaterThan(firstAgentAt);
 		// Each item row carries its own first task line as secondary text.
-		const row = out.split("\n").slice(1).find(line => line.includes("Fix01Foundation"));
+		const row = out
+			.split("\n")
+			.slice(1)
+			.find(line => line.includes("Fix01Foundation"));
 		expect(row).toContain("Fix bench/01-foundation-memory");
 	});
 

@@ -180,9 +180,15 @@ export class SessionObserverRegistry {
 						const status = STATUS_MAP[payload.status];
 						if (!status) return;
 						const retired = this.#retiredSessions.get(payload.id);
-						if (retired?.some(previous =>
-							(payload.sessionFile === undefined || payload.sessionFile === previous.sessionFile)
-							&& (payload.parentToolCallId === undefined || payload.parentToolCallId === previous.parentToolCallId))) return;
+						if (
+							retired?.some(
+								previous =>
+									(payload.sessionFile === undefined || payload.sessionFile === previous.sessionFile) &&
+									(payload.parentToolCallId === undefined ||
+										payload.parentToolCallId === previous.parentToolCallId),
+							)
+						)
+							return;
 
 						const sortOrder = this.#ensureSortOrder(payload.id);
 						this.#ensureParentSortOrder(payload.parentToolCallId, sortOrder);
@@ -223,9 +229,15 @@ export class SessionObserverRegistry {
 						const progress = payload.progress;
 						const id = progress.id;
 						const retired = this.#retiredSessions.get(id);
-						if (retired?.some(previous =>
-							(payload.sessionFile === undefined || payload.sessionFile === previous.sessionFile)
-							&& (payload.parentToolCallId === undefined || payload.parentToolCallId === previous.parentToolCallId))) return;
+						if (
+							retired?.some(
+								previous =>
+									(payload.sessionFile === undefined || payload.sessionFile === previous.sessionFile) &&
+									(payload.parentToolCallId === undefined ||
+										payload.parentToolCallId === previous.parentToolCallId),
+							)
+						)
+							return;
 						const existing = this.#sessions.get(id);
 
 						const sortOrder = this.#ensureSortOrder(id);

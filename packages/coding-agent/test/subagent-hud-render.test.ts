@@ -309,10 +309,19 @@ describe("subagent HUD lines", () => {
 	});
 	it("keeps staggered terminal siblings compact with child tags and own usage", () => {
 		const parent = makeSession({ id: "Lead", progress: makeProgress({ id: "Lead", tokens: 7 }) });
-		const members = Array.from({ length: 6 }, (_, index) => makeSession({ id: `Lead.Child${index}`, agent: "explorer", status: index === 4 ? "failed" : index === 5 ? "aborted" : "completed", progress: makeProgress({ id: `Lead.Child${index}`, tokens: index }) }));
+		const members = Array.from({ length: 6 }, (_, index) =>
+			makeSession({
+				id: `Lead.Child${index}`,
+				agent: "explorer",
+				status: index === 4 ? "failed" : index === 5 ? "aborted" : "completed",
+				progress: makeProgress({ id: `Lead.Child${index}`, tokens: index }),
+			}),
+		);
 		const ancestry = members.map(member => ({ id: member.id, parentId: "Lead" }));
 		for (let count = 1; count <= 6; count++) {
-			const out = Bun.stripANSI(renderSubagentHudLines([parent, ...members.slice(0, count)], 160, ancestry).join("\n"));
+			const out = Bun.stripANSI(
+				renderSubagentHudLines([parent, ...members.slice(0, count)], 160, ancestry).join("\n"),
+			);
 			expect(out.includes(`explorer x${count}`)).toBe(count > 4);
 			for (let index = 0; index < count; index++) expect(out).toContain(`Child${index}`);
 		}
@@ -322,19 +331,32 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("15 tok");
 		expect(out).toContain("1 cancelled");
 		expect(out).toContain("1 failed");
-		const narrow = renderSubagentHudLines([parent, ...members, makeSession({ id: "DeepWork" })], 42, [...ancestry, { id: "DeepWork", parentId: members[0].id }]);
+		const narrow = renderSubagentHudLines([parent, ...members, makeSession({ id: "DeepWork" })], 42, [
+			...ancestry,
+			{ id: "DeepWork", parentId: members[0].id },
+		]);
 		for (const line of narrow) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(42);
 		for (let index = 0; index < 6; index++) expect(Bun.stripANSI(narrow.join("\n"))).toContain(`Child${index}`);
 		expect(Bun.stripANSI(narrow.join("\n"))).toContain("DeepWork");
 	});
 	it("draws branches and continuing guides through nested rows to the next parent", () => {
 		const sessions = [makeSession({ id: "Lead" }), makeSession({ id: "Lead.Child" }), makeSession({ id: "Peer" })];
-		const out = Bun.stripANSI(renderSubagentHudLines(sessions, 120, [{ id: "Lead.Child", parentId: "Lead" }]).join("\n"));
+		const out = Bun.stripANSI(
+			renderSubagentHudLines(sessions, 120, [{ id: "Lead.Child", parentId: "Lead" }]).join("\n"),
+		);
 		expect(out).toContain("├─ ● Lead");
 		expect(out).toContain("│  └─ ● Child");
 		expect(out).toContain("└─ ● Peer");
-		const children = Array.from({ length: 6 }, (_, index) => makeSession({ id: `Lead.Child${index}`, agent: "explorer" }));
-		const frame = Bun.stripANSI(renderSubagentHudLines([sessions[0], ...children, makeSession({ id: "DemoPeer" })], 160, children.map(child => ({ id: child.id, parentId: "Lead" }))).join("\n"));
+		const children = Array.from({ length: 6 }, (_, index) =>
+			makeSession({ id: `Lead.Child${index}`, agent: "explorer" }),
+		);
+		const frame = Bun.stripANSI(
+			renderSubagentHudLines(
+				[sessions[0], ...children, makeSession({ id: "DemoPeer" })],
+				160,
+				children.map(child => ({ id: child.id, parentId: "Lead" })),
+			).join("\n"),
+		);
 		expect(frame).toContain("│  └─ ● explorer x6");
 		expect(frame).toContain("│     └─ ● Child0");
 		if (process.env.SUBAGENT_HUD_FRAME) console.log(frame);
@@ -344,18 +366,33 @@ describe("subagent HUD lines", () => {
 		const registry = new SessionObserverRegistry();
 		registry.subscribeToEventBus(bus, bus);
 		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle("Current", 0, "current work", true));
-		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...makeLifecycle("Current", 0, "current work", true), status: "completed" });
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			...makeLifecycle("Current", 0, "current work", true),
+			status: "completed",
+		});
 		expect(render(registry.getSessions())).toContain("Current");
 		registry.resetSessions();
 		expect(renderSubagentHudLines(registry.getSessions(), 120, [{ id: "Stale" }])).toEqual([]);
-		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...makeLifecycle("Current", 0, "old work", true), status: "completed" });
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			...makeLifecycle("Current", 0, "old work", true),
+			status: "completed",
+		});
 		bus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Current", 0, "old work", true));
 		expect(render(registry.getSessions())).toBe("");
-		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...makeLifecycle("FreshTerminal", 0, "fresh work", true), status: "completed" });
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			...makeLifecycle("FreshTerminal", 0, "fresh work", true),
+			status: "completed",
+		});
 		expect(render(registry.getSessions())).toContain("FreshTerminal");
-		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...makeLifecycle("Current", 0, "new generation", true), parentToolCallId: "new-tool-call" });
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			...makeLifecycle("Current", 0, "new generation", true),
+			parentToolCallId: "new-tool-call",
+		});
 		expect(render(registry.getSessions())).toContain("new generation");
-		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...makeLifecycle("Current", 0, "old overwrite", true), status: "completed" });
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			...makeLifecycle("Current", 0, "old overwrite", true),
+			status: "completed",
+		});
 		bus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Current", 0, "old overwrite", true));
 		expect(registry.getSession("Current")?.status).toBe("active");
 		expect(registry.getSession("Current")?.parentToolCallId).toBe("new-tool-call");
