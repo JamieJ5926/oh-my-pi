@@ -652,7 +652,9 @@ export function renderSubagentHudLines(
 						if (childRole !== "poteto-agent" && childRole !== "poteto-agent-deep") continue;
 						leads += `${leads ? ", " : ""}${dot(child.status)} ${theme.bold(localName(child))}`;
 					}
-					completed.push(`${dot(session.status)} ${theme.bold(formatTaskId(session.id))}${leads ? ` (${leads})` : ""}`);
+					completed.push(
+						`${dot(session.status)} ${theme.bold(formatTaskId(session.id))}${leads ? ` (${leads})` : ""}`,
+					);
 				}
 				continue;
 			}
