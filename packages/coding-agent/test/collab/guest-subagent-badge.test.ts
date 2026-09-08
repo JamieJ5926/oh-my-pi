@@ -48,6 +48,7 @@ function makeGuestContext(counts: number[]): InteractiveModeContext {
 		collabGuest: undefined as CollabGuestLink | undefined,
 		settings: { get: () => "" },
 		sessionManager: {
+			getSessionId: () => "remote-session",
 			getSessionFile: () => null,
 			getSessionName: () => "local session",
 			getCwd: () => "/local",

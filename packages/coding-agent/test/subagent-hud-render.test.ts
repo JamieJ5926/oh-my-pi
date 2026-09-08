@@ -516,12 +516,20 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			expect(status.mock.calls.some(([message]) => message.startsWith("Reconnected"))).toBe(true);
 			expect(reset).toHaveBeenCalledTimes(1);
 			expect(hud()).toContain("LiveChild");
-			await send({ t: "bus", channel: TASK_SUBAGENT_PROGRESS_CHANNEL, data: {
-				...makeProgressPayload("LiveChild", 0, "recovered progress", true),
-				sessionFile: lifecycle.sessionFile,
-			} });
+			await send({
+				t: "bus",
+				channel: TASK_SUBAGENT_PROGRESS_CHANNEL,
+				data: {
+					...makeProgressPayload("LiveChild", 0, "recovered progress", true),
+					sessionFile: lifecycle.sessionFile,
+				},
+			});
 			expect(hud()).toContain("recovered progress");
-			await send({ t: "bus", channel: TASK_SUBAGENT_LIFECYCLE_CHANNEL, data: { ...lifecycle, status: "completed" } });
+			await send({
+				t: "bus",
+				channel: TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+				data: { ...lifecycle, status: "completed" },
+			});
 			await send(welcome("host-a"));
 			expect(reset).toHaveBeenCalledTimes(1);
 			expect(hud()).toContain("LiveChild");
@@ -535,14 +543,30 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			expect(session.sessionManager.getSessionId()).toBe("host-b");
 			expect(reset).toHaveBeenCalledTimes(2);
 			expect(hud()).not.toContain("LiveChild");
-			await send({ t: "bus", channel: TASK_SUBAGENT_LIFECYCLE_CHANNEL, data: { ...lifecycle, status: "completed" } });
-			await send({ t: "bus", channel: TASK_SUBAGENT_PROGRESS_CHANNEL, data: {
-				...makeProgressPayload("LiveChild", 0, "stale progress", true), sessionFile: lifecycle.sessionFile,
-			} });
+			await send({
+				t: "bus",
+				channel: TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+				data: { ...lifecycle, status: "completed" },
+			});
+			await send({
+				t: "bus",
+				channel: TASK_SUBAGENT_PROGRESS_CHANNEL,
+				data: {
+					...makeProgressPayload("LiveChild", 0, "stale progress", true),
+					sessionFile: lifecycle.sessionFile,
+				},
+			});
 			expect(hud()).not.toContain("LiveChild");
-			await send({ t: "bus", channel: TASK_SUBAGENT_LIFECYCLE_CHANNEL, data: {
-				...lifecycle, parentToolCallId: "host-b-call", sessionFile: "/host/b-child.jsonl", description: "new generation",
-			} });
+			await send({
+				t: "bus",
+				channel: TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+				data: {
+					...lifecycle,
+					parentToolCallId: "host-b-call",
+					sessionFile: "/host/b-child.jsonl",
+					description: "new generation",
+				},
+			});
 			expect(hud()).toContain("new generation");
 		} finally {
 			host.close();
