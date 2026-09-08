@@ -17,7 +17,10 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 - [`src/prompts/tools/task.md`](../packages/coding-agent/src/prompts/tools/task.md)
 - [`src/discovery/helpers.ts`](../packages/coding-agent/src/discovery/helpers.ts)
 - [`src/discovery/omp-extension-roots.ts`](../packages/coding-agent/src/discovery/omp-extension-roots.ts)
-- [`src/config.ts`](../packages/coding-agent/src/config.ts)
+- [`src/sdk.ts`](../packages/coding-agent/src/sdk.ts)
+- [`src/session/session-entries.ts`](../packages/coding-agent/src/session/session-entries.ts)
+- [`src/session/session-manager.ts`](../packages/coding-agent/src/session/session-manager.ts)
+- [`src/task/persisted-revive.ts`](../packages/coding-agent/src/task/persisted-revive.ts)
 - [`src/task/executor.ts`](../packages/coding-agent/src/task/executor.ts)
 
 ---
@@ -27,7 +30,7 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 Task agents normalize into `AgentDefinition` (`src/task/types.ts`):
 
 - required `name`, `description`, and `systemPrompt`
-- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`
+- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `minimalPrompt`, `instructions`, `skills`, `hooks`, `readSummarize`, `prewalk`, `advisor`
 - `source`: `"bundled" | "user" | "project"` (extension agents are tagged with their extension root's project/user level)
 - optional `filePath`
 
@@ -42,9 +45,26 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 - `model` accepts one selector, CSV, or an array. Entries are tried in order after role aliases are expanded.
 - `thinking-level` / `thinking` selects the agent's configured effort. When `task.enableEffort` (default `false`) exposes it, a task item's coarse `effort` (`lo`, `med`, `hi`) takes precedence at launch. OMP maps that hint to the selected model's lowest, middle, or highest supported effort, then clamps it to `task.maxEffort` (default `max`). The ceiling is carried across retry-fallback model switches. If the selected model has no supported effort at or below the ceiling, the spawn fails; models without a controllable effort surface instead fall back to their normal selector.
 - `blocking: true` makes the parent wait for that agent even when async task execution is enabled
-- `autoloadSkills` names skills from the parent session to inject before the first child prompt; unknown names are ignored
+- `autoloadSkills` names skills from the role's selected skill subset to inject before the first child prompt; unknown names and names outside the subset are ignored
 - `prewalk: true` starts the subagent on its resolved model and hands off to the default prewalk target (the `smol` role) at its first edit/write, exactly like the session-level `--prewalk`; a string value (e.g. `prewalk: "@smol"` or `prewalk: "openai/gpt-5-mini"`) picks a custom target. The `task.agentPrewalk` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its prewalk strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`). An unavailable target is skipped instead of failing the spawn. A resolved target is skipped only when both its model identity and its effective thinking mode/level match the starting selection after model clamping; a same-model effort downgrade is a real hand-off and still arms and switches at the first edit/write.
 - `advisor: true` pairs spawned sessions of the agent with an advisor running the model resolved for the `advisor` role; a string value (e.g. `advisor: "deepseek/deepseek-v4-flash"` or `advisor: "@smol:high"`) sets an explicit advisor model pattern (optional `:level` suffix), applied as the spawned session's `modelRoles.advisor`. The `task.agentAdvisor` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its advisor strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`); subagents default to no advisor, and the effective opt-in is persisted in `session_init` so cold revival restores it.
+- `minimalPrompt: true` renders the child with the role prompt only and no base prompt. Absent or false keeps the full render.
+- `instructions`, `skills`, and `hooks` select role inputs. Each accepts `shared`, a name list, or a CSV string. Absent, `null`, and `shared` inherit everything. An explicit empty list selects nothing for `instructions` and `skills`; for `hooks` the shared extension paths still load, so an explicit list only adds role hooks and never removes shared ones. Any other type fails parsing with an error.
+
+## Role profile resolution
+
+`resolveRoleInputs()` (`src/task/structured-subagent.ts`) filters the parent session inputs through the role selectors before launch:
+
+- `instructions` matches context files by path or basename (except `AGENTS.md`, which never forwards) and rules by name or path.
+- `skills` matches session skills by name or file path. `autoloadSkills` then resolves against that subset.
+- `hooks` resolves relative to the role file, or to the session directory for bundled roles, and appends to the shared extension paths. Restricted tool mode still clears every preloaded extension path.
+- The resolved set is hashed with the role file content into `roleProfile.contentHash`. `mode` records `minimal` or `full`.
+
+`runSubprocess` (`src/task/executor.ts`) renders `minimalPrompt` roles from an empty default prompt and full roles around it. It persists `roleProfile` in `session_init` with `sources.tools` corrected to the enabled set minus synthetic `write` when the role never granted it (`src/session/session-entries.ts`, `src/session/session-manager.ts`).
+
+Cold revival (`src/task/persisted-revive.ts`) replays the persisted prompt verbatim as a fixed array and restores the persisted context files, rules, skills, extension paths, and extension roots. Sessions persisted before role profiles revive with the verbatim prompt and no role inputs.
+
+`createAgentSession` (`src/sdk.ts`) passes a string or array `systemPrompt` through unchanged and only builds the default prompt when `systemPrompt` is absent or a callback.
 
 ## Role-backed custom agents
 
