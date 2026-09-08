@@ -319,17 +319,32 @@ describe("subagent HUD lines", () => {
 			makeSession({
 				id: `Lead.Child${index}`,
 				agent: "explorer",
-				status: index === 4 ? "failed" : index === 5 ? "aborted" : "completed",
+				status: index === 0 ? "active" : index === 4 ? "failed" : index === 5 ? "aborted" : "completed",
 				progress: makeProgress({ id: `Lead.Child${index}`, tokens: index }),
 			}),
 		);
 		const ancestry = members.map(member => ({ id: member.id, parentId: "Lead" }));
-		for (let count = 1; count <= 6; count++) {
-			const out = Bun.stripANSI(
-				renderSubagentHudLines([parent, ...members.slice(0, count)], 160, ancestry).join("\n"),
+		for (const count of [1, 3, 6]) {
+			const selected = members.slice(0, count);
+			const frame = renderSubagentHudLines([parent, ...selected], 160, ancestry).join("\n");
+			const out = Bun.stripANSI(frame);
+			expect(out).toContain(`explorer x${count}`);
+			expect(out).toContain(
+				`${Math.min(count, 4) - 1} done · 1 running · ${count === 6 ? 1 : 0} failed · ${count === 6 ? 1 : 0} cancelled`,
 			);
-			expect(out.includes(`explorer x${count}`)).toBe(count > 4);
-			for (let index = 0; index < count; index++) expect(out).toContain(`Child${index}`);
+			expect(out).toContain("Lead · 7 tok");
+			expect(out).toContain(selected.map(member => `● ${member.id.split(".").pop()}`).join("  "));
+			for (const member of selected) {
+				const color =
+					member.status === "active"
+						? "warning"
+						: member.status === "failed"
+							? "error"
+							: member.status === "aborted"
+								? "muted"
+								: "success";
+				expect(frame).toContain(`${theme.styledSymbol("status.enabled", color)} ${member.id.split(".").pop()}`);
+			}
 		}
 		parent.status = "completed";
 		const out = Bun.stripANSI(renderSubagentHudLines([parent, ...members], 160, ancestry).join("\n"));
@@ -345,13 +360,35 @@ describe("subagent HUD lines", () => {
 		for (let index = 0; index < 6; index++) expect(Bun.stripANSI(narrow.join("\n"))).toContain(`Child${index}`);
 		expect(Bun.stripANSI(narrow.join("\n"))).toContain("DeepWork");
 	});
+	it("keeps nested Poteto parents full and explicit worker thresholds intact", () => {
+		for (const role of ["poteto-agent", "poteto-agent-deep"]) {
+			const sessions = [
+				makeSession({ id: "Root" }),
+				makeSession({ id: "Root.Lead", agent: role, description: "Parent detail" }),
+				makeSession({ id: "Root.Lead.Worker", agent: "explorer" }),
+			];
+			const ancestry = [
+				{ id: "Root.Lead", parentId: "Root" },
+				{ id: "Root.Lead.Worker", parentId: "Root.Lead" },
+			];
+			const out = Bun.stripANSI(renderSubagentHudLines(sessions, 160, ancestry).join("\n"));
+			expect(out).toMatch(new RegExp(`Lead.*${role}.*Parent detail`));
+			expect(out).not.toContain(`${role} x1`);
+			expect(out).toContain("explorer x1");
+			expect(out).toContain("● Worker");
+			const expanded = Bun.stripANSI(renderSubagentHudLines(sessions, 160, ancestry, 4).join("\n"));
+			expect(expanded).not.toContain("explorer x1");
+			expect(expanded).toMatch(/Worker.*explorer/);
+		}
+	});
 	it("draws branches and continuing guides through nested rows to the next parent", () => {
 		const sessions = [makeSession({ id: "Lead" }), makeSession({ id: "Lead.Child" }), makeSession({ id: "Peer" })];
 		const out = Bun.stripANSI(
 			renderSubagentHudLines(sessions, 120, [{ id: "Lead.Child", parentId: "Lead" }]).join("\n"),
 		);
 		expect(out).toContain("├─ ● Lead");
-		expect(out).toContain("│  └─ ● Child");
+		expect(out).toContain("│  └─ ● task x1");
+		expect(out).toContain("│     └─ ● Child");
 		expect(out).toContain("└─ ● Peer");
 		const children = Array.from({ length: 6 }, (_, index) =>
 			makeSession({ id: `Lead.Child${index}`, agent: "explorer" }),
