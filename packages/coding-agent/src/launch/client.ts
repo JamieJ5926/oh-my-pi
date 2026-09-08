@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
+import { verifyDaemonBrokerVersion } from "./broker-version";
 import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
 	DAEMON_BROKER_WORKER_ARG,
@@ -283,24 +284,32 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	async #connectOnce(): Promise<void> {
+		let existing: net.Socket | undefined;
 		try {
-			this.#bindSocket(await openSocket(this.#endpoint, 250));
-			return;
+			existing = await openSocket(this.#endpoint, 250);
 		} catch {
-			// No live broker. Multiple clients may race to spawn; the broker's PID
-			// lease selects one winner before any candidate touches the socket.
+			// The broker's PID lease selects a winner when clients race to spawn.
+		}
+		if (existing) {
+			await verifyDaemonBrokerVersion(existing, this.#token, this.projectDir);
+			this.#bindSocket(existing);
+			return;
 		}
 		this.#spawnBroker();
 		const deadline = Date.now() + CONNECT_TIMEOUT_MS;
 		let lastError: Error | undefined;
 		while (Date.now() < deadline) {
+			let socket: net.Socket;
 			try {
-				this.#bindSocket(await openSocket(this.#endpoint, 250));
-				return;
+				socket = await openSocket(this.#endpoint, 250);
 			} catch (error) {
 				lastError = error instanceof Error ? error : new Error(String(error));
 				await Bun.sleep(CONNECT_RETRY_MS);
+				continue;
 			}
+			await verifyDaemonBrokerVersion(socket, this.#token, this.projectDir);
+			this.#bindSocket(socket);
+			return;
 		}
 		throw new Error(`Failed to start daemon broker: ${lastError?.message ?? "socket unavailable"}`);
 	}
