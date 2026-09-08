@@ -34,12 +34,18 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 		Bun.env.BUN_NO_CODESIGN_MACHO_BINARY = "1";
 	}
 	try {
+		const revision = Bun.spawnSync(["git", "rev-parse", "--short", "HEAD"], { cwd: options.repoRoot });
+		const status = Bun.spawnSync(["git", "status", "--porcelain"], { cwd: options.repoRoot });
+		const provenance = revision.exitCode === 0 ? revision.stdout.toString().trim() : "unknown";
+		const dirty = status.exitCode !== 0 || status.stdout.length > 0 ? "+dirty" : "";
+		const buildId = `${provenance}${dirty}#${crypto.randomUUID()}`;
 		const output = await Bun.build({
 			entrypoints: [options.entrypoint],
 			root: options.repoRoot,
 			external: [...COMPILED_EXTERNAL_DEPENDENCIES],
 			define: {
 				"process.env.PI_COMPILED": JSON.stringify("true"),
+				"process.env.OMP_BUILD_ID": JSON.stringify(buildId),
 				"process.env.PI_TINY_TRANSFORMERS_VERSION": JSON.stringify(options.transformersVersion),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
 			},

@@ -7,6 +7,7 @@ import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProce
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
+import { DAEMON_BUILD_ID } from "./broker-version";
 import { BrokerTransportServer } from "../bridge/transport";
 import { daemonBridgeTransportBrokerJournalPath, daemonBridgeTransportEndpoint, daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
@@ -587,7 +588,7 @@ class DaemonBroker {
 	async #dispatch(operation: DaemonOperation): Promise<DaemonRpcResult> {
 		switch (operation.op) {
 			case "ping":
-				return { op: "ping", projectDir: this.#projectDir };
+				return { op: "ping", projectDir: this.#projectDir, buildId: DAEMON_BUILD_ID };
 			case "start":
 				return this.#start(operation.spec, operation.owner);
 			case "list": {
