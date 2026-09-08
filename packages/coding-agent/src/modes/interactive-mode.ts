@@ -496,7 +496,7 @@ export function renderSubagentHudLines(
 	sessions: readonly ObservableSession[],
 	columns: number,
 	ancestry: readonly { id: string; parentId?: string }[] = [],
-	siblingCollapseThreshold = 4,
+	siblingCollapseThreshold = 0,
 ): string[] {
 	const candidates = new Map(
 		sessions
@@ -551,7 +551,12 @@ export function renderSubagentHudLines(
 		for (const session of siblings) {
 			const role = roleOf(session);
 			const group = groups.get(role);
-			if (group && group.length > siblingCollapseThreshold) {
+			if (
+				group &&
+				group.length > siblingCollapseThreshold &&
+				role !== "poteto-agent" &&
+				role !== "poteto-agent-deep"
+			) {
 				if (emitted.has(role)) continue;
 				emitted.add(role);
 				const counts = { active: 0, completed: 0, failed: 0, aborted: 0 };
@@ -2821,12 +2826,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			const ref = registry.get(session.id);
 			if (ref) this.#subagentHudAncestry.set(session.id, { id: ref.id, parentId: ref.parentId });
 		}
-		const lines = renderSubagentHudLines(
-			sessions,
-			Math.max(0, this.ui.terminal.columns - 2),
-			[...this.#subagentHudAncestry.values()],
-			this.settings.get("tui.subagentSiblingCollapseThreshold"),
-		);
+		const lines = renderSubagentHudLines(sessions, Math.max(0, this.ui.terminal.columns - 2), [
+			...this.#subagentHudAncestry.values(),
+		]);
 		if (lines.length === 0) return;
 		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
 	}
