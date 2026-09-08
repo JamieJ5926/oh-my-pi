@@ -195,6 +195,33 @@ describe("Agent hub row ordering", () => {
 			setSystemTime();
 		}
 	});
+	it("reseeds an empty capture so a restored aborted agent does not top running rows", () => {
+		vi.useFakeTimers();
+		let hub: AgentHubOverlayComponent | undefined;
+		try {
+			geometry = stubStdoutGeometry(120);
+			const agents = new AgentRegistry();
+			// Resumed session: hub opens before the persisted roster loads,
+			// capturing an empty order map on first refresh.
+			hub = makeHub(agents);
+			expect(renderedAgentIds(hub)).toEqual([]);
+			// Persisted batch arrives: aborted agent with older activity plus a
+			// running agent. The first non-empty refresh must seed by
+			// status+recency rank, not append in insertion order.
+			const heldSession = {} as AgentSession;
+			agents.register({ id: "held-reviewer", displayName: "Held", kind: "sub", session: null, status: "aborted", lastActivity: 1000 });
+			const liveSession = {} as AgentSession;
+			agents.register({ id: "live-runner", displayName: "Live", kind: "sub", session: liveSession, lastActivity: 2000 });
+			vi.advanceTimersByTime(100);
+			const ids = renderedAgentIds(hub);
+			expect(ids.indexOf("held-reviewer")).toBeGreaterThan(ids.indexOf("live-runner"));
+			expect(ids).toEqual(["live-runner", "held-reviewer"]);
+		} finally {
+			hub?.dispose();
+			vi.useRealTimers();
+			setSystemTime();
+		}
+	});
 
 	it("filters agents with a fuzzy query and clears on Escape", () => {
 		vi.useFakeTimers();

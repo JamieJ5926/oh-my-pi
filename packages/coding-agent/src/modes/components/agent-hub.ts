@@ -513,9 +513,12 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		// Stable roster order: capture the status+recency ranking once so keyboard
 		// navigation is not disrupted by heartbeats (issue #10524). Existing rows
 		// keep their rank while the hub is open; new agents append at the end.
+		// An empty capture must reseed: a resumed session can open the hub before
+		// the persisted roster loads, so the first non-empty refresh seeds by the
+		// same status+recency rank instead of appending the persisted batch.
 		const rowOrder = this.#rowOrder;
 		let ordered: AgentRef[];
-		if (!rowOrder) {
+		if (!rowOrder || rowOrder.size === 0) {
 			ordered = refs.sort(
 				(a, b) =>
 					STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
