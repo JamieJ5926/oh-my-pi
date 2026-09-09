@@ -94,8 +94,12 @@ export function testSetExtensionHandlerTimeoutMs(timeoutMs: number): void {
 	extensionHandlerTimeoutMs = timeoutMs;
 }
 
+/** Maximum delay `setTimeout` accepts; larger values overflow (Bun coerces to 1ms). See issue #11286. */
+export const MAX_HANDLER_TIMEOUT_MS = 2_147_483_647;
+
 function normalizeHandlerTimeout(timeoutMs: number): number {
-	return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : EXTENSION_HANDLER_TIMEOUT_MS;
+	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return EXTENSION_HANDLER_TIMEOUT_MS;
+	return Math.min(timeoutMs, MAX_HANDLER_TIMEOUT_MS);
 }
 
 /**

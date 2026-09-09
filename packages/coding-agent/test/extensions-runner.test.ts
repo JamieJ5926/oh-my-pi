@@ -15,6 +15,7 @@ import { ExtensionRuntime, loadExtensions } from "@oh-my-pi/pi-coding-agent/exte
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	ExtensionRunner,
+	MAX_HANDLER_TIMEOUT_MS,
 	SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS,
 	testSetExtensionHandlerTimeoutMs,
 	testSetSessionShutdownHandlerTimeoutMs,
@@ -1666,6 +1667,59 @@ describe("ExtensionRunner", () => {
 						reason: `Extension ${extensionPath} timed out after ${EXTENSION_HANDLER_TIMEOUT_MS}ms`,
 					});
 				}
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+		it("clamps configured timeouts above the runtime timer maximum (#11286)", async () => {
+			const extensionPath = path.join(tempDir.path(), "clamped-timeout-tool-call.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.on("tool_call", async () => {
+							await Promise.withResolvers().promise;
+						});
+					}
+				`,
+			);
+			const loaded = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				Settings.isolated({ "extensionHandlers.timeoutMs": 2 ** 33 }),
+			);
+
+			vi.useFakeTimers();
+			try {
+				let settled = false;
+				const decision = runner
+					.emitToolCall({
+						type: "tool_call",
+						toolName: "guarded",
+						toolCallId: "clamped-timeout-call",
+						input: {},
+					})
+					.then(result => {
+						settled = true;
+						return result;
+					});
+
+				vi.advanceTimersByTime(MAX_HANDLER_TIMEOUT_MS - 1);
+				expect(settled).toBe(false);
+
+				vi.advanceTimersByTime(1);
+				await Promise.resolve();
+				await Promise.resolve();
+				vi.advanceTimersByTime(0);
+				expect(await decision).toEqual({
+					block: true,
+					reason: `Extension ${extensionPath} timed out after ${MAX_HANDLER_TIMEOUT_MS}ms`,
+				});
 			} finally {
 				vi.useRealTimers();
 			}
