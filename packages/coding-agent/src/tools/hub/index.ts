@@ -81,7 +81,7 @@ const hubSchema = type({
 	op: type(
 		"'send' | 'wait' | 'inbox' | 'list' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
 	).describe("hub operation"),
-	"to?": type("string").describe('send: recipient agent id or "all"'),
+	"to?": type("string").describe('send: recipient agent id (or unique displayName from `list`) or "all"'),
 	"message?": type("string").describe("send: message body"),
 	"replyTo?": type("string").describe("send: message id being answered"),
 	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
