@@ -183,7 +183,9 @@ export class SelectorController {
 		const done = () => {
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.editor);
-			this.ctx.ui.setFocus(this.ctx.editor);
+			// Same shared exit funnel as the overlay paths: restores focus to
+			// the just-mounted editor and stamps the menu-exit time (#11187).
+			this.focusActiveEditorArea();
 		};
 		const { component, focus } = create(done);
 		this.ctx.editorContainer.clear();

@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import type { Component } from "@oh-my-pi/pi-tui";
 import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
@@ -843,6 +845,30 @@ describe("InputController escape behavior", () => {
 
 		expect(spies.abort).toHaveBeenCalledTimes(1);
 		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+	});
+
+	it("stamps the menu-exit time when a selector exits through done (#11187)", () => {
+		const now = vi.spyOn(Date, "now");
+		now.mockReturnValue(10_000);
+		const editor = {};
+		const editorContainer = { children: [] as unknown[], clear: vi.fn(), addChild: vi.fn() };
+		const selectorCtx = {
+			editor,
+			editorContainer,
+			ui: { setFocus: vi.fn(), requestRender: vi.fn() },
+			lastMenuExitTime: 0,
+		} as unknown as InteractiveModeContext;
+		const selector = new SelectorController(selectorCtx);
+
+		selector.showSelector(done => {
+			done();
+			return {
+				component: {} as unknown as Component,
+				focus: {} as unknown as Component,
+			};
+		});
+
+		expect(selectorCtx.lastMenuExitTime).toBe(10_000);
 	});
 });
 
