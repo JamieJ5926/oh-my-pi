@@ -964,23 +964,25 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						context.abort();
 						throw new ToolAbortError("Ask tool was cancelled by the user");
 					}
-					const details: AskToolDetails = {
-						question: result.question,
-						options: result.options,
-						multi: result.multi,
-						selectedOptions: result.selectedOptions,
-						customInput: result.customInput,
-						note: result.note,
-						timedOut: result.timedOut,
-					};
-					const responseText = formatSingleQuestionResponse(result);
-					return { content: [{ type: "text" as const, text: responseText }], details };
+				const combinedNote =
+					[result.note, richResult.note].filter(note => note !== undefined).join("\n") || undefined;
+				const details: AskToolDetails = {
+					question: result.question,
+					options: result.options,
+					multi: result.multi,
+					selectedOptions: result.selectedOptions,
+					customInput: result.customInput,
+					note: combinedNote,
+					timedOut: result.timedOut,
+				};
+				const responseText = formatSingleQuestionResponse({ ...result, note: combinedNote });
+				return { content: [{ type: "text" as const, text: responseText }], details };
 				}
-			const details: AskToolDetails = { results, note: richResult.note };
-			const responseText =
-				`User answers:\n${results.map(formatQuestionResult).join("\n")}` +
-				(richResult.note ? `\nUser added note: ${richResult.note}` : "");
-			return { content: [{ type: "text" as const, text: responseText }], details };
+				const details: AskToolDetails = { results, note: richResult.note };
+				const responseText =
+					`User answers:\n${results.map(formatQuestionResult).join("\n")}` +
+					(richResult.note ? `\nUser added note: ${richResult.note}` : "");
+				return { content: [{ type: "text" as const, text: responseText }], details };
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {
 					throw new ToolAbortError("Ask input was cancelled");
@@ -1381,12 +1383,14 @@ export const askToolRenderer = {
 		// Multi-part results: one divider-labelled section per question.
 		if (details.results && details.results.length > 0) {
 			const results = details.results;
-			const hasAnySelection = results.some(
-				r =>
-					r.customInput !== undefined ||
-					r.note !== undefined ||
-					(r.selectedOptions && r.selectedOptions.length > 0),
-			);
+			const hasAnySelection =
+				details.note !== undefined ||
+				results.some(
+					r =>
+						r.customInput !== undefined ||
+						r.note !== undefined ||
+						(r.selectedOptions && r.selectedOptions.length > 0),
+				);
 			const header = renderStatusLine(
 				{
 					icon: hasAnySelection ? "success" : "warning",
@@ -1413,6 +1417,9 @@ export const askToolRenderer = {
 					];
 					return { label: uiTheme.fg("dim", `[${r.id}]`), lines };
 				});
+				if (details.note !== undefined) {
+					sections.push({ label: uiTheme.fg("dim", "[note]"), lines: renderNoteLines(uiTheme, details.note, width) });
+				}
 				return {
 					header,
 					sections,

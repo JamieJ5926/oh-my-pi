@@ -1588,6 +1588,60 @@ describe("AskTool rich ask dialog", () => {
 		});
 	});
 
+	it("surfaces a dialog-level note on single and multi-question submits", async () => {
+		const tool = new AskTool(createSession());
+
+		// Single multi-select question: the Submit tab note must not be dropped.
+		const singleDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			note: "Overall remark",
+			results: [
+				{
+					id: "q1",
+					question: "Q1?",
+					options: ["Option A"],
+					multi: true,
+					selectedOptions: ["Option A"],
+				},
+			],
+		});
+		const single = await tool.execute(
+			"call-rich-dialog-note",
+			{
+				questions: [{ id: "q1", question: "Q1?", options: [{ label: "Option A" }], multi: true }],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog: singleDialog }),
+		);
+		expect(single.details).toMatchObject({ note: "Overall remark" });
+		expect(JSON.stringify(single.content)).toContain("User added note: Overall remark");
+
+		// Multi-question: the note lands in details and the response text.
+		const multiDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			note: "Ship it Tuesday",
+			results: [
+				{ id: "q1", question: "Q1?", options: ["A1"], multi: false, selectedOptions: ["A1"] },
+				{ id: "q2", question: "Q2?", options: ["B1"], multi: false, selectedOptions: ["B1"] },
+			],
+		});
+		const multi = await tool.execute(
+			"call-rich-dialog-note-multi",
+			{
+				questions: [
+					{ id: "q1", question: "Q1?", options: [{ label: "A1" }] },
+					{ id: "q2", question: "Q2?", options: [{ label: "B1" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog: multiDialog }),
+		);
+		expect(multi.details).toMatchObject({ note: "Ship it Tuesday" });
+		expect(JSON.stringify(multi.content)).toContain("User added note: Ship it Tuesday");
+	});
+
 	it("does not emit terminal notifications for non-terminal prompt surfaces", async () => {
 		const sendNotification = spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
 		const askDialog = vi.fn().mockResolvedValue({

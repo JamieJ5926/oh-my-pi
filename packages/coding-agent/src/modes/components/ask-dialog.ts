@@ -987,6 +987,7 @@ export class AskDialogComponent implements Component {
 			scrollbar: "auto",
 			theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
 		});
+		scrollView.setScrollOffset(this.#submitScrollOffset);
 		const rendered = scrollView.render(width);
 		const lines = [...rendered];
 		while (lines.length < rows) lines.push("");
