@@ -164,6 +164,9 @@ export interface ExtensionAskDialogResultItem {
 export interface ExtensionAskDialogSubmitResult {
 	kind: "submit";
 	results: ExtensionAskDialogResultItem[];
+	/** Optional dialog-level note added from the Submit tab (issue #11145).
+	 *  Distinct from the per-answer `note` on each result item. */
+	note?: string;
 }
 
 /** Chat-redirect result: the user chose "Chat about this" instead of

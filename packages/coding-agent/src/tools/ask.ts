@@ -976,9 +976,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					const responseText = formatSingleQuestionResponse(result);
 					return { content: [{ type: "text" as const, text: responseText }], details };
 				}
-				const details: AskToolDetails = { results };
-				const responseText = `User answers:\n${results.map(formatQuestionResult).join("\n")}`;
-				return { content: [{ type: "text" as const, text: responseText }], details };
+			const details: AskToolDetails = { results, note: richResult.note };
+			const responseText =
+				`User answers:\n${results.map(formatQuestionResult).join("\n")}` +
+				(richResult.note ? `\nUser added note: ${richResult.note}` : "");
+			return { content: [{ type: "text" as const, text: responseText }], details };
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {
 					throw new ToolAbortError("Ask input was cancelled");

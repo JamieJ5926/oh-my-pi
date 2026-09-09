@@ -394,6 +394,7 @@ export class AskDialogComponent implements Component {
 	#states: QuestionState[];
 	#activeTabIndex = 0;
 	#submitScrollOffset = 0;
+	#submitNote: string | undefined;
 	#bodyRows = MIN_BODY_ROWS;
 	#questionCanPage = false;
 	#remainingSeconds: number | undefined;
@@ -654,7 +655,7 @@ export class AskDialogComponent implements Component {
 		if (inputGuard?.isBlocked()) return `${inputGuard.hint}${this.#expandHint()} · ${cancel}`;
 		if (this.#isSubmitTab()) {
 			const scroll = indicator ? ` ${indicator} scroll ·` : "";
-			return `Enter submit · ↑/↓ scroll ·${scroll} ${cancel}`;
+			return `Enter submit · n note · ↑/↓ scroll ·${scroll} ${cancel}`;
 		}
 		const question = this.#questions[this.#currentQuestionIndex()];
 		// Enter advances in multi-question dialogs and submits single-question ones.
@@ -775,6 +776,10 @@ export class AskDialogComponent implements Component {
 			this.#requestRender();
 			return;
 		}
+		if (keyData === "n" || keyData === "N") {
+			void this.#promptForSubmitNote();
+			return;
+		}
 		const isEnter = matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n";
 		if (isEnter) this.#finishSubmit();
 	}
@@ -841,6 +846,22 @@ export class AskDialogComponent implements Component {
 			if (input === undefined || this.#closed) return;
 			state.note = input;
 			state.noteRowKey = rowItem.key;
+		} finally {
+			this.#promptActive = false;
+			this.#runDeferredTimeout();
+			this.#requestRender();
+		}
+	}
+
+	async #promptForSubmitNote(): Promise<void> {
+		this.#promptActive = true;
+		try {
+			const input = await this.callbacks.onPrompt(
+				boundPromptTitle("Note: ", "Add an optional note to your answers"),
+				this.#submitNote,
+			);
+			if (input === undefined || this.#closed) return;
+			this.#submitNote = input;
 		} finally {
 			this.#promptActive = false;
 			this.#runDeferredTimeout();
@@ -952,6 +973,12 @@ export class AskDialogComponent implements Component {
 				);
 			}
 		}
+		if (this.#submitNote?.trim()) {
+			const note = normalizedInlineInput(this.#submitNote);
+			allLines.push(
+				theme.fg("muted", `Note: ${truncateToWidth(note, Math.max(1, width - 7), Ellipsis.Unicode)}`),
+			);
+		}
 		allLines.push("");
 		allLines.push(theme.fg("accent", `${theme.nav.cursor} ${SUBMIT_OPTION}`));
 		this.#submitScrollOffset = clamp(this.#submitScrollOffset, 0, Math.max(0, allLines.length - rows));
@@ -960,7 +987,6 @@ export class AskDialogComponent implements Component {
 			scrollbar: "auto",
 			theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
 		});
-		scrollView.setScrollOffset(this.#submitScrollOffset);
 		const rendered = scrollView.render(width);
 		const lines = [...rendered];
 		while (lines.length < rows) lines.push("");
@@ -1048,7 +1074,7 @@ export class AskDialogComponent implements Component {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#countdown?.dispose();
-		this.callbacks.onSubmit({ kind: "submit", results: this.#buildResults() });
+		this.callbacks.onSubmit({ kind: "submit", results: this.#buildResults(), note: this.#submitNote });
 	}
 
 	#finishCancel(): void {

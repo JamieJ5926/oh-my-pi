@@ -1597,4 +1597,76 @@ describe("AskDialogComponent", () => {
 		expect(result.question).toBe("");
 		expect(result.selectedOptions).toEqual(["Option A"]);
 	});
+
+	it("Submit tab: n prompts for a dialog-level note, renders it, and forwards it", async () => {
+		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("Ship it Tuesday"));
+		const onSubmit = vi.fn();
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Q1?", options: [{ label: "A1" }, { label: "A2" }] },
+			{ id: "q2", question: "Q2?", options: [{ label: "B1" }, { label: "B2" }] },
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt,
+		});
+
+		// Answer both questions to reach the Submit tab.
+		component.handleInput(ENTER);
+		component.handleInput(ENTER);
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(render(component)).toContain("n note");
+
+		// n on the Submit tab opens the dialog-level note prompt.
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		expect(onPrompt.mock.calls[0][1]).toBeUndefined();
+
+		// The note renders as a muted line in the submit body.
+		expect(render(component)).toContain("Note: Ship it Tuesday");
+
+		// Enter submits with the note as a top-level field, not row-bound.
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		const result = onSubmit.mock.calls[0][0];
+		expect(result.note).toBe("Ship it Tuesday");
+		expect(result.results[0].note).toBeUndefined();
+		expect(result.results[1].note).toBeUndefined();
+	});
+
+	it("Submit tab: re-editing the dialog note prefills the existing note", async () => {
+		const onPrompt = vi.fn();
+		const onSubmit = vi.fn();
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Q1?", options: [{ label: "A1" }, { label: "A2" }] },
+			{ id: "q2", question: "Q2?", options: [{ label: "B1" }, { label: "B2" }] },
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt,
+		});
+
+		component.handleInput(ENTER);
+		component.handleInput(ENTER);
+
+		onPrompt.mockReturnValueOnce(Promise.resolve("First note"));
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+
+		onPrompt.mockReturnValueOnce(Promise.resolve("Updated note"));
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onPrompt).toHaveBeenCalledTimes(2);
+		expect(onPrompt.mock.calls[1][1]).toBe("First note");
+
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].note).toBe("Updated note");
+	});
 });
