@@ -207,9 +207,6 @@ describe("vibe wait consumed note", () => {
 			VibeSessionRegistry.resetGlobalForTests();
 		}
 	});
-});
-
-
 	test("small consumed bodies still show retained text, not the note", async () => {
 		const manager = new AsyncJobManager({});
 		const vibes = VibeSessionRegistry.global();
@@ -235,3 +232,4 @@ describe("vibe wait consumed note", () => {
 			VibeSessionRegistry.resetGlobalForTests();
 		}
 	});
+});
