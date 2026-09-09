@@ -219,6 +219,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 			addStrings(rule.condition);
 			addStrings(rule.astCondition);
 			addStrings(rule.scope);
+			add(rule._source.path);
 		}
 		for (const skill of roleProfile.skills) {
 			add(skill.name);
@@ -373,6 +374,7 @@ function redactShareRoleProfile(
 			condition: rule.condition?.map(value => o.obfuscate(value, sharedRegexSecretValues)),
 			astCondition: rule.astCondition?.map(value => o.obfuscate(value, sharedRegexSecretValues)),
 			scope: rule.scope?.map(value => o.obfuscate(value, sharedRegexSecretValues)),
+			_source: { ...rule._source, path: o.obfuscate(rule._source.path, sharedRegexSecretValues) },
 		})),
 		skills: profile.skills.map(skill => ({
 			...skill,
