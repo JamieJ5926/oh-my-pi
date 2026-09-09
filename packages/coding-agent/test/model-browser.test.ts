@@ -570,10 +570,10 @@ describe("ModelBrowser effort badge", () => {
 		expect(rows[3]).not.toContain(lowBadge);
 	});
 
-	test("active model row at inherit renders no sibling role level", () => {
+	test("picker active model row at inherit renders no sibling role level", () => {
 		// `@fast` applied at inherit leaves the session effort undefined; the
-		// active model row must stay unbadged even though `@slow` shares the
-		// model at high.
+		// Alt+P picker active row must stay unbadged even though `@slow`
+		// shares the model at high. Picker-scoped (suppress flag set).
 		const shared = makeModel("openai", "gpt-5");
 		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
 		const rows = renderRows(
@@ -582,10 +582,29 @@ describe("ModelBrowser effort badge", () => {
 				fast: { model: shared, thinkingLevel: ThinkingLevel.Inherit, autoSelected: false },
 				slow: { model: shared, thinkingLevel: ThinkingLevel.High, autoSelected: false },
 			},
-			{ currentSelector: "openai/gpt-5" },
+			{ currentSelector: "openai/gpt-5", suppressDerivedThinkingLevels: true },
 		);
 
 		expect(rows[2]).not.toContain(highBadge);
+	});
+
+	test("wizard active row renders the configured default effort", () => {
+		// P2 (PR #11330, thread 3968351010): the setup wizard opens with a
+		// configured default role whose model is also the active session
+		// model, supplies role assignments and the current selector but
+		// never a session thinking level. The wizard (flag unset) must
+		// still render the configured default effort on that row.
+		const shared = makeModel("openai", "gpt-5");
+		const lowBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Low));
+		const rows = renderRows(
+			[shared],
+			{
+				default: { model: shared, thinkingLevel: ThinkingLevel.Low, autoSelected: false },
+			},
+			{ currentSelector: "openai/gpt-5" },
+		);
+
+		expect(rows[2]).toContain(lowBadge);
 	});
 
 	test("quick-role row resolves its own role level before the model-wide fallback", () => {
