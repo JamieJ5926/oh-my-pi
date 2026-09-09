@@ -346,12 +346,21 @@ export async function executeCancel(
 			// impossible: a broken or unregistered link denies.
 			if (existing?.status === "running" && ownerId && existing.ownerId !== ownerId) {
 				const registry = session.agentRegistry;
-				const ref = registry?.get(id) ?? (existing.agentId && existing.agentId !== id ? registry?.get(existing.agentId) : undefined);
+				const ref =
+					registry?.get(id) ??
+					(existing.agentId && existing.agentId !== id ? registry?.get(existing.agentId) : undefined);
 				if (ref && isCancelAuthorized(registry, ref.parentId, ownerId)) {
 					manager.cancel(id);
-					const targetId = registry?.get(id) ? id : existing.agentId;
-					await cancelAgentRegistration(session, ownerId, targetId);
-					cancelOutcomes.push({ id, status: "cancelled", message: `Cancelled background job ${id}.` });
+					const targetId = registry?.get(id) ? id : (existing.agentId ?? id);
+					const regOutcome = await cancelAgentRegistration(session, ownerId, targetId);
+					cancelOutcomes.push({
+						id,
+						status: "cancelled",
+						message:
+							regOutcome.status === "cancelled"
+								? `Cancelled background job ${id}.`
+								: `Cancelled background job ${id}. Registration: ${regOutcome.message}`,
+					});
 					continue;
 				}
 			}
