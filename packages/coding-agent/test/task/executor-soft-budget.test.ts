@@ -639,4 +639,11 @@ describe("resolveConfiguredDefaultBudget", () => {
 			),
 		).toBe(0);
 	});
+
+	it("treats an explicit null like unset (per-agent fallback, not disable)", () => {
+		expect(
+			resolveConfiguredDefaultBudget("poteto-agent-deep", Settings.isolated({ "task.softRequestBudget": null })),
+		).toBe(400);
+		expect(resolveConfiguredDefaultBudget("task", Settings.isolated({ "task.softRequestBudget": null }))).toBe(200);
+	});
 });

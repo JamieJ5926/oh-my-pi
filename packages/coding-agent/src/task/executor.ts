@@ -118,12 +118,15 @@ export const SOFT_REQUEST_BUDGET: Record<string, number> = {
  * swallow a higher per-agent entry through the min() trap, so the configured
  * flag gates it: an explicitly configured value (including 0 to disable)
  * passes through, while unset falls back to the agent's own entry, then the
- * global default.
+ * global default. An explicit null (e.g. `"task.softRequestBudget": null` in
+ * settings.json) joins the unset path: null is configured but carries no
+ * value, so it must not disable the guard the way 0 does.
  */
 export function resolveConfiguredDefaultBudget(agentName: string, settings: Settings): number {
+	const fallback = SOFT_REQUEST_BUDGET[agentName] ?? SOFT_REQUEST_BUDGET.default;
 	const raw = settings.isConfigured("task.softRequestBudget")
-		? settings.get("task.softRequestBudget")
-		: (SOFT_REQUEST_BUDGET[agentName] ?? SOFT_REQUEST_BUDGET.default);
+		? (settings.get("task.softRequestBudget") ?? fallback)
+		: fallback;
 	return Math.max(0, Math.trunc(Number(raw) || 0));
 }
 
