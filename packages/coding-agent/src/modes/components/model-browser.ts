@@ -532,7 +532,8 @@ export class ModelBrowser implements Component {
 	constructor(settings: Settings, options: ModelBrowserOptions = {}) {
 		this.#settings = settings;
 		this.#showProvider = options.showProvider ?? true;
-		this.#currentContextTokens = options.currentContextTokens ?? 0;
+		const tokens = options.currentContextTokens ?? 0;
+		this.#currentContextTokens = Number.isFinite(tokens) && tokens > 0 ? Math.floor(tokens) : 0;
 		this.#markOverContext = options.markOverContext ?? false;
 		this.#emptyText = options.emptyText;
 		this.#sessionThinkingLevel = options.sessionThinkingLevel;

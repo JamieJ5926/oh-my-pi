@@ -632,3 +632,57 @@ describe("ModelPicker Task toggle from quick-role mode", () => {
 		expect(onPick).not.toHaveBeenCalled();
 	});
 });
+
+describe("ModelBrowser over-context flagging", () => {
+	test("an over-window transcript flags the smaller model but not the larger one", () => {
+		// Regression (Codex P1 on PR #11330): the constructor dropped
+		// `options.currentContextTokens` into an unused local, leaving
+		// `#currentContextTokens` undefined so `isOverContext` returned
+		// false for every model and the pre-switch compaction was skipped.
+		const small = buildModel({
+			id: "small",
+			name: "small",
+			api: "ollama-chat",
+			provider: "demo",
+			baseUrl: "https://example.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 8000,
+			maxTokens: 1024,
+		});
+		const large = buildModel({
+			id: "large",
+			name: "large",
+			api: "ollama-chat",
+			provider: "demo",
+			baseUrl: "https://example.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 1024,
+		});
+		const browser = new ModelBrowser(Settings.isolated({}), {
+			currentContextTokens: 50000,
+			markOverContext: true,
+		});
+		browser.setItems(buildBrowserItems([small, large]));
+
+		expect(browser.selectSelector("demo/small")).toBe(true);
+		expect(browser.isOverContext(browser.getSelected()!)).toBe(true);
+		expect(browser.selectSelector("demo/large")).toBe(true);
+		expect(browser.isOverContext(browser.getSelected()!)).toBe(false);
+	});
+	test("non-positive token counts never flag any model", () => {
+		const small = makeModel("demo", "small");
+		const browser = new ModelBrowser(Settings.isolated({}), {
+			currentContextTokens: 0,
+			markOverContext: true,
+		});
+		browser.setItems(buildBrowserItems([small]));
+
+		expect(browser.selectSelector("demo/small")).toBe(true);
+		expect(browser.isOverContext(browser.getSelected()!)).toBe(false);
+	});
+});
