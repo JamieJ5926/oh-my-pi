@@ -28,6 +28,7 @@ export type MailboxKind = (typeof KINDS)[number];
 
 export interface HermesInboundEvent {
 	/** Origin label, e.g. `hermes/telegram` or `hermes/discord:#ops`. */
+	source: string;
 	/** One of task|idea|message|note|feature|bug|project|decision. Anything else is rejected. */
 	kind: string;
 	/** Body text; single line, never empty. */
