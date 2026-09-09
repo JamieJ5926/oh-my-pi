@@ -9,6 +9,7 @@
  * every completion — regardless of owner — into the first top-level session.
  */
 import { prompt } from "@oh-my-pi/pi-utils";
+import { ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS } from "../async/job-manager";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import type { CustomMessage } from "./messages";
@@ -20,8 +21,16 @@ import type { CustomMessage } from "./messages";
  */
 export const ASYNC_RESULT_MESSAGE_TYPE = "async-result";
 
-/** Result payloads longer than this spill to an artifact with an inline preview. */
-export const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
+/**
+ * Result payloads longer than this never embed in full in the transcript
+ * message: the batch carries a preview plus a truncation note instead. The
+ * session sink (`AgentSession.#formatAsyncResultForFollowUp`) spills
+ * over-threshold results to an artifact with a pointer before enqueueing, so
+ * this cap is the backstop for any raw entry that reaches flush unformatted.
+ * Single-sourced from the job manager's retain budget so the transcript bound
+ * and the row-retention bound can never drift apart.
+ */
+export const ASYNC_INLINE_RESULT_MAX_CHARS = ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS;
 export const ASYNC_PREVIEW_MAX_CHARS = 4_000;
 
 export interface AsyncResultEntry {
@@ -50,11 +59,27 @@ export type AsyncResultDetails = {
 	jobs: AsyncResultJobDetails[];
 };
 
+/**
+ * Bound one job's inline transcript payload. Short results pass through
+ * verbatim; over-threshold bodies collapse to a preview plus a truncation
+ * note so a multi-MB lane result can never pin its full text in
+ * `context.messages` indefinitely. Mirrors the session spill wording without
+ * the artifact pointer (this layer has no artifact access; the session sink
+ * adds the pointer when it spills before enqueueing).
+ */
+export function capInlineResult(result: string): string {
+	if (result.length <= ASYNC_INLINE_RESULT_MAX_CHARS) return result;
+	return (
+		`${result.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n` +
+		`[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters of ${result.length.toLocaleString()}.]`
+	);
+}
+
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => ({
 		jobId: entry.jobId,
-		result: entry.result,
+		result: capInlineResult(entry.result),
 		type: entry.job?.type,
 		label: entry.job?.label,
 		durationMs: entry.durationMs,

@@ -1005,7 +1005,17 @@ export class VibeSessionRegistry {
 					id: record.id,
 					jobId,
 					status: job.status,
-					resultText: job.resultText ?? job.errorText ?? "(no output)",
+					// Note only when the body is actually gone: evict-on-consume
+					// releases over-threshold bodies on consume, while small
+					// bodies stay on the row for post-hoc inspection. Row
+					// presence (not the threshold) is the signal. Mirrors the
+					// hub snapshot wording for the released case.
+					resultText:
+						manager.isJobResultConsumed(jobId) &&
+						job.resultText === undefined &&
+						job.errorText === undefined
+							? "Delivery: already delivered or recovered."
+							: (job.resultText ?? job.errorText ?? "(no output)"),
 				});
 			}
 			return settled;

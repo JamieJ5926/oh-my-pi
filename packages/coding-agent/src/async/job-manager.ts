@@ -4,6 +4,17 @@ const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
 const DELIVERY_RETRY_JITTER_MS = 200;
 const DEFAULT_RETENTION_MS = 5 * 60 * 1000;
+/**
+ * Settled-job bodies at or below this size stay on the job row after the
+ * result is consumed (delivered or snapshot-recovered) so small outcomes stay
+ * inspectable via job queries. Larger bodies are released on consume
+ * (evict-on-consume): the consumer already holds the payload — the delivery
+ * sink received the text, the session spill wrote it to an artifact, or the
+ * foreground snapshot rendered it — so the row copy is pure retained floor.
+ * This is the same inline budget the async-result transcript path enforces
+ * (`ASYNC_INLINE_RESULT_MAX_CHARS` re-exports this value).
+ */
+export const ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS = 12_000;
 const DEFAULT_MAX_RUNNING_JOBS = 15;
 /** Abort reason used only when the owning session shuts down the entire manager. */
 export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdown");
@@ -431,6 +442,10 @@ export class AsyncJobManager {
 			const jobId = rawId.trim();
 			if (!jobId) continue;
 			if (!this.#suppressedDeliveries.delete(jobId)) continue;
+			// Already recovered (auto-delivered or snapshot-recovered): the body
+			// may have been released by evict-on-consume, and redelivering —
+			// full text or empty string — would break exactly-once recovery.
+			if (this.isJobResultConsumed(jobId)) continue;
 			const job = this.#jobs.get(jobId);
 			if (!job || (job.status !== "completed" && job.status !== "failed")) continue;
 			const queued =
@@ -647,6 +662,16 @@ export class AsyncJobManager {
 		if (!job || job.status === "running" || this.#consumedJobResults.has(jobId)) return false;
 		if (job.resultText === undefined && job.errorText === undefined) return false;
 		this.#consumedJobResults.add(jobId);
+		// Evict-on-consume (Owned32): release over-threshold bodies once the
+		// result has been delivered or snapshot-recovered. Small bodies stay on
+		// the row for post-hoc inspection; the delivery-queue and transcript
+		// copies die with their own lifecycle.
+		if (job.resultText !== undefined && job.resultText.length > ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS) {
+			delete job.resultText;
+		}
+		if (job.errorText !== undefined && job.errorText.length > ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS) {
+			delete job.errorText;
+		}
 		return true;
 	}
 
