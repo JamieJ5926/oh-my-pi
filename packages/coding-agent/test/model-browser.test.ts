@@ -470,6 +470,36 @@ describe("ModelBrowser effort badge", () => {
 		expect(rows[2]).toContain(lowBadge);
 		expect(rows[2]).not.toContain(maxBadge);
 	});
+	test("picker inherit match terminates badge resolution", () => {
+		// P2 (PR #11330, thread 3968282037): first role explicit inherit +
+		// later role explicit level. Enter applies the inherit match
+		// (resolveTemporaryModelThinkingLevel returns the first matching
+		// role including inherit), so the picker row must render no badge,
+		// not the sibling role's level.
+		const shared = makeModel("openai", "gpt-5");
+		const maxBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Max));
+		const rows = renderRows(
+			[shared],
+			{
+				default: {
+					model: shared,
+					thinkingLevel: ThinkingLevel.Inherit,
+					autoSelected: false,
+					explicitThinkingLevel: true,
+				},
+				slow: {
+					model: shared,
+					thinkingLevel: ThinkingLevel.Max,
+					autoSelected: false,
+					explicitThinkingLevel: true,
+				},
+			},
+			{ suppressDerivedThinkingLevels: true },
+		);
+
+		expect(rows[2]).not.toContain(maxBadge);
+	});
+
 
 	test("custom roles outside the built-in ids badge their level", () => {
 		const shared = makeModel("openai", "gpt-5");

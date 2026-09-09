@@ -975,7 +975,9 @@ export class ModelBrowser implements Component {
 		if (item.selector === this.#currentSelector) return "";
 		const seen = new Set<string>();
 		const levels = new Map<ConfiguredThinkingLevel, string>();
+		let inheritTerminates = false;
 		const match = (role: string): void => {
+			if (inheritTerminates) return;
 			if (seen.has(role)) return;
 			seen.add(role);
 			const assignment = this.#roles[role];
@@ -991,11 +993,22 @@ export class ModelBrowser implements Component {
 			// the picker hides them as a fallback. The hub applies role
 			// configuration and keeps them. Absent means explicit (predates the flag).
 			if (this.#suppressDerivedThinkingLevels && assignment.explicitThinkingLevel === false) return;
-			if (assignment.thinkingLevel === ThinkingLevel.Inherit) return;
+			if (assignment.thinkingLevel === ThinkingLevel.Inherit) {
+				// Picker parity with resolveTemporaryModelThinkingLevel (P2 #11330,
+				// thread 3968282037): the activation path returns the first
+				// matching role including inherit, so an explicit inherit match
+				// terminates badge resolution instead of falling through to a
+				// sibling role's level. The hub (flag unset) keeps skipping.
+				if (this.#suppressDerivedThinkingLevels && assignment.explicitThinkingLevel !== false) {
+					inheritTerminates = true;
+				}
+				return;
+			}
 			if (!levels.has(assignment.thinkingLevel)) levels.set(assignment.thinkingLevel, role);
 		};
 		for (const role of MODEL_ROLE_IDS) match(role);
 		for (const role in this.#roles) match(role);
+		if (inheritTerminates) return "";
 		if (levels.size === 0) return "";
 		if (this.#suppressDerivedThinkingLevels) {
 			// Picker-specific single result: Enter applies the first matching
