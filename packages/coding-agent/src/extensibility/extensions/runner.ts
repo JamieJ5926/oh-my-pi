@@ -947,7 +947,7 @@ export class ExtensionRunner {
 				try {
 					const scope = this.#toolRegistrationScope.getStore();
 					const registrationSignal =
-						scope && !scope.closed ? scope.signal : AbortSignal.timeout(extensionHandlerTimeoutMs);
+						scope && !scope.closed ? scope.signal : AbortSignal.timeout(this.#handlerTimeoutMsForEvent("tool_registration"));
 					const pending = listener(tool, registrationSignal);
 					if (pending) trackRegistration(pending);
 				} catch (error) {
@@ -1346,6 +1346,29 @@ export class ExtensionRunner {
 		return handlerResult as R | undefined;
 	}
 
+	/**
+	 * Settings-aware per-event handler budget (issue #11286). `session_shutdown`
+	 * stays pinned to its dedicated 2s cap so teardown latency is unaffected;
+	 * `tool_call` prefers `extensionHandlers.toolCallTimeoutMs` with
+	 * `extensionHandlers.timeoutMs` as fallback; every other event uses
+	 * `extensionHandlers.timeoutMs`. All values run through
+	 * `normalizeHandlerTimeout`, so invalid input falls back to 30s and 0 can
+	 * never disable the watchdog (#3948).
+	 */
+	#handlerTimeoutMsForEvent(eventType: string): number {
+		if (eventType === "session_shutdown") return handlerTimeoutForEvent(eventType);
+		if (eventType === "tool_call") {
+			return normalizeHandlerTimeout(
+				this.settings?.get("extensionHandlers.toolCallTimeoutMs") ??
+					this.settings?.get("extensionHandlers.timeoutMs") ??
+					extensionHandlerTimeoutMs,
+			);
+		}
+		return normalizeHandlerTimeout(
+			this.settings?.get("extensionHandlers.timeoutMs") ?? extensionHandlerTimeoutMs,
+		);
+	}
+
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
 		// Defer the per-event context allocation (and the Promise.race/Bun.sleep
 		// timeout machinery) to the first matching handler. Streaming sessions emit
@@ -1355,7 +1378,7 @@ export class ExtensionRunner {
 		let result: SessionBeforeEventResult | SessionCompactingResult | SessionStopEventResult | undefined;
 
 		if (this.#isSessionShutdownEvent(event)) {
-			const timeoutMs = handlerTimeoutForEvent(event.type);
+		const timeoutMs = this.#handlerTimeoutMsForEvent(event.type);
 			const promises: Promise<unknown>[] = [];
 			for (const ext of this.extensions) {
 				const handlers = ext.handlers.get(event.type);
@@ -1380,7 +1403,7 @@ export class ExtensionRunner {
 					event,
 					ctx,
 					ext,
-					handlerTimeoutForEvent(event.type),
+					this.#handlerTimeoutMsForEvent(event.type),
 				);
 
 				if (this.#isSessionBeforeEvent(event) && handlerResult) {
@@ -1424,7 +1447,7 @@ export class ExtensionRunner {
 					currentEvent,
 					ctx,
 					ext,
-					extensionHandlerTimeoutMs,
+					this.#handlerTimeoutMsForEvent("tool_result"),
 				)) as ToolResultEventResult | undefined;
 				if (!handlerResult) continue;
 
@@ -1456,7 +1479,7 @@ export class ExtensionRunner {
 	 * Emit a `tool_call` event to every subscribed extension before the tool executes.
 	 *
 	 * Each handler is bounded by `extensionHandlers.toolCallTimeoutMs` (default
-	 * 30s). This matches the timeout policy already applied to `emitToolResult` and every
+	 * 30s), falling back to `extensionHandlers.timeoutMs`. This matches the timeout policy already
 	 * other handler routed through `#runHandlerWithTimeout`; without it a single
 	 * hung extension (unresolved `await`, network call with no timeout) would
 	 * park `ExtensionToolWrapper.execute` indefinitely and freeze tool
@@ -1469,9 +1492,7 @@ export class ExtensionRunner {
 	 */
 	async emitToolCall(event: ToolCallEvent, signal?: AbortSignal): Promise<ToolCallEventResult | undefined> {
 		const ctx = this.createContext();
-		const timeoutMs = normalizeHandlerTimeout(
-			this.settings?.get("extensionHandlers.toolCallTimeoutMs") ?? extensionHandlerTimeoutMs,
-		);
+		const timeoutMs = this.#handlerTimeoutMsForEvent("tool_call");
 		let result: ToolCallEventResult | undefined;
 
 		for (const ext of this.extensions) {
@@ -1534,7 +1555,7 @@ export class ExtensionRunner {
 					event,
 					ctx,
 					ext,
-					extensionHandlerTimeoutMs,
+					this.#handlerTimeoutMsForEvent(eventName),
 				);
 				if (handlerResult) {
 					return handlerResult as R;
@@ -1569,7 +1590,7 @@ export class ExtensionRunner {
 					event,
 					ctx,
 					ext,
-					extensionHandlerTimeoutMs,
+					this.#handlerTimeoutMsForEvent("resources_discover"),
 				);
 				const result = handlerResult as ResourcesDiscoverResult | undefined;
 
@@ -1601,7 +1622,7 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			for (const handler of ext.handlers.get("input") ?? []) {
 				const event: InputEvent = { type: "input", text: currentText, images: currentImages, source };
-				const result = (await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs)) as
+				const result = (await this.#runHandlerWithTimeout(handler, event, ctx, ext, this.#handlerTimeoutMsForEvent("input"))) as
 					| InputEventResult
 					| undefined;
 				if (result?.handled) return result;
@@ -1649,7 +1670,7 @@ export class ExtensionRunner {
 					event,
 					ctx,
 					ext,
-					extensionHandlerTimeoutMs,
+					this.#handlerTimeoutMsForEvent("context"),
 				);
 
 				if (handlerResult && (handlerResult as ContextEventResult).messages) {
@@ -1680,7 +1701,7 @@ export class ExtensionRunner {
 					event,
 					ctx,
 					ext,
-					extensionHandlerTimeoutMs,
+					this.#handlerTimeoutMsForEvent("before_provider_request"),
 				);
 				if (handlerResult !== undefined) {
 					currentPayload = handlerResult;
@@ -1707,7 +1728,7 @@ export class ExtensionRunner {
 					requestId: response.requestId,
 					metadata: response.metadata,
 				};
-				await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs);
+				await this.#runHandlerWithTimeout(handler, event, ctx, ext, this.#handlerTimeoutMsForEvent("after_provider_response"));
 			}
 		}
 	}
@@ -1738,7 +1759,7 @@ export class ExtensionRunner {
 					event,
 					ctx,
 					ext,
-					extensionHandlerTimeoutMs,
+					this.#handlerTimeoutMsForEvent("before_agent_start"),
 				);
 
 				if (handlerResult) {

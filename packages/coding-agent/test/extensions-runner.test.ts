@@ -1671,6 +1671,95 @@ describe("ExtensionRunner", () => {
 			}
 		});
 
+		it("uses the configured global handler timeout for non-tool_call events (#11286)", async () => {
+			const hangExtensionPath = path.join(tempDir.path(), "hang-global-timeout.ts");
+			fs.writeFileSync(
+				hangExtensionPath,
+				`
+					export default function(pi) {
+						pi.on("session_start", async () => {
+							await Promise.withResolvers().promise;
+						});
+					}
+				`,
+			);
+
+			const result = await loadTestExtensions([hangExtensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				Settings.isolated({ "extensionHandlers.timeoutMs": 10 }),
+			);
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError(err => {
+				errors.push(err);
+			});
+
+			const startedAt = performance.now();
+			await runner.emit({ type: "session_start" });
+			const elapsedMs = performance.now() - startedAt;
+
+			expect(elapsedMs).toBeGreaterThanOrEqual(8);
+			expect(elapsedMs).toBeLessThan(500);
+			expect(warnSpy).toHaveBeenCalledWith("Extension handler timed out", {
+				extensionPath: hangExtensionPath,
+				event: "session_start",
+				timeoutMs: 10,
+			});
+			expect(errors).toEqual([
+				{
+					extensionPath: hangExtensionPath,
+					event: "session_start",
+					error: "handler timed out after 10ms",
+				},
+			]);
+
+			warnSpy.mockRestore();
+		});
+
+		it("prefers toolCallTimeoutMs over the global handler timeout for tool_call (#11286)", async () => {
+			const extensionPath = path.join(tempDir.path(), "tool-call-precedence.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.on("tool_call", async () => {
+							await Promise.withResolvers().promise;
+						});
+					}
+				`,
+			);
+			const loaded = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				Settings.isolated({ "extensionHandlers.timeoutMs": 5000, "extensionHandlers.toolCallTimeoutMs": 10 }),
+			);
+			const startedAt = performance.now();
+			const decision = await runner.emitToolCall({
+				type: "tool_call",
+				toolName: "guarded",
+				toolCallId: "precedence-call",
+				input: {},
+			});
+			const elapsedMs = performance.now() - startedAt;
+
+			expect(decision).toEqual({
+				block: true,
+				reason: `Extension ${extensionPath} timed out after 10ms`,
+			});
+			expect(elapsedMs).toBeLessThan(500);
+		});
+
 		it("fails closed when a tool_call handler registration cannot activate", async () => {
 			const extensionPath = path.join(tempDir.path(), "tool-call-registration.ts");
 			fs.writeFileSync(
