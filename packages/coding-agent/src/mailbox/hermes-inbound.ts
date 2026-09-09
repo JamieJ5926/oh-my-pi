@@ -58,7 +58,7 @@ function oneLine(s: string): string {
  */
 export function formatMailboxLine(event: HermesInboundEvent, now = new Date()): string {
 	const kind = event.kind.trim().toLowerCase();
-	if (!(KINDS as readonly string[]).includes(kind)) {
+	if (!KINDS.some((k) => k === kind)) {
 		throw new Error(`hermes-inbound: unknown kind ${JSON.stringify(event.kind)} (want task|idea|message|note)`);
 	}
 	const source = oneLine(event.source);
