@@ -277,6 +277,9 @@ export class ModelPickerComponent implements Component {
 		// Role levels do not transfer either: the Task agent runs its own
 		// configured effort (auto by default), so every badge hides in Task mode.
 		this.#browser.setShowThinkingBadges(!this.#taskMode);
+		// A leading `@` leaves the browser in quick-role mode; entering Task
+		// mode must resynchronize so role rows clear and Task-target rows show.
+		this.#syncItemsForQuery(this.#browser.query, true);
 		const target = this.#taskMode ? this.#taskSelector : this.#currentSelector;
 		if (target) this.#browser.selectSelector(target);
 		this.#tui.requestRender();

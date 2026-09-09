@@ -1,8 +1,9 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import {
 	buildBrowserItems,
 	formatThinkingLevelBadge,
@@ -12,7 +13,10 @@ import {
 	type RoleAssignments,
 	sortModelItems,
 } from "@oh-my-pi/pi-coding-agent/modes/components/model-browser";
+import { ModelPickerComponent } from "@oh-my-pi/pi-coding-agent/modes/components/model-picker";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { TUI } from "@oh-my-pi/pi-tui";
 
 /** Optional presentation metadata a catalog or discovery source may attach. */
 type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps">;
@@ -426,5 +430,57 @@ describe("ModelBrowser effort badge", () => {
 	test("shared badge helper renders nothing for inherit", () => {
 		expect(formatThinkingLevelBadge(ThinkingLevel.Inherit)).toBe("");
 		expect(Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Max))).toContain("max");
+	});
+});
+
+describe("ModelPicker Task toggle from quick-role mode", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+	test("leading-@ + Task toggle + Enter applies the Task override, not the quick role", () => {
+		// Regression (Codex P1 on PR #11330): with a leading `@` query the
+		// picker shows quick-role rows; toggling Task mode must resynchronize
+		// the browser so Enter sets the Task override instead of applying
+		// the highlighted quick role.
+		const taskModel = makeModel("test", "task-model");
+		const sessionModel = makeModel("test", "session-model");
+		const models = [taskModel, sessionModel];
+		const registry = {
+			refresh: async () => {},
+			getError: () => undefined,
+			getAvailable: () => models,
+			getAll: () => models,
+		} as unknown as ModelRegistry;
+		const ui = { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI;
+		const onPick = vi.fn();
+		const onPickRole = vi.fn();
+		const onCancel = vi.fn();
+		const onPickTask = vi.fn();
+		const picker = new ModelPickerComponent(
+			ui,
+			Settings.isolated({}),
+			registry,
+			models.map(model => ({ model })),
+			{ onPick, onPickRole, onPickTask, onCancel },
+			{
+				currentSelector: "test/session-model",
+				quickRoles: [{ role: "slow", model: sessionModel, explicitThinkingLevel: false }],
+				quickRoleOrder: ["slow"],
+				currentQuickRole: "slow",
+				taskModeKeys: ["ctrl+t"],
+				taskSelector: "test/task-model",
+			},
+		);
+
+		picker.handleInput("@");
+		picker.handleInput(String.fromCharCode(20)); // ctrl+t: Task-mode toggle
+
+		expect(picker.render(220).join("\n")).toContain("Switch Task Model");
+
+		picker.handleInput("\n");
+		expect(onPickTask).toHaveBeenCalledTimes(1);
+		expect(onPickTask.mock.calls[0]?.[1]).toBe("test/task-model");
+		expect(onPickRole).not.toHaveBeenCalled();
+		expect(onPick).not.toHaveBeenCalled();
 	});
 });
