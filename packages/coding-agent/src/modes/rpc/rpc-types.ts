@@ -134,6 +134,7 @@ export interface RpcSessionState {
 	fastModeActive: boolean;
 	tokensPerSecond: number | null;
 	messageCount: number;
+	queuedMessageCount: number;
 	todoPhases: TodoPhase[];
 	/** For session dump / export (plain-text parity with /dump). */
 	systemPrompt?: string[];

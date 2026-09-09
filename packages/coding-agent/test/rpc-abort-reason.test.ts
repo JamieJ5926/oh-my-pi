@@ -3,12 +3,12 @@ import {
 	RPC_ABORT_REASON_MAX_LENGTH,
 	handleRpcAbort,
 	resolveRpcAbort,
-} from "../src/modes/rpc/rpc-mode";
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import {
 	buildRpcAbortAndPromptCommand,
 	buildRpcAbortCommand,
-} from "../src/modes/rpc/rpc-types";
-import { USER_INTERRUPT_LABEL } from "../src/session/messages";
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 
 describe("resolveRpcAbort", () => {
 	test("defaults to the user-interrupt label with no host flag when no reason is supplied", () => {

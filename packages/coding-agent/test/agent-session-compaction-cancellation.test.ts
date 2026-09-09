@@ -135,6 +135,43 @@ describe("AgentSession compaction cancellation source", () => {
 		expect(error.cause).toBe(USER_INTERRUPT_LABEL);
 	});
 
+	it("forwards the interrupt label into in-flight compaction for host interrupts", async () => {
+		// A host abort (RPC `abort` with a reason) must keep the compaction
+		// silent-consume predicate matching: the cancellation cause stays
+		// USER_INTERRUPT_LABEL so no out-of-turn chunk is emitted, while the
+		// aborted turn itself keeps the host attribution text.
+		const started = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		session = await createSession("park", started.resolve, gate.promise);
+
+		const cancellation = cancellationFrom(session.compact());
+		await started.promise;
+		const aborting = session.abort({ reason: "Interrupted by host (test)", hostInterrupt: true });
+		gate.resolve();
+		await aborting;
+
+		const error = await cancellation;
+		expect(error.cause).toBe(USER_INTERRUPT_LABEL);
+	});
+
+	it("exposes host text as the compaction cause without the host flag", async () => {
+		// Negative control for the forwarding above: without hostInterrupt the
+		// reason rides through verbatim and the label-equality silent-consume
+		// predicate would miss it.
+		const started = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		session = await createSession("park", started.resolve, gate.promise);
+
+		const cancellation = cancellationFrom(session.compact());
+		await started.promise;
+		const aborting = session.abort({ reason: "Interrupted by host (test)" });
+		gate.resolve();
+		await aborting;
+
+		const error = await cancellation;
+		expect(error.cause).toBe("Interrupted by host (test)");
+	});
+
 	it("blocks an ordinary prompt until manual compaction cleanup resolves", async () => {
 		const started = Promise.withResolvers<void>();
 		const gate = Promise.withResolvers<void>();
