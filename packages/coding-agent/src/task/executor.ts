@@ -108,6 +108,7 @@ const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
 export const SOFT_REQUEST_BUDGET: Record<string, number> = {
 	scout: 100,
 	sonic: 100,
+	"poteto-agent-deep": 400,
 	default: 200,
 };
 
@@ -2836,7 +2837,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const agentIdleTtlMs = Math.trunc(Number(settings.get("task.agentIdleTtlMs") ?? 420_000) || 0);
 	const configuredDefaultBudget = Math.max(
 		0,
-		Math.trunc(Number(settings.get("task.softRequestBudget") ?? SOFT_REQUEST_BUDGET.default) || 0),
+		Math.trunc(Number(settings.get("task.softRequestBudget") ?? SOFT_REQUEST_BUDGET[agent.name] ?? SOFT_REQUEST_BUDGET.default) || 0),
 	);
 	const softRequestBudget = resolveSoftRequestBudget(agent.name, configuredDefaultBudget);
 	const softRequestBudgetNotice = settings.get("task.softRequestBudgetNotice") ?? false;
