@@ -85,6 +85,7 @@ const hubSchema = type({
 	"message?": type("string").describe("send: message body"),
 	"replyTo?": type("string").describe("send: message id being answered"),
 	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
+	"allowBroadcast?": type("boolean").describe('send: confirm a to:"all" broadcast to more than 10 running peers'),
 	"from?": type("string").describe("wait: only accept a message from this agent id"),
 	"ids?": type("string[]").describe("wait: job ids to watch (omit = all running jobs); cancel: job ids to kill"),
 	"timeoutMs?": type("number").describe("wait (messages/jobs): timeout in milliseconds (0 waits indefinitely)"),

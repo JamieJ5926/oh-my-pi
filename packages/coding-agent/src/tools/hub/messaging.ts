@@ -234,12 +234,15 @@ export async function executeList(
 	};
 }
 
+export const HUB_SEND_ALL_THRESHOLD = 10;
+
 export interface HubSendParams {
 	to?: string;
 	message?: string;
 	replyTo?: string;
 	await?: boolean;
 	timeoutMs?: number;
+	allowBroadcast?: boolean;
 }
 
 export async function executeSend(
@@ -266,6 +269,25 @@ export async function executeSend(
 			from: senderId,
 			to,
 		});
+	}
+	if (isBroadcast && params.allowBroadcast !== true) {
+		let peerCount: number;
+		try {
+			const visible = registry.listVisibleTo(senderId);
+			if (!Array.isArray(visible)) throw new Error("unreadable registry");
+			peerCount = visible.length;
+		} catch {
+			return hubErrorResult(
+				"hub send to:all refused: peer count unreadable; address recipients by name, or pass allowBroadcast:true to confirm broadcast.",
+				{ op: "send", from: senderId, to },
+			);
+		}
+		if (peerCount > HUB_SEND_ALL_THRESHOLD) {
+			return hubErrorResult(
+				`hub send to:all refused: ${peerCount} running peers exceed threshold 10; address recipients by name, or pass allowBroadcast:true to confirm broadcast.`,
+				{ op: "send", from: senderId, to },
+			);
+		}
 	}
 	// A direct send may address a parked id that another root's scan (or a
 	// prior list) restored into this process-global registry. Refresh this
