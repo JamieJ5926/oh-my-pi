@@ -943,6 +943,10 @@ export class ModelBrowser implements Component {
 		) {
 			return ` ${formatThinkingLevelBadge(this.#sessionThinkingLevel)}`;
 		}
+		// The active row is terminal: applying the current selector leaves the
+		// session effort untouched (undefined or inherit), so it must never
+		// render another role's level as a fallback.
+		if (item.selector === this.#currentSelector) return "";
 		const seen = new Set<string>();
 		const levels = new Map<ConfiguredThinkingLevel, string>();
 		const match = (role: string): void => {

@@ -402,6 +402,24 @@ describe("ModelBrowser effort badge", () => {
 		expect(rows[3]).not.toContain(lowBadge);
 	});
 
+	test("active model row at inherit renders no sibling role level", () => {
+		// `@fast` applied at inherit leaves the session effort undefined; the
+		// active model row must stay unbadged even though `@slow` shares the
+		// model at high.
+		const shared = makeModel("openai", "gpt-5");
+		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
+		const rows = renderRows(
+			[shared],
+			{
+				fast: { model: shared, thinkingLevel: ThinkingLevel.Inherit, autoSelected: false },
+				slow: { model: shared, thinkingLevel: ThinkingLevel.High, autoSelected: false },
+			},
+			{ currentSelector: "openai/gpt-5" },
+		);
+
+		expect(rows[2]).not.toContain(highBadge);
+	});
+
 	test("quick-role row resolves its own role level before the model-wide fallback", () => {
 		// `@slow` at max shares its model with `default` at low: the row must
 		// show max (what Enter applies), never default's low.
