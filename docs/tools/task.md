@@ -145,7 +145,7 @@ Artifacts and side channels:
 - Per-subagent output truncation: `MAX_OUTPUT_BYTES = 500_000` and `MAX_OUTPUT_LINES = 5000` in `packages/coding-agent/src/task/types.ts` (overridable via `PI_TASK_MAX_OUTPUT_BYTES` / `PI_TASK_MAX_OUTPUT_LINES`). Full raw output is still written to `<id>.md`.
 - Progress coalescing: `PROGRESS_COALESCE_MS = 150`; recent-output tail: `RECENT_OUTPUT_TAIL_BYTES = 8 * 1024` (last 8 non-empty lines).
 - Missing-`yield` reminder retries: `MAX_YIELD_RETRIES = 3`; MCP proxy timeout: `MCP_CALL_TIMEOUT_MS = 60_000` — both in `packages/coding-agent/src/task/executor.ts`.
-- Soft request budget: `task.softRequestBudget` defaults to 200 requests (`0` disables). Crossing it injects a wrap-up notice when `task.softRequestBudgetNotice` is enabled; at 1.5× the budget the run is force-stopped to yield partial findings. Bundled scout/sonic agents may impose a lower built-in cap.
+- Soft request budget: `task.softRequestBudget` defaults to 200 requests (`0` disables). Crossing it injects a wrap-up notice when `task.softRequestBudgetNotice` is enabled; at 1.5× the budget the run is force-stopped to yield partial findings. Bundled scout/sonic agents may impose a lower built-in cap, while poteto-agent-deep imposes a higher built-in cap of 400.
 - Hard wall clock: `task.maxRuntimeMs` applies to every spawn; default `0` disables it.
 - Recursion depth gate: `task.maxRecursionDepth`; `packages/coding-agent/src/tools/index.ts` hides the `task` tool at or beyond the limit, and `runSubprocess(...)` also strips child `task` access at max depth.
 - Final inline summary preview uses `fullOutputThreshold = 5000` chars in `packages/coding-agent/src/task/index.ts`; `agent://<id>` points to the full artifact.
