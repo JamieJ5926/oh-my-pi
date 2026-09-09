@@ -208,3 +208,30 @@ describe("vibe wait consumed note", () => {
 		}
 	});
 });
+
+
+	test("small consumed bodies still show retained text, not the note", async () => {
+		const manager = new AsyncJobManager({});
+		const vibes = VibeSessionRegistry.global();
+		try {
+			const toolSession = {
+				getAgentId: () => "o32-owner",
+				getSessionId: () => "test-parent-session",
+				getSessionFile: () => null,
+				asyncJobManager: manager,
+			} as unknown as ToolSession;
+			const jobId = manager.register("task", "small vibe turn", async () => "small ok", { ownerId: "o32-owner" });
+			vibes.registerRecordForTests({ id: "o32-worker-small", ownerId: "o32-owner", jobId });
+			await manager.waitForAll();
+			const first = await vibes.wait(toolSession, { timeoutMs: 1_000 });
+			expect(first.settled[0]?.resultText).toBe("small ok");
+			// Consume keeps the small body on the row; the note must not mask it.
+			expect(manager.consumeJobResults([jobId])).toBe(1);
+			expect(manager.getJob(jobId)?.resultText).toBe("small ok");
+			const second = await vibes.wait(toolSession, { timeoutMs: 1_000 });
+			expect(second.settled[0]?.resultText).toBe("small ok");
+		} finally {
+			await manager.dispose({ timeoutMs: 100 });
+			VibeSessionRegistry.resetGlobalForTests();
+		}
+	});
