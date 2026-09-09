@@ -287,6 +287,22 @@ describe("ModelBrowser effort badge", () => {
 		expect(rows[2]).not.toContain("high");
 		expect(rows[3]).not.toContain("high");
 	});
+	test("non-active row hides a derived defaultThinkingLevel the picker would not apply", () => {
+		// P2 (PR #11330): an unsuffixed default selector with
+		// `defaultThinkingLevel: high` resolves a high fallback, but Enter in
+		// the Alt+P picker preserves the session effort (low/auto) instead.
+		// The row must stay unbadged; an explicit `:high` suffix still badges.
+		const derived = makeModel("openai", "gpt-5");
+		const explicit = makeModel("openai", "gpt-4");
+		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
+		const rows = renderRows([derived, explicit], {
+			default: { model: derived, thinkingLevel: ThinkingLevel.High, autoSelected: false, explicitThinkingLevel: false },
+			slow: { model: explicit, thinkingLevel: ThinkingLevel.High, autoSelected: false, explicitThinkingLevel: true },
+		});
+
+		expect(rows[2]).not.toContain(highBadge);
+		expect(rows[3]).toContain(highBadge);
+	});
 
 	test("selected row renders the session effort with no configured role behind it", () => {
 		// Reopen after a session-only switch to a model no role pins: the

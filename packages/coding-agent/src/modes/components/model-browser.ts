@@ -64,6 +64,13 @@ export interface RoleAssignment {
 	thinkingLevel: ConfiguredThinkingLevel;
 	/** True when the role has no configured value and fell back to auto-selection. */
 	autoSelected: boolean;
+	/**
+	 * True when the role value carries an explicit `:level` suffix. Absent
+	 * means explicit (test-constructed assignments predate the flag). False
+	 * marks a level derived from `defaultThinkingLevel`, which the Alt+P
+	 * session picker does not apply — so it must not render as a fallback.
+	 */
+	explicitThinkingLevel?: boolean;
 }
 
 /** Map of role id to its resolved assignment (absent roles are unresolved). */
@@ -109,6 +116,7 @@ export function resolveRoleAssignments(
 				model: resolved.model,
 				thinkingLevel: resolvedThinkingLevel(role, resolved),
 				autoSelected: false,
+				explicitThinkingLevel: resolved.explicitThinkingLevel,
 			};
 		}
 	}
@@ -123,6 +131,7 @@ export function resolveRoleAssignments(
 				model: resolved.model,
 				thinkingLevel: resolvedThinkingLevel(role, resolved),
 				autoSelected: true,
+				explicitThinkingLevel: resolved.explicitThinkingLevel,
 			};
 		}
 	}
@@ -956,6 +965,10 @@ export class ModelBrowser implements Component {
 			if (!assignment || assignment.autoSelected) return;
 			if (!modelsAreEqual(assignment.model, item.model)) return;
 			if (getRoleInfo(role, this.#settings).hidden) return;
+			// Derived levels (e.g. `defaultThinkingLevel` with no `:level`
+			// suffix) are not applied by the Alt+P picker, so they must not
+			// render as a fallback. Absent means explicit (predates the flag).
+			if (assignment.explicitThinkingLevel === false) return;
 			if (assignment.thinkingLevel === ThinkingLevel.Inherit) return;
 			if (!levels.has(assignment.thinkingLevel)) levels.set(assignment.thinkingLevel, role);
 		};
