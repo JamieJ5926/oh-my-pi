@@ -24,6 +24,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { FileSessionDirectory } from "./bridge/core/directory";
+import { ensureProjectDaemonBroker } from "./launch/client";
 import { canonicalProjectDir, daemonRuntimeDir, daemonBridgeDirectoryPath, daemonBridgeTransportEndpoint, daemonBridgeTransportClientJournalPath } from "./launch/paths";
 import { BrokerBackedTransportAdapter } from "./bridge/transport/transport";
 import { IrcBus } from "./irc/bus";
@@ -1866,6 +1867,11 @@ export async function runRootCommand(
 				const transport = new BrokerBackedTransportAdapter({ socketPath: daemonBridgeTransportEndpoint(publicationProjectDir, runtimeDir), journalPath: daemonBridgeTransportClientJournalPath(runtimeDir) });
 				IrcBus.global().attachTransport(transport);
 				postmortem.register("irc-transport-cleanup", () => transport.close());
+				try {
+					await ensureProjectDaemonBroker(publicationProjectDir);
+				} catch (error) {
+					logger.warn("Cross-process IRC broker ensure failed; remote sends may stay queued", { error: String(error) });
+				}
 			}
 		} catch (error) {
 			logger.warn("Cross-process IRC initialization failed", { error: String(error) });
