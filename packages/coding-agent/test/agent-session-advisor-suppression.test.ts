@@ -28,7 +28,11 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { isUserInterruptAbort, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	isUserInterruptAbort,
+	shouldRenderAbortReason,
+	USER_INTERRUPT_LABEL,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -510,7 +514,8 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		);
 		if (!aborted || aborted.role !== "assistant") throw new Error("Expected aborted assistant turn");
 		expect(aborted.errorMessage).toBe("Interrupted by host (turn replaced)");
-		expect(isUserInterruptAbort(aborted)).toBe(false);
+		expect(isUserInterruptAbort(aborted)).toBe(true);
+		expect(shouldRenderAbortReason(aborted)).toBe(true);
 
 		await running.catch(() => {});
 	});

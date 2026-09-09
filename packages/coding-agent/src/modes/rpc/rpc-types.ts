@@ -37,7 +37,6 @@ export type RpcCommand =
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[]; reason?: string }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
-
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
@@ -112,7 +111,6 @@ export function buildRpcAbortAndPromptCommand(
 		? { type: "abort_and_prompt", message, images }
 		: { type: "abort_and_prompt", message, images, reason };
 }
-
 
 // ============================================================================
 // RPC State

@@ -4,11 +4,13 @@ import {
 	handleRpcAbort,
 	resolveRpcAbort,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import { buildRpcAbortAndPromptCommand, buildRpcAbortCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import {
-	buildRpcAbortAndPromptCommand,
-	buildRpcAbortCommand,
-} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
-import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+	USER_INTERRUPT_LABEL,
+	isUserInterruptAbort,
+	shouldRenderAbortReason,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 
 describe("resolveRpcAbort", () => {
 	test("defaults to the user-interrupt label with no host flag when no reason is supplied", () => {
@@ -97,9 +99,7 @@ describe("handleRpcAbort", () => {
 			{ id: "a1", type: "abort", reason: "Interrupted by host (turn replaced)" },
 			() => {},
 		);
-		expect(aborts).toEqual([
-			{ reason: "Interrupted by host (turn replaced)", hostInterrupt: true },
-		]);
+		expect(aborts).toEqual([{ reason: "Interrupted by host (turn replaced)", hostInterrupt: true }]);
 		expect(response).toEqual({ id: "a1", type: "response", command: "abort", success: true });
 	});
 
@@ -140,5 +140,22 @@ describe("handleRpcAbort", () => {
 				error: "schedule boom",
 			},
 		]);
+	});
+});
+
+describe("host-abort lifecycle attribution", () => {
+	test("host reason keeps interrupt lifecycle handling while rendering host text", () => {
+		const hostAborted = {
+			errorId: AIError.create(AIError.Flag.UserInterrupt),
+			errorMessage: "Interrupted by host (turn replaced)",
+		};
+		expect(isUserInterruptAbort(hostAborted)).toBe(true);
+		expect(shouldRenderAbortReason(hostAborted)).toBe(true);
+		const userAborted = {
+			errorId: AIError.create(AIError.Flag.UserInterrupt),
+			errorMessage: USER_INTERRUPT_LABEL,
+		};
+		expect(isUserInterruptAbort(userAborted)).toBe(true);
+		expect(shouldRenderAbortReason(userAborted)).toBe(false);
 	});
 });

@@ -3,6 +3,10 @@
 ## [Unreleased]
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
+### Added
+
+- Added an optional `reason` to RPC `abort` and `abort_and_prompt`: a non-empty host reason is recorded as the aborted turn's attribution text (trimmed, 200-character bound) while lifecycle handling matches a user interrupt; an omitted or blank reason keeps the historical user-interrupt label.
+
 ### Changed
 
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.

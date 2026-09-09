@@ -765,6 +765,7 @@ export function requestRpcDialog<T>(
 	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 	return promise;
 }
+
 /**
  * Max host-supplied abort reason length. The reason persists into the session
  * transcript/JSONL and stays model-visible, so it is truncated rather than
@@ -809,20 +810,17 @@ export async function handleRpcAbort(
 	if (command.type === "abort") {
 		return { id: command.id, type: "response", command: "abort", success: true };
 	}
-	session
-		.prompt(command.message, { images: command.images })
-		.catch((e: unknown) =>
-			output({
-				id: command.id,
-				type: "response",
-				command: "abort_and_prompt",
-				success: false,
-				error: e instanceof Error ? e.message : String(e),
-			}),
-		);
+	session.prompt(command.message, { images: command.images }).catch((e: unknown) =>
+		output({
+			id: command.id,
+			type: "response",
+			command: "abort_and_prompt",
+			success: false,
+			error: e instanceof Error ? e.message : String(e),
+		}),
+	);
 	return { id: command.id, type: "response", command: "abort_and_prompt", success: true };
 }
-
 
 /**
  * Run in RPC mode.

@@ -477,7 +477,7 @@ export function isUserInterruptAbort(message: Pick<AssistantMessage, "errorId" |
 }
 
 export function shouldRenderAbortReason(message: Pick<AssistantMessage, "errorId" | "errorMessage">): boolean {
-	return !isSilentAbort(message) && !isUserInterruptAbort(message);
+	return !isSilentAbort(message) && message.errorMessage !== USER_INTERRUPT_LABEL;
 }
 
 /** A provider-rejection turn carrying nothing but the error flag: stopReason
