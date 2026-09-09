@@ -4,6 +4,7 @@
  * The two public frontends deliberately retain their presentation concerns, but
  * every decision that affects what a child may run lives here.
  */
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
@@ -363,22 +364,57 @@ async function leaseArtifacts(
 	return { sessionFile: null, artifactsDir, temporary: true, unregister: registerArtifactsDir(artifactsDir) };
 }
 
-function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
-	const skills = [...(session.skills ?? [])];
-	const autoloadSkills = agent.autoloadSkills?.length
-		? agent.autoloadSkills.map(name => skills.find(skill => skill.name === name)).filter(skill => skill !== undefined)
+async function resolveRoleInputs(session: ToolSession, agent: AgentDefinition) {
+	const select = <T>(selector: "shared" | string[] | undefined, values: T[], names: (value: T) => string[]) =>
+		selector === undefined || selector === "shared"
+			? values
+			: values.filter(value => names(value).some(name => selector.includes(name)));
+	const contextFiles = select(
+		agent.instructions,
+		session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md") ?? [],
+		file => [file.path, path.basename(file.path)],
+	);
+	const rules = select(agent.instructions, session.rules ?? [], rule => [rule.name, rule.path]);
+	const skills = select(agent.skills, session.skills ?? [], skill => [skill.name, skill.filePath]);
+	const autoloadSkills = agent.autoloadSkills?.flatMap(name => skills.filter(skill => skill.name === name)) ?? [];
+	const roleHooks = Array.isArray(agent.hooks)
+		? agent.hooks.map(hook => path.resolve(agent.filePath ? path.dirname(agent.filePath) : session.cwd, hook))
 		: [];
-	return { skills, autoloadSkills };
+	const extensionPaths = [...new Set([...(session.extensionPaths ?? []), ...roleHooks])];
+	const extensionRoots = session.effectiveExtensionRoots?.();
+	const content =
+		agent.filePath && !agent.filePath.startsWith("embedded:")
+			? await fs.readFile(agent.filePath, "utf8")
+			: JSON.stringify(agent);
+	const roleProfile = {
+		path: agent.filePath,
+		contentHash: createHash("sha256").update(content).digest("hex"),
+		mode: agent.minimalPrompt ? ("minimal" as const) : ("full" as const),
+		sources: {
+			prompt: agent.filePath ?? `bundled:${agent.name}`,
+			instructions: [...contextFiles.map(file => file.path), ...rules.map(rule => rule.path)],
+			skills: skills.map(skill => skill.filePath),
+			hooks: extensionPaths,
+			tools: agent.tools ?? [],
+		},
+		contextFiles,
+		rules,
+		skills,
+		extensionPaths,
+		extensionRoots,
+	};
+	return { contextFiles, rules, skills, autoloadSkills, roleHooks, extensionPaths, roleProfile };
 }
 
-function buildExecutorOptions(
+async function buildExecutorOptions(
 	request: StructuredSubagentRequest,
 	policy: EffectiveSubagentPolicy,
 	lease: ArtifactLease,
 	id: string,
-): ExecutorOptions {
+): Promise<ExecutorOptions> {
 	const { session } = request;
-	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
+	const { contextFiles, rules, skills, autoloadSkills, roleHooks, extensionPaths, roleProfile } =
+		await resolveRoleInputs(session, policy.agent);
 	const localProtocolOptions: LocalProtocolOptions = session.localProtocolOptions ?? {
 		getArtifactsDir: session.getArtifactsDir ?? (() => null),
 		getSessionId: session.getSessionId ?? (() => null),
@@ -434,18 +470,19 @@ function buildExecutorOptions(
 		settings: session.settings,
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 		enableMCP,
-		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
+		contextFiles,
+		roleProfile,
 		skills,
 		autoloadSkills,
 		workspaceTree: session.workspaceTree,
 		promptTemplates: session.promptTemplates,
-		rules: session.rules,
+		rules,
 		// Root policy and module paths have separate jobs: the live policy drives
 		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
 		// parent-bound extension instances while constructing the child.
 		extensionRoots: session.effectiveExtensionRoots?.bind(session),
-		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
-		preloadedPreparedExtensions: restrictToolNames ? [] : session.preparedExtensions,
+		preloadedExtensionPaths: restrictToolNames ? [] : extensionPaths,
+		preloadedPreparedExtensions: restrictToolNames ? [] : roleHooks.length ? undefined : session.preparedExtensions,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
@@ -570,7 +607,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			...request.identity,
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
-		const baseOptions = buildExecutorOptions(request, policy, lease, id);
+		const baseOptions = await buildExecutorOptions(request, policy, lease, id);
 		baseOptions.onCleanupDeferred = completion => {
 			deferredCleanup = completion;
 		};

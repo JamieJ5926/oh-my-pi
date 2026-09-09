@@ -368,6 +368,10 @@ export interface AgentDefinition {
 	output?: unknown;
 	blocking?: boolean;
 	autoloadSkills?: string[];
+	minimalPrompt?: boolean;
+	instructions?: "shared" | string[];
+	skills?: "shared" | string[];
+	hooks?: "shared" | string[];
 	/** When `false`, the agent's `read` tool returns verbatim file content instead of structural summaries. */
 	readSummarize?: boolean;
 	/** Prewalk hand-off for the spawned session: `true` = switch to the default prewalk target at the first edit/write, string = custom target model pattern. */

@@ -50,6 +50,7 @@ import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
+import type { ResolvedRoleProfile } from "../session/session-entries";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
@@ -475,6 +476,7 @@ export interface ExecutorOptions {
 	eventBus?: EventBus;
 	subagentEventBus?: EventBus;
 	contextFiles?: ContextFileEntry[];
+	roleProfile?: ResolvedRoleProfile;
 	skills?: Skill[];
 	promptTemplates?: PromptTemplate[];
 	workspaceTree?: WorkspaceTree;
@@ -3197,27 +3199,30 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedPreparedExtensions: restrictToolNames ? [] : options.preloadedPreparedExtensions,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
-				systemPrompt: defaultPrompt => {
-					const ircRoster = ircEnabled
-						? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
-						: undefined;
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-						agent: agent.systemPrompt,
-						context: options.context?.trim() ?? "",
-						planReference: options.planReference?.content ?? "",
-						planReferencePath: options.planReference?.path ?? "",
-						worktree: worktree ?? "",
-						outputSchema: normalizedOutputSchema,
-						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						ircPeers: ircRoster?.peers ?? [],
-						ircParkedCount: ircRoster?.parkedCount ?? 0,
-						ircOmittedCount: ircRoster?.omittedCount ?? 0,
-						ircSelfId: ircEnabled ? id : "",
-					});
-					return defaultPrompt.length === 0
-						? [subagentPrompt]
-						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
-				},
+				systemPrompt: (() => {
+					const renderRolePrompt = (defaultPrompt: string[]) => {
+						const ircRoster = ircEnabled
+							? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
+							: undefined;
+						const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+							agent: agent.systemPrompt,
+							context: options.context?.trim() ?? "",
+							planReference: options.planReference?.content ?? "",
+							planReferencePath: options.planReference?.path ?? "",
+							worktree: worktree ?? "",
+							outputSchema: normalizedOutputSchema,
+							outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+							ircPeers: ircRoster?.peers ?? [],
+							ircParkedCount: ircRoster?.parkedCount ?? 0,
+							ircOmittedCount: ircRoster?.omittedCount ?? 0,
+							ircSelfId: ircEnabled ? id : "",
+						});
+						return defaultPrompt.length === 0
+							? [subagentPrompt]
+							: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
+					};
+					return agent.minimalPrompt ? renderRolePrompt([]) : renderRolePrompt;
+				})(),
 				sessionManager: sessionManagerForRun,
 				hasUI: false,
 				prewalk,
@@ -3369,6 +3374,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
+				roleProfile: options.roleProfile
+					? {
+							...options.roleProfile,
+							sources: { ...options.roleProfile.sources, tools: persistedSubagentTools },
+						}
+					: undefined,
 			});
 
 			abortSignal.addEventListener(

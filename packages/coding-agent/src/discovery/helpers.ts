@@ -242,6 +242,10 @@ export interface ParsedAgentFields {
 	output?: unknown;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	autoloadSkills?: string[];
+	minimalPrompt?: boolean;
+	instructions?: "shared" | string[];
+	skills?: "shared" | string[];
+	hooks?: "shared" | string[];
 	readSummarize?: boolean;
 	blocking?: boolean;
 	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
@@ -318,6 +322,19 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
+	const selector = (value: unknown): "shared" | string[] | undefined => {
+		if (value === undefined || value === null) return undefined;
+		if (typeof value === "string") {
+			if (value.trim() === "shared") return "shared";
+			return parseArrayOrCSV(value) ?? [];
+		}
+		if (Array.isArray(value) && value.every(item => typeof item === "string")) {
+			const normalized = [...new Set(value.map(item => item.trim()).filter(Boolean))];
+			if (normalized.length === 1 && normalized[0] === "shared") return "shared";
+			return normalized;
+		}
+		throw new Error("Agent input selectors must be shared, a string, or a string array");
+	};
 	return {
 		name,
 		description,
@@ -328,6 +345,10 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		thinkingLevel,
 		blocking,
 		autoloadSkills,
+		minimalPrompt: parseBoolean(frontmatter.minimalPrompt),
+		instructions: selector(frontmatter.instructions),
+		skills: selector(frontmatter.skills),
+		hooks: selector(frontmatter.hooks),
 		readSummarize,
 		prewalk,
 		advisor,

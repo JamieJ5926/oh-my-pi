@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import type { ContextFileEntry } from "@oh-my-pi/pi-coding-agent/tools";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	artifactsDirsFromRegistry,
@@ -661,5 +666,163 @@ describe("structured subagent primitive", () => {
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+});
+
+describe("role profile inputs", () => {
+	const ROLE_SKILLS: Skill[] = [
+		{
+			name: "poteto-mode",
+			description: "Style",
+			filePath: "/skills/poteto-mode/SKILL.md",
+			baseDir: "/skills/poteto-mode",
+			source: "user",
+		},
+		{
+			name: "swarm",
+			description: "Fanout",
+			filePath: "/skills/swarm/SKILL.md",
+			baseDir: "/skills/swarm",
+			source: "user",
+		},
+	];
+	const source = { provider: "test", providerName: "test", path: "/rules", level: "user" as const };
+	const ROLE_RULES: Rule[] = [
+		{
+			name: "naming",
+			path: "/rules/naming.md",
+			content: "Use names.",
+			_source: { ...source, path: "/rules/naming.md" },
+		},
+		{ name: "other", path: "/rules/other.md", content: "Other.", _source: { ...source, path: "/rules/other.md" } },
+	];
+	const ROLE_FILES: ContextFileEntry[] = [
+		{ path: "/project/CONTEXT.md", content: "Context." },
+		{ path: "/project/AGENTS.md", content: "Agents." },
+	];
+	const ROOTS: EffectiveExtensionRoots = {
+		explicit: [],
+		mode: "merge",
+		configured: [],
+		configuredLevel: "user",
+	};
+
+	function roleSession(): ToolSession {
+		return {
+			...session(),
+			contextFiles: ROLE_FILES,
+			rules: ROLE_RULES,
+			skills: ROLE_SKILLS,
+			extensionPaths: ["/ext/shared-hook.ts"],
+			effectiveExtensionRoots: () => ROOTS,
+		};
+	}
+
+	async function dispatch(
+		agent: AgentDefinition,
+		sessionOverride?: ToolSession,
+	): Promise<executorModule.ExecutorOptions> {
+		mockDiscovery(agent);
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+		const settled = await runStructuredSubagent(
+			request({ session: sessionOverride ?? roleSession(), retainArtifacts: true }),
+		);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+		const options = dispatched[0];
+		if (!options) throw new Error("Expected runSubprocess to be called");
+		return options;
+	}
+
+	it("filters shared inputs through explicit selectors and records provenance", async () => {
+		const options = await dispatch({
+			...AGENT,
+			instructions: ["CONTEXT.md"],
+			skills: ["swarm"],
+			autoloadSkills: ["swarm", "poteto-mode"],
+		});
+
+		expect(options.contextFiles?.map(file => file.path)).toEqual(["/project/CONTEXT.md"]);
+		expect(options.rules).toEqual([]);
+		expect(options.skills?.map(skill => skill.name)).toEqual(["swarm"]);
+		expect(options.autoloadSkills?.map(skill => skill.name)).toEqual(["swarm"]);
+		expect(options.roleProfile?.mode).toBe("full");
+		expect(options.roleProfile?.sources.instructions).toEqual(["/project/CONTEXT.md"]);
+		expect(options.roleProfile?.sources.skills).toEqual(["/skills/swarm/SKILL.md"]);
+		expect(options.roleProfile?.sources.hooks).toEqual(["/ext/shared-hook.ts"]);
+		expect(options.roleProfile?.sources.tools).toEqual(AGENT.tools);
+		expect(options.roleProfile?.contentHash).toMatch(/^[0-9a-f]{64}$/);
+	});
+
+	it("inherits every shared input when selectors are absent", async () => {
+		const first = await dispatch(AGENT);
+		expect(first.contextFiles?.map(file => file.path)).toEqual(["/project/CONTEXT.md"]);
+		expect(first.rules?.map(rule => rule.name)).toEqual(["naming", "other"]);
+		expect(first.skills?.map(skill => skill.name)).toEqual(["poteto-mode", "swarm"]);
+		expect(first.autoloadSkills).toEqual([]);
+		expect(first.roleProfile?.mode).toBe("full");
+
+		const second = await dispatch(AGENT);
+		expect(second.roleProfile?.contentHash).toBe(first.roleProfile?.contentHash);
+	});
+
+	it("treats explicit-empty selectors as no inputs", async () => {
+		const options = await dispatch({ ...AGENT, instructions: [], skills: [] });
+		expect(options.contextFiles).toEqual([]);
+		expect(options.rules).toEqual([]);
+		expect(options.skills).toEqual([]);
+		expect(options.autoloadSkills).toEqual([]);
+		expect(options.roleProfile?.sources.instructions).toEqual([]);
+		expect(options.roleProfile?.sources.skills).toEqual([]);
+	});
+
+	it("marks minimal roles without changing full-mode selection", async () => {
+		const minimal = await dispatch({ ...AGENT, minimalPrompt: true });
+		expect(minimal.roleProfile?.mode).toBe("minimal");
+		const full = await dispatch(AGENT);
+		expect(full.roleProfile?.mode).toBe("full");
+	});
+
+	it("appends explicit role hooks without dropping shared extension paths", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-role-hooks-"));
+		try {
+			const filePath = path.join(root, "agent.md");
+			await Bun.write(filePath, "---\nname: worker\ndescription: Test worker.\n---\n\nDo work.\n");
+			const options = await dispatch({ ...AGENT, filePath, hooks: ["./hooks/role.ts"] });
+			expect(options.roleProfile?.path).toBe(filePath);
+			expect(options.preloadedExtensionPaths).toEqual(["/ext/shared-hook.ts", path.join(root, "hooks", "role.ts")]);
+			expect(options.roleProfile?.sources.hooks).toEqual([
+				"/ext/shared-hook.ts",
+				path.join(root, "hooks", "role.ts"),
+			]);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("clears preloaded extensions in restricted mode", async () => {
+		const options = await dispatch(AGENT, {
+			...roleSession(),
+			getPlanModeState: () => ({ enabled: true }),
+		} as ToolSession);
+		expect(options.restrictToolNames).toBe(true);
+		expect(options.preloadedExtensionPaths).toEqual([]);
+		expect(options.preloadedPreparedExtensions).toEqual([]);
+	});
+
+	it("keeps the persisted profile JSON-serializable", async () => {
+		const options = await dispatch({ ...AGENT, instructions: ["CONTEXT.md"], skills: ["swarm"] });
+		expect(JSON.parse(JSON.stringify(options.roleProfile))).toEqual(options.roleProfile);
+	});
+
+	it("hashes bundled agents without touching the synthetic embedded path", async () => {
+		const bundled = { ...AGENT, filePath: "embedded:worker.md" };
+		const options = await dispatch(bundled);
+		const expected = createHash("sha256").update(JSON.stringify(bundled)).digest("hex");
+		expect(options.roleProfile?.contentHash).toBe(expected);
+		expect(options.roleProfile?.path).toBe("embedded:worker.md");
 	});
 });
