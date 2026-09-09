@@ -28,7 +28,6 @@ import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS } from "../../config/model
 import type { Settings } from "../../config/settings";
 import type { ModelPerfStats } from "../../session/agent-storage";
 import {
-	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	getConfiguredThinkingLevelMetadata,
 	parseConfiguredThinkingLevel,
@@ -908,19 +907,21 @@ export class ModelBrowser implements Component {
 	/**
 	 * Resolved effort badge for `item`'s row. Precedence: the row's own role
 	 * level for virtual `@role` rows, then the session effort on the
-	 * session-model row, then the configured roles backing the model. A model
-	 * backing several roles at different levels renders one role-attributed
-	 * badge per level (`default ◔ low · slow ◉ max`); empty when nothing pins
-	 * a level.
+	 * session-model row, then the configured roles backing the model. Virtual
+	 * `@role` rows are terminal — without an explicit own level they render
+	 * no badge rather than a sibling role's level, since applying the row
+	 * leaves the session effort untouched. A model backing several roles at
+	 * different levels renders one role-attributed badge per level
+	 * (`default ◔ low · slow ◉ max`); empty when nothing pins a level.
 	 */
 	#thinkingBadgeFor(item: ModelBrowserItem): string {
 		if (item.thinkingLevel !== undefined && item.thinkingLevel !== ThinkingLevel.Inherit) {
 			return ` ${formatThinkingLevelBadge(item.thinkingLevel)}`;
 		}
+		if (item.selector.startsWith("@")) return "";
 		if (
 			this.#sessionThinkingLevel !== undefined &&
 			this.#sessionThinkingLevel !== ThinkingLevel.Inherit &&
-			!item.selector.startsWith("@") &&
 			item.selector === this.#currentSelector
 		) {
 			return ` ${formatThinkingLevelBadge(this.#sessionThinkingLevel)}`;
@@ -938,6 +939,7 @@ export class ModelBrowser implements Component {
 			if (!levels.has(assignment.thinkingLevel)) levels.set(assignment.thinkingLevel, role);
 		};
 		for (const role of MODEL_ROLE_IDS) match(role);
+		for (const role in this.#roles) match(role);
 		if (levels.size === 0) return "";
 		if (levels.size === 1) {
 			const only = [...levels.keys()][0];

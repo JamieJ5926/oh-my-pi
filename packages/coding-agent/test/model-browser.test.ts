@@ -287,22 +287,30 @@ describe("ModelBrowser effort badge", () => {
 		// Reopen after a session-only switch to a model no role pins: the
 		// persisted assignments are empty, but the row must still confirm
 		// the active session effort.
-		const rows = renderRows([makeModel("openai", "gpt-5")], {}, {
-			currentSelector: "openai/gpt-5",
-			sessionThinkingLevel: ThinkingLevel.High,
-		});
+		const rows = renderRows(
+			[makeModel("openai", "gpt-5")],
+			{},
+			{
+				currentSelector: "openai/gpt-5",
+				sessionThinkingLevel: ThinkingLevel.High,
+			},
+		);
 
 		expect(rows[2]).toContain("high");
 	});
 
 	test("session effort wins over a stale configured level on the selected row", () => {
 		const assigned = makeModel("openai", "gpt-5");
-		const rows = renderRows([assigned], {
-			default: { model: assigned, thinkingLevel: ThinkingLevel.Low, autoSelected: false },
-		}, {
-			currentSelector: "openai/gpt-5",
-			sessionThinkingLevel: ThinkingLevel.High,
-		});
+		const rows = renderRows(
+			[assigned],
+			{
+				default: { model: assigned, thinkingLevel: ThinkingLevel.Low, autoSelected: false },
+			},
+			{
+				currentSelector: "openai/gpt-5",
+				sessionThinkingLevel: ThinkingLevel.High,
+			},
+		);
 
 		expect(rows[2]).toContain("high");
 		expect(rows[2]).not.toContain("low");
@@ -321,6 +329,49 @@ describe("ModelBrowser effort badge", () => {
 		expect(rows[2]).toContain("max");
 	});
 
+	test("custom roles outside the built-in ids badge their level", () => {
+		const shared = makeModel("openai", "gpt-5");
+		const rows = renderRows([shared], {
+			ultra: { model: shared, thinkingLevel: ThinkingLevel.Medium, autoSelected: false },
+		});
+
+		expect(rows[2]).toContain("medium");
+	});
+
+	test("custom role at a second level joins the role-attributed badges", () => {
+		const shared = makeModel("openai", "gpt-5");
+		const rows = renderRows([shared], {
+			default: { model: shared, thinkingLevel: ThinkingLevel.Low, autoSelected: false },
+			ultra: { model: shared, thinkingLevel: ThinkingLevel.Max, autoSelected: false },
+		});
+
+		expect(rows[2]).toContain("ultra");
+		expect(rows[2]).toContain("max");
+		expect(rows[2]).toContain("low");
+	});
+
+	test("quick-role row without an explicit level renders no fallback badge", () => {
+		// `@fast` with no explicit effort shares its model with `default` at
+		// low, but applying the row sets no effort: the row stays unbadged.
+		const shared = makeModel("openai", "gpt-5");
+		const lowBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Low));
+		const items: ModelBrowserItem[] = [
+			...buildBrowserItems([shared]),
+			{ provider: "", id: "@fast", model: shared, selector: "@fast" },
+		];
+		const rows = renderRows(
+			[shared],
+			{
+				default: { model: shared, thinkingLevel: ThinkingLevel.Low, autoSelected: false },
+			},
+			{},
+			items,
+		);
+
+		expect(rows[3]).toContain("@fast");
+		expect(rows[3]).not.toContain(lowBadge);
+	});
+
 	test("quick-role row resolves its own role level before the model-wide fallback", () => {
 		// `@slow` at max shares its model with `default` at low: the row must
 		// show max (what Enter applies), never default's low.
@@ -329,9 +380,14 @@ describe("ModelBrowser effort badge", () => {
 			...buildBrowserItems([shared]),
 			{ provider: "", id: "@slow", model: shared, selector: "@slow", thinkingLevel: ThinkingLevel.Max },
 		];
-		const rows = renderRows([shared], {
-			default: { model: shared, thinkingLevel: ThinkingLevel.Low, autoSelected: false },
-		}, {}, items);
+		const rows = renderRows(
+			[shared],
+			{
+				default: { model: shared, thinkingLevel: ThinkingLevel.Low, autoSelected: false },
+			},
+			{},
+			items,
+		);
 
 		expect(rows[3]).toContain("@slow");
 		expect(rows[3]).toContain("max");

@@ -102,6 +102,8 @@ export class ModelPickerComponent implements Component {
 	#taskMatchKeys = new Set<string>();
 	#taskModeKeyLabel: string;
 	#taskSelector: string | undefined;
+	/** Session effort for model rows; cleared while Task mode repoints selection. */
+	#sessionThinkingLevel: ConfiguredThinkingLevel | undefined;
 
 	constructor(
 		tui: TUI,
@@ -118,6 +120,7 @@ export class ModelPickerComponent implements Component {
 		this.#currentSelector = options.currentSelector;
 		this.#currentQuickRoleSelector = options.currentQuickRole ? `@${options.currentQuickRole}` : undefined;
 		this.#taskSelector = options.taskSelector;
+		this.#sessionThinkingLevel = options.sessionThinkingLevel;
 		this.#taskModeKeyLabel = options.taskModeKeyLabel ?? "alt+p";
 		if (callbacks.onPickTask) {
 			for (const key of options.taskModeKeys ?? []) addKeyAliases(this.#taskMatchKeys, key);
@@ -268,6 +271,9 @@ export class ModelPickerComponent implements Component {
 	/** Flip between session-model and Task-subagent targets, repointing the highlight. */
 	#toggleTaskMode(): void {
 		this.#taskMode = !this.#taskMode;
+		// Task picks carry no effort: the session level must not badge the
+		// Task-model row as if the spawned task would use it.
+		this.#browser.setSessionThinkingLevel(this.#taskMode ? undefined : this.#sessionThinkingLevel);
 		this.#syncItemsForQuery(this.#browser.query, true);
 		const target = this.#taskMode ? this.#taskSelector : this.#currentSelector;
 		if (target) this.#browser.selectSelector(target);
