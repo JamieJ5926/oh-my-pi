@@ -501,4 +501,48 @@ describe("ModelPicker Task toggle from quick-role mode", () => {
 		expect(onPickRole).not.toHaveBeenCalled();
 		expect(onPick).not.toHaveBeenCalled();
 	});
+	test("@slow query + Task toggle + Enter applies the Task override", () => {
+		// Regression (Codex P2 on PR #11330): a full role name beyond the
+		// bare `@` prefix must not keep filtering the Task view to empty.
+		const taskModel = makeModel("test", "task-model");
+		const sessionModel = makeModel("test", "session-model");
+		const models = [taskModel, sessionModel];
+		const registry = {
+			refresh: async () => {},
+			getError: () => undefined,
+			getAvailable: () => models,
+			getAll: () => models,
+		} as unknown as ModelRegistry;
+		const ui = { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI;
+		const onPick = vi.fn();
+		const onPickRole = vi.fn();
+		const onCancel = vi.fn();
+		const onPickTask = vi.fn();
+		const picker = new ModelPickerComponent(
+			ui,
+			Settings.isolated({}),
+			registry,
+			models.map(model => ({ model })),
+			{ onPick, onPickRole, onPickTask, onCancel },
+			{
+				currentSelector: "test/session-model",
+				quickRoles: [{ role: "slow", model: sessionModel, explicitThinkingLevel: false }],
+				quickRoleOrder: ["slow"],
+				currentQuickRole: "slow",
+				taskModeKeys: ["ctrl+t"],
+				taskSelector: "test/task-model",
+			},
+		);
+
+		for (const ch of "@slow") picker.handleInput(ch);
+		picker.handleInput(String.fromCharCode(20)); // ctrl+t: Task-mode toggle
+
+		expect(picker.render(220).join("\n")).toContain("Switch Task Model");
+
+		picker.handleInput("\n");
+		expect(onPickTask).toHaveBeenCalledTimes(1);
+		expect(onPickTask.mock.calls[0]?.[1]).toBe("test/task-model");
+		expect(onPickRole).not.toHaveBeenCalled();
+		expect(onPick).not.toHaveBeenCalled();
+	});
 });
