@@ -380,6 +380,26 @@ export async function executeCancel(
  * cross-agent kills stay impossible; a bare test/SDK caller (no owner id) may
  * target any sub. Never touches Main, the caller, or advisor transcripts.
  */
+/**
+ * Ancestor cancel authority: the caller may cancel a registration whose
+ * parentId chain reaches the caller, not only a direct child. Intermediate
+ * parents need not be running (a parked or even unregistered midpoint still
+ * confers grandparent authority); a broken link denies. Bounded walk guards
+ * against a corrupt parentId cycle.
+ */
+function isCancelAuthorized(
+	registry: ToolSession["agentRegistry"],
+	parentId: string | undefined,
+	ownerId: string,
+): boolean {
+	let current = parentId;
+	for (let hops = 0; hops < 64 && current; hops += 1) {
+		if (current === ownerId) return true;
+		current = registry?.get(current)?.parentId;
+	}
+	return false;
+}
+
 async function cancelAgentRegistration(
 	session: ToolSession,
 	ownerId: string | undefined,
@@ -393,7 +413,7 @@ async function cancelAgentRegistration(
 	if (id === ownerId) {
 		return { id, status: "not_found", message: `Cannot cancel yourself (${id}).` };
 	}
-	if (ownerId && ref.parentId !== ownerId) {
+	if (ownerId && !isCancelAuthorized(registry, ref.parentId, ownerId)) {
 		return { id, status: "not_found", message: `Agent ${id} was not spawned by you and cannot be cancelled.` };
 	}
 	const lifecycle = session.agentLifecycle?.();

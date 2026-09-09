@@ -326,6 +326,68 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 		expect(fake.disposeCalls()).toBe(0);
 	});
 
+	test("cancel by a grandparent succeeds when the direct parent is parked", async () => {
+		const registry = new AgentRegistry();
+		const lifecycle = new AgentLifecycleManager(registry);
+		const fakeChild = fakeSession();
+		const fakeParent = fakeSession();
+		registry.register({
+			id: "Middle",
+			displayName: "Middle",
+			kind: "sub",
+			parentId: "Main",
+			session: fakeParent.session as never,
+			status: "parked",
+		});
+		registry.register({
+			id: "Grandkid",
+			displayName: "Grandkid",
+			kind: "sub",
+			parentId: "Middle",
+			session: fakeChild.session as never,
+			status: "idle",
+		});
+		lifecycle.adopt("Grandkid", { idleTtlMs: 0 });
+		const tool = new HubTool(createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle }));
+
+		const result = await tool.execute("call", { op: "cancel", ids: ["Grandkid"] });
+
+		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "Grandkid", status: "cancelled" }]);
+		expect(registry.get("Grandkid")).toBeUndefined();
+		expect(fakeChild.disposeCalls()).toBe(1);
+		// The parked middle parent is untouched.
+		expect(registry.get("Middle")).toBeDefined();
+	});
+
+	test("cancel by an unrelated agent is still denied even with a deep chain", async () => {
+		const registry = new AgentRegistry();
+		const lifecycle = new AgentLifecycleManager(registry);
+		const fake = fakeSession();
+		registry.register({
+			id: "Middle",
+			displayName: "Middle",
+			kind: "sub",
+			parentId: "SomeoneElse",
+			session: fake.session as never,
+			status: "idle",
+		});
+		registry.register({
+			id: "Grandkid",
+			displayName: "Grandkid",
+			kind: "sub",
+			parentId: "Middle",
+			session: fake.session as never,
+			status: "idle",
+		});
+		const tool = new HubTool(createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle }));
+
+		const result = await tool.execute("call", { op: "cancel", ids: ["Grandkid"] });
+
+		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "Grandkid", status: "not_found" }]);
+		expect(registry.get("Grandkid")).toBeDefined();
+		expect(fake.disposeCalls()).toBe(0);
+	});
+
 	test("cancel of a truly unknown id still reports not_found", async () => {
 		const registry = new AgentRegistry();
 		const lifecycle = new AgentLifecycleManager(registry);
