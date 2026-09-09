@@ -33,8 +33,8 @@ export type RpcCommand =
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
-	| { id?: string; type: "abort" }
-	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
+	| { id?: string; type: "abort"; reason?: string }
+	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[]; reason?: string }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
 	// State

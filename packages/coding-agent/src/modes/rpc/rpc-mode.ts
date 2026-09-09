@@ -766,6 +766,17 @@ export function requestRpcDialog<T>(
 	return promise;
 }
 /**
+ * Resolves the abort reason for host-sent `abort` / `abort_and_prompt` commands.
+ * A non-empty host-supplied reason rides `session.abort()` verbatim so the
+ * transcript attributes the abort to the host instead of the user; anything
+ * else keeps the historical `USER_INTERRUPT_LABEL` default.
+ */
+export function rpcAbortReason(reason: string | undefined): string {
+	if (typeof reason === "string" && reason.trim() !== "") return reason;
+	return USER_INTERRUPT_LABEL;
+}
+
+/**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
@@ -1165,12 +1176,12 @@ export async function runRpcMode(
 			}
 
 			case "abort": {
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
+				await session.abort({ reason: rpcAbortReason(command.reason) });
 				return success(id, "abort");
 			}
 
 			case "abort_and_prompt": {
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
+				await session.abort({ reason: rpcAbortReason(command.reason) });
 				session
 					.prompt(command.message, { images: command.images })
 					.catch(e => output(error(id, "abort_and_prompt", e.message)));

@@ -610,16 +610,18 @@ export class RpcClient {
 
 	/**
 	 * Abort current operation.
+	 * @param reason - Optional host-supplied abort reason recorded on the
+	 * aborted assistant message instead of the default user-interrupt label.
 	 */
-	async abort(): Promise<void> {
-		await this.#send({ type: "abort" });
+	async abort(reason?: string): Promise<void> {
+		await this.#send({ type: "abort", ...(reason !== undefined ? { reason } : {}) });
 	}
 
 	/**
 	 * Abort current operation and immediately start a new turn with the given message.
 	 */
-	async abortAndPrompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "abort_and_prompt", message, images });
+	async abortAndPrompt(message: string, images?: ImageContent[], reason?: string): Promise<void> {
+		await this.#send({ type: "abort_and_prompt", message, images, ...(reason !== undefined ? { reason } : {}) });
 	}
 
 	/**

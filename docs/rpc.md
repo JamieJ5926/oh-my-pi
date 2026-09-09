@@ -113,9 +113,11 @@ Important edge behavior from runtime:
 - `{ id?, type: "prompt", message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp" }`
 - `{ id?, type: "steer", message: string, images?: ImageContent[] }`
 - `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
-- `{ id?, type: "abort" }`
-- `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
+- `{ id?, type: "abort", reason?: string }`
+- `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[], reason?: string }`
 - `{ id?, type: "new_session", parentSession?: string }`
+
+When `reason` is a non-empty string it is recorded verbatim as the aborted assistant message's `errorMessage` (e.g. `"Interrupted by host (turn replaced)"`) instead of the default `"Interrupted by user"`, so orchestration-driven aborts are not misattributed to the human. When omitted or blank, the default user-interrupt label is kept for compatibility. Non-user reasons do not trigger the Esc-specific advisor auto-resume suppression in `AgentSession.abort()`.
 
 ### Protocol
 
