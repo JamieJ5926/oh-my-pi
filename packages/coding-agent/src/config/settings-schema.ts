@@ -2040,6 +2040,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	escapeAbortDebounceMs: {
+		type: "number",
+		default: 500,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Escape Abort Debounce",
+			description:
+				"Minimum milliseconds between exiting a menu and Esc aborting the model turn (0 disables)",
+		},
+	},
+
 	treeFilterMode: {
 		type: "enum",
 		values: ["default", "no-tools", "user-only", "labeled-only", "all"] as const,

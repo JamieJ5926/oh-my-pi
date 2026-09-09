@@ -169,6 +169,10 @@ export class SelectorController {
 	focusActiveEditorArea(): void {
 		const visible = this.ctx.editorContainer.children[0] ?? this.ctx.editor;
 		this.ctx.ui.setFocus(visible);
+		// Every menu/overlay exit funnels through here: stamp it so a fast
+		// follow-up Esc (the menu-exit keystroke echo, #11187) debounces the
+		// model abort instead of killing the turn.
+		this.ctx.lastMenuExitTime = Date.now();
 	}
 
 	/**

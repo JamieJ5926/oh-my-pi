@@ -229,6 +229,7 @@ export interface InteractiveModeContext {
 	locallySubmittedUserSignatures: Set<string>;
 	lastSigintTime: number;
 	lastEscapeTime: number;
+	lastMenuExitTime: number;
 	/** Owns Esc for every `/mcp test` that is active or whose cancellation hint may still be visible. */
 	mcpTestEscapeHandlers: Set<() => void>;
 	lastLeftTapTime: number;

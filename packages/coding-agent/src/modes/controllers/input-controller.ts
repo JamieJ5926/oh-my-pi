@@ -258,6 +258,11 @@ export class InputController {
 	}
 
 	#abortStreamingTurn(): void {
+		// Debounce the interrupt action, not the key (#11187): an Esc that
+		// exits a menu is often followed by an echo Esc that must not kill
+		// the model turn. 0 disables the window.
+		const windowMs = settings.get("escapeAbortDebounceMs");
+		if (windowMs > 0 && Date.now() - this.ctx.lastMenuExitTime < windowMs) return;
 		void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 	}
 

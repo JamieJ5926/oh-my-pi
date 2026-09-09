@@ -796,6 +796,54 @@ describe("InputController escape behavior", () => {
 		editor.onEscape?.();
 		expect(ctx.showTreeSelector).not.toHaveBeenCalled();
 	});
+
+	it("debounces the abort when Esc follows a menu exit within the window (#11187)", () => {
+		const now = vi.spyOn(Date, "now");
+		const { ctx, editor, spies } = createContext();
+		mutableSessionState(ctx).isStreaming = true;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		now.mockReturnValue(10_000);
+		ctx.lastMenuExitTime = Date.now();
+		now.mockReturnValue(10_200); // 200ms later — inside the 500ms default
+		editor.onEscape?.();
+
+		expect(spies.abort).not.toHaveBeenCalled();
+	});
+
+	it("aborts once the menu-exit debounce window has elapsed (#11187)", () => {
+		const now = vi.spyOn(Date, "now");
+		const { ctx, editor, spies } = createContext();
+		mutableSessionState(ctx).isStreaming = true;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		now.mockReturnValue(10_000);
+		ctx.lastMenuExitTime = Date.now();
+		now.mockReturnValue(10_600); // 600ms later — outside the 500ms default
+		editor.onEscape?.();
+
+		expect(spies.abort).toHaveBeenCalledTimes(1);
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+	});
+
+	it("disables the menu-exit debounce when the window is 0 (#11187)", () => {
+		Settings.instance.override("escapeAbortDebounceMs", 0);
+		const now = vi.spyOn(Date, "now");
+		const { ctx, editor, spies } = createContext();
+		mutableSessionState(ctx).isStreaming = true;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		now.mockReturnValue(10_000);
+		ctx.lastMenuExitTime = Date.now();
+		now.mockReturnValue(10_100); // 100ms later — would debounce unless disabled
+		editor.onEscape?.();
+
+		expect(spies.abort).toHaveBeenCalledTimes(1);
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+	});
 });
 
 describe("InputController Ctrl+C behavior", () => {

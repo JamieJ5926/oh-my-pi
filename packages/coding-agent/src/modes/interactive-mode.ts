@@ -691,6 +691,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	optimisticSkillMessagePending = false;
 	lastSigintTime = 0;
 	lastEscapeTime = 0;
+	lastMenuExitTime = 0;
 	/** Owns Esc for every `/mcp test` that is active or whose cancellation hint may still be visible. */
 	mcpTestEscapeHandlers = new Set<() => void>();
 	lastLeftTapTime = 0;
