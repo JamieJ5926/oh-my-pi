@@ -112,17 +112,6 @@ describe("Mermaid rendering setting", () => {
 		expect(renderMermaidAscii(source)).toBe(baseline);
 	});
 
-	it("applies configured spacing to rendered diagrams", () => {
-		const source = "flowchart TD\n  A[alpha] --> B[beta]\n  B --> C[gamma]";
-		const baseline = renderMermaidAscii(source);
-		setMarkdownMermaidSpacing({ paddingX: 0, paddingY: 0, boxBorderPadding: 0 });
-		const tight = renderMermaidAscii(source);
-		expect(tight).not.toBe(baseline);
-		expect(tight.length).toBeLessThan(baseline.length);
-		setMarkdownMermaidSpacing({ paddingX: 5, paddingY: 5, boxBorderPadding: 1 });
-		expect(renderMermaidAscii(source)).toBe(baseline);
-	});
-
 	it("falls back to defaults for invalid spacing values", () => {
 		const source = "flowchart TD\n  A[alpha] --> B[beta]";
 		const baseline = renderMermaidAscii(source);

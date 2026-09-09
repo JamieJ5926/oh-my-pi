@@ -47,6 +47,7 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		applyCwdChange,
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
+		rebuildChatFromMessages: vi.fn(),
 		ui: { requestRender: vi.fn() },
 		present,
 		shutdown,
