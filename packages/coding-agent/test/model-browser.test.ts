@@ -307,21 +307,37 @@ describe("ModelBrowser effort badge", () => {
 		expect(rows[2]).not.toContain("high");
 		expect(rows[3]).not.toContain("high");
 	});
-	test("non-active row hides a derived defaultThinkingLevel the picker would not apply", () => {
+	test("picker hides a derived defaultThinkingLevel it would not apply", () => {
 		// P2 (PR #11330): an unsuffixed default selector with
 		// `defaultThinkingLevel: high` resolves a high fallback, but Enter in
 		// the Alt+P picker preserves the session effort (low/auto) instead.
-		// The row must stay unbadged; an explicit `:high` suffix still badges.
+		// The picker row must stay unbadged; an explicit `:high` suffix still badges.
 		const derived = makeModel("openai", "gpt-5");
 		const explicit = makeModel("openai", "gpt-4");
 		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
-		const rows = renderRows([derived, explicit], {
-			default: { model: derived, thinkingLevel: ThinkingLevel.High, autoSelected: false, explicitThinkingLevel: false },
-			slow: { model: explicit, thinkingLevel: ThinkingLevel.High, autoSelected: false, explicitThinkingLevel: true },
-		});
+		const rows = renderRows(
+			[derived, explicit],
+			{
+				default: { model: derived, thinkingLevel: ThinkingLevel.High, autoSelected: false, explicitThinkingLevel: false },
+				slow: { model: explicit, thinkingLevel: ThinkingLevel.High, autoSelected: false, explicitThinkingLevel: true },
+			},
+			{ suppressDerivedThinkingLevels: true },
+		);
 
 		expect(rows[2]).not.toContain(highBadge);
 		expect(rows[3]).toContain(highBadge);
+	});
+
+	test("hub keeps a derived defaultThinkingLevel badge", () => {
+		// The shared /model hub applies role configuration, so the default
+		// row keeps the derived effort badge the picker hides.
+		const derived = makeModel("openai", "gpt-5");
+		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
+		const rows = renderRows([derived], {
+			default: { model: derived, thinkingLevel: ThinkingLevel.High, autoSelected: false, explicitThinkingLevel: false },
+		});
+
+		expect(rows[2]).toContain(highBadge);
 	});
 
 	test("selected row renders the session effort with no configured role behind it", () => {

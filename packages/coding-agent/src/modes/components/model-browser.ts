@@ -458,6 +458,15 @@ export interface ModelBrowserOptions {
 	 */
 	sessionThinkingLevel?: ConfiguredThinkingLevel;
 	/**
+	 * Suppress derived (non-explicit) fallback levels in role badges. The
+	 * Alt+P session picker sets this: applying a model without an explicit
+	 * `:level` suffix leaves the session effort untouched, so a derived
+	 * `defaultThinkingLevel` must not render as a fallback. Hosts that apply
+	 * role configuration (the shared /model hub) leave it false so derived
+	 * badges are preserved. Default false.
+	 */
+	suppressDerivedThinkingLevels?: boolean;
+	/**
 	 * Hide every effort badge. Hosts set this when the rows pick something
 	 * effortless — e.g. the Task-subagent target, whose agent runs its own
 	 * configured effort regardless of session or role levels.
@@ -510,6 +519,8 @@ export class ModelBrowser implements Component {
 	#sessionThinkingLevel: ConfiguredThinkingLevel | undefined;
 	/** False suppresses every effort badge (Task-subagent target mode). */
 	#showThinkingBadges = true;
+	/** True suppresses derived fallback levels; set by the Alt+P picker only. */
+	#suppressDerivedThinkingLevels = false;
 
 	/** Enter or click-on-selected. */
 	onActivate?: (item: ModelBrowserItem) => void;
@@ -522,12 +533,17 @@ export class ModelBrowser implements Component {
 		this.#settings = settings;
 		this.#showProvider = options.showProvider ?? true;
 		const tokens = options.currentContextTokens ?? 0;
-		this.#currentContextTokens = Number.isFinite(tokens) && tokens > 0 ? Math.floor(tokens) : 0;
 		this.#markOverContext = options.markOverContext ?? false;
 		this.#emptyText = options.emptyText;
 		this.#sessionThinkingLevel = options.sessionThinkingLevel;
 		this.#showThinkingBadges = options.showThinkingBadges ?? true;
+		this.#suppressDerivedThinkingLevels = options.suppressDerivedThinkingLevels ?? false;
 		this.#syncAffinity();
+	}
+
+	/** Picker-only: hide derived fallback levels without touching other badges. */
+	setSuppressDerivedThinkingLevels(suppress: boolean): void {
+		this.#suppressDerivedThinkingLevels = suppress;
 	}
 
 	/** Override the session effort rendered on the session-model row (undefined clears it). */
@@ -965,10 +981,11 @@ export class ModelBrowser implements Component {
 			if (!assignment || assignment.autoSelected) return;
 			if (!modelsAreEqual(assignment.model, item.model)) return;
 			if (getRoleInfo(role, this.#settings).hidden) return;
-			// Derived levels (e.g. `defaultThinkingLevel` with no `:level`
-			// suffix) are not applied by the Alt+P picker, so they must not
-			// render as a fallback. Absent means explicit (predates the flag).
-			if (assignment.explicitThinkingLevel === false) return;
+		// Picker-only suppression: derived levels (e.g. `defaultThinkingLevel`
+		// with no `:level` suffix) are not applied by the Alt+P picker, so
+		// the picker hides them as a fallback. The hub applies role
+		// configuration and keeps them. Absent means explicit (predates the flag).
+		if (this.#suppressDerivedThinkingLevels && assignment.explicitThinkingLevel === false) return;
 			if (assignment.thinkingLevel === ThinkingLevel.Inherit) return;
 			if (!levels.has(assignment.thinkingLevel)) levels.set(assignment.thinkingLevel, role);
 		};

@@ -135,6 +135,7 @@ export class ModelPickerComponent implements Component {
 			markOverContext: true,
 			emptyText: () => (this.#roleMode ? "  No quick roles in the Ctrl+P cycle" : undefined),
 			sessionThinkingLevel: options.sessionThinkingLevel,
+			suppressDerivedThinkingLevels: true,
 		});
 		this.#browser.onActivate = item => {
 			const quickRole = this.#quickRoles.get(item.selector);
