@@ -1,9 +1,11 @@
 import { beforeAll, describe, expect, type Mock, test, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { formatThinkingLevelBadge } from "@oh-my-pi/pi-coding-agent/modes/components/model-browser";
 import { ModelPickerComponent, type ModelPickerOptions } from "@oh-my-pi/pi-coding-agent/modes/components/model-picker";
 import { resolveSegmentPalette } from "@oh-my-pi/pi-coding-agent/modes/components/segment-track";
 import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -52,6 +54,7 @@ interface PickerHarness {
 function createPicker(options: {
 	models: Model[] | (() => Model[]);
 	scoped?: boolean;
+	scopedModels?: Model[];
 	settings?: Settings;
 	registry?: RegistryOverrides;
 	picker?: ModelPickerOptions;
@@ -73,7 +76,7 @@ function createPicker(options: {
 		ui,
 		settings,
 		registry,
-		options.scoped ? modelsFn().map(model => ({ model })) : [],
+		options.scoped || options.scopedModels ? (options.scopedModels ?? modelsFn()).map(model => ({ model })) : [],
 		{ onPick, onPickRole, onCancel },
 		options.picker ?? {},
 	);
@@ -250,5 +253,47 @@ describe("ModelPicker", () => {
 
 		picker.handleInput(ESC);
 		expect(onCancel).toHaveBeenCalledTimes(1);
+	});
+	test("scoped row hides effort its unqualified selector resolves away from at activation", () => {
+		// P2 (PR #11330, thread 3968076057): --models scopes the picker to
+		// providerA/shared-x while a configured unqualified `shared-x:high`
+		// selector resolves to providerB in the full available catalog, so
+		// Enter (resolveTemporaryModelThinkingLevel over getAvailable())
+		// applies no effort to the scoped row. The row must not advertise it.
+		const scoped = makeModel("providerA", "shared-x");
+		const other = makeModel("providerB", "shared-x");
+		const settings = Settings.isolated({
+			modelRoles: { default: "shared-x:high" },
+			modelProviderOrder: ["providerB", "providerA"],
+		});
+		const { picker } = createPicker({
+			models: [scoped, other],
+			scopedModels: [scoped],
+			settings,
+		});
+		const rendered = normalize(picker.render(220));
+		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
+		expect(rendered).toContain("providerA/shared-x");
+		expect(rendered).not.toContain(highBadge);
+	});
+
+	test("scoped row keeps effort its qualified selector still wins at activation", () => {
+		// Same scope, but the configured selector names the scoped provider,
+		// so activation applies high and the row must advertise it.
+		const scoped = makeModel("providerA", "shared-x");
+		const other = makeModel("providerB", "shared-x");
+		const settings = Settings.isolated({
+			modelRoles: { default: "providerA/shared-x:high" },
+			modelProviderOrder: ["providerB", "providerA"],
+		});
+		const { picker } = createPicker({
+			models: [scoped, other],
+			scopedModels: [scoped],
+			settings,
+		});
+		const rendered = normalize(picker.render(220));
+		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
+		expect(rendered).toContain("providerA/shared-x");
+		expect(rendered).toContain(highBadge);
 	});
 });

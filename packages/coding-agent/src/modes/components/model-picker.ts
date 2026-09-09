@@ -193,8 +193,21 @@ export class ModelPickerComponent implements Component {
 			}
 		}
 
-		const allModels = this.#scopedModels.length > 0 ? models : this.#registry.getAll();
-		const roles = resolveRoleAssignments(this.#settings, allModels, models);
+		// Badge parity with resolveTemporaryModelThinkingLevel (P2 #11330):
+		// Enter resolves role values against getAvailable(), so badges must
+		// too. Resolving against the scoped list (or getAll()) lets an
+		// unqualified selector match the scoped row here while resolving to
+		// another provider at activation, advertising effort the switch will
+		// not apply. Displayed rows stay scoped; only the badge lookup uses
+		// the activation candidate set.
+		let activationModels: ReadonlyArray<Model>;
+		try {
+			activationModels = this.#registry.getAvailable();
+		} catch {
+			activationModels = models;
+		}
+		if (activationModels.length === 0) activationModels = models;
+		const roles = resolveRoleAssignments(this.#settings, activationModels, models);
 		const storage = this.#settings.getStorage();
 		const mruOrder = storage?.getModelUsageOrder() ?? [];
 		this.#modelItems = buildBrowserItems(models);
