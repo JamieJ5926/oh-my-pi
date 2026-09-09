@@ -114,7 +114,6 @@ export function testSetSessionShutdownHandlerTimeoutMs(timeoutMs: number): void 
 	sessionShutdownHandlerTimeoutMs = timeoutMs;
 }
 
-
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
 const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
 
@@ -941,9 +940,10 @@ export class ExtensionRunner {
 				if (!tool) return;
 				try {
 					const scope = this.#toolRegistrationScope.getStore();
-					const registrationSignal = scope && !scope.closed
-						? scope.signal
-						: AbortSignal.timeout(this.#handlerTimeoutMsForEvent("tool_registration"));
+					const registrationSignal =
+						scope && !scope.closed
+							? scope.signal
+							: AbortSignal.timeout(this.#handlerTimeoutMsForEvent("tool_registration"));
 					const pending = listener(tool, registrationSignal);
 					if (pending) trackRegistration(pending);
 				} catch (error) {
@@ -1480,7 +1480,7 @@ export class ExtensionRunner {
 	 *
 	 * Each handler is bounded by `extensionHandlers.toolCallTimeoutMs` (default
 	 * 30s), falling back to `extensionHandlers.timeoutMs`. This matches the timeout policy already
-	 * other handler routed through `#runHandlerWithTimeout`; without it a single
+	 * applied to `emitToolResult` and every other handler routed through `#runHandlerWithTimeout`; without it a single
 	 * hung extension (unresolved `await`, network call with no timeout) would
 	 * park `ExtensionToolWrapper.execute` indefinitely and freeze tool
 	 * dispatch — see issue #3948.
