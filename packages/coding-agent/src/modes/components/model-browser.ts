@@ -29,6 +29,7 @@ import type { Settings } from "../../config/settings";
 import type { ModelPerfStats } from "../../session/agent-storage";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../../thinking";
 import { thinkingLevelGlyph as sharedThinkingLevelGlyph } from "../../tools/render-utils";
+import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata, parseConfiguredThinkingLevel } from "../../thinking";
 import { type ThemeColor, theme } from "../theme/theme";
 import {
 	matchesSelectCancel,
@@ -868,6 +869,32 @@ export class ModelBrowser implements Component {
 		return index;
 	}
 
+	/** Resolved effort badge for `item`'s model (` ◉ max`), or empty when no configured role pins a level. */
+	#thinkingBadgeFor(item: ModelBrowserItem): string {
+		const seen = new Set<string>();
+		const match = (role: string): string => {
+			if (seen.has(role)) return "";
+			seen.add(role);
+			const assignment = this.#roles[role];
+			if (!assignment || assignment.autoSelected) return "";
+			if (!modelsAreEqual(assignment.model, item.model)) return "";
+			if (getRoleInfo(role, this.#settings).hidden) return "";
+			if (assignment.thinkingLevel === ThinkingLevel.Inherit) return "";
+			const glyph = thinkingLevelGlyph(assignment.thinkingLevel);
+			const label = getConfiguredThinkingLevelMetadata(assignment.thinkingLevel).label;
+			return ` ${theme.fg("dim", glyph ? `${glyph} ${label}` : label)}`;
+		};
+		for (const role of MODEL_ROLE_IDS) {
+			const badge = match(role);
+			if (badge) return badge;
+		}
+		for (const role in this.#roles) {
+			const badge = match(role);
+			if (badge) return badge;
+		}
+		return "";
+	}
+
 	/** Measured TPS/TTFT, falling back to the catalog TPS as an estimated `~118t/s`. */
 	#perfCell(item: ModelBrowserItem, mode: PerfMode): string {
 		if (mode === "off") return "";
@@ -907,10 +934,11 @@ export class ModelBrowser implements Component {
 				: item.id;
 		const currentMark =
 			item.selector === this.#currentSelector ? ` ${theme.fg("success", theme.status.enabled)}` : "";
+		const thinkingBadge = this.#thinkingBadgeFor(item);
 		const overLimit = overContext
 			? ` ${theme.status.disabled} context>${formatNumber(item.model.contextWindow ?? 0).toLowerCase()}`
 			: "";
-		let left = `${prefix}${providerPrefix}${name}${currentMark}${overLimit}`;
+		let left = `${prefix}${providerPrefix}${name}${currentMark}${thinkingBadge}${overLimit}`;
 
 		// Metric columns collapse independently when no visible row has data.
 		const intelligenceCol =

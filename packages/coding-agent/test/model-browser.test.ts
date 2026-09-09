@@ -238,3 +238,38 @@ describe("ModelBrowser native model metadata", () => {
 		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · free per M");
 	});
 });
+
+describe("ModelBrowser effort badge", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	function renderRows(models: Model[], roles: RoleAssignments): string[] {
+		const browser = new ModelBrowser(Settings.isolated({}));
+		browser.setRoles(roles);
+		browser.setItems(buildBrowserItems(models));
+		return browser.render(160).map(line => Bun.stripANSI(line));
+	}
+
+	test("row shows the resolved effort label next to a role-assigned model", () => {
+		const assigned = makeModel("openai", "gpt-5");
+		const rows = renderRows([assigned, makeModel("openai", "gpt-4")], {
+			default: { model: assigned, thinkingLevel: ThinkingLevel.High, autoSelected: false },
+		});
+
+		expect(rows[2]).toContain("high");
+		expect(rows[3]).not.toContain("high");
+	});
+
+	test("row shows no badge for inherit levels or auto-selected roles", () => {
+		const inherited = makeModel("openai", "gpt-5");
+		const auto = makeModel("openai", "gpt-4");
+		const rows = renderRows([inherited, auto], {
+			default: { model: inherited, thinkingLevel: ThinkingLevel.Inherit, autoSelected: false },
+			slow: { model: auto, thinkingLevel: ThinkingLevel.High, autoSelected: true },
+		});
+
+		expect(rows[2]).not.toContain("high");
+		expect(rows[3]).not.toContain("high");
+	});
+});
