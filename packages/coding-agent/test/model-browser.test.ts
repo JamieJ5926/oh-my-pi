@@ -16,6 +16,7 @@ import {
 import { ModelPickerComponent } from "@oh-my-pi/pi-coding-agent/modes/components/model-picker";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 /** Optional presentation metadata a catalog or discovery source may attach. */
@@ -318,6 +319,24 @@ describe("ModelBrowser effort badge", () => {
 
 		expect(rows[2]).toContain("high");
 		expect(rows[2]).not.toContain("low");
+	});
+
+	test("selected row in auto mode renders auto, not the resolved concrete level", () => {
+		// The picker receives the configured selector (`auto`), never the
+		// resolved concrete level, so reopening the picker labels the active
+		// row as auto even after classification resolved a concrete level.
+		const assigned = makeModel("openai", "gpt-5");
+		const rows = renderRows(
+			[assigned],
+			{},
+			{
+				currentSelector: "openai/gpt-5",
+				sessionThinkingLevel: AUTO_THINKING,
+			},
+		);
+
+		expect(rows[2]).toContain("auto");
+		expect(rows[2]).not.toContain("medium");
 	});
 
 	test("one model backing roles at different levels renders role-attributed badges", () => {
