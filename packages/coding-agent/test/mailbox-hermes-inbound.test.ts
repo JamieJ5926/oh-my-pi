@@ -43,6 +43,55 @@ describe("hermes-inbound", () => {
 		expect(() => formatMailboxLine({ source: "s", kind: "task", content: " " })).toThrow("empty content");
 	});
 
+	it("emits the project suffix and treats blank project as absent", () => {
+		const withProj = formatMailboxLine(
+			{ source: "hermes/telegram", kind: "task", content: "c", project: "omp-owned" },
+			new Date(2026, 8, 9, 10, 5),
+		);
+		expect(withProj).toBe("- [ ] 2026-09-09 10:05 · hermes/telegram · **task/omp-owned** — c");
+		const blankProj = formatMailboxLine(
+			{ source: "hermes/telegram", kind: "task", content: "c", project: "   " },
+			new Date(2026, 8, 9, 10, 5),
+		);
+		expect(blankProj).toBe("- [ ] 2026-09-09 10:05 · hermes/telegram · **task** — c");
+	});
+
+	it("prefers event.at over now and rejects an invalid at", () => {
+		const line = formatMailboxLine(
+			{ source: "s", kind: "note", content: "c", at: new Date(2026, 0, 2, 3, 4) },
+			new Date(2026, 8, 9, 10, 5),
+		);
+		expect(line).toStartWith("- [ ] 2026-01-02 03:04 ·");
+		expect(() => formatMailboxLine({ source: "s", kind: "note", content: "c", at: new Date(Number.NaN) })).toThrow(
+			"invalid at",
+		);
+	});
+
+	it("accepts uppercase and padded kinds", () => {
+		const line = formatMailboxLine(
+			{ source: "s", kind: "  Idea ", content: "c" },
+			new Date(2026, 8, 9, 10, 5),
+		);
+		expect(line).toContain("**idea**");
+	});
+
+	it("honors the HERMES_MAILBOX_FILE override and restores env", () => {
+		const savedFile = process.env.HERMES_MAILBOX_FILE;
+		const savedHome = process.env.HOME;
+		try {
+			process.env.HERMES_MAILBOX_FILE = "/tmp/fixture-MAILBOX.md";
+			expect(resolveMailboxPath()).toBe("/tmp/fixture-MAILBOX.md");
+			delete process.env.HERMES_MAILBOX_FILE;
+			process.env.HOME = "/tmp/fakehome";
+			expect(resolveMailboxPath()).toBe("/tmp/fakehome/Obsidean/00-Inbox/MAILBOX.md");
+		} finally {
+			if (savedFile === undefined) delete process.env.HERMES_MAILBOX_FILE;
+			else process.env.HERMES_MAILBOX_FILE = savedFile;
+			if (savedHome === undefined) delete process.env.HOME;
+			else process.env.HOME = savedHome;
+		}
+	});
+
 	it("resolves the real inbox path without assuming it", () => {
 		delete process.env.HERMES_MAILBOX_FILE;
 		expect(resolveMailboxPath()).toBe(`${process.env.HOME}/Obsidean/00-Inbox/MAILBOX.md`);

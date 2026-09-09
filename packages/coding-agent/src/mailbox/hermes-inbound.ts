@@ -10,14 +10,15 @@
 
 export const MAILBOX_SEPARATOR = "---";
 
-export const DEFAULT_MAILBOX_PATH = (() => {
+/** Default inbox path, resolved lazily so a later HOME change is honored. */
+export function defaultMailboxPath(): string {
 	const home = process.env.HOME ?? "~";
 	return `${home}/Obsidean/00-Inbox/MAILBOX.md`;
-})();
+}
 
 /** Resolve the real inbox path read-only (env override is for fixtures). */
 export function resolveMailboxPath(): string {
-	return process.env.HERMES_MAILBOX_FILE ?? DEFAULT_MAILBOX_PATH;
+	return process.env.HERMES_MAILBOX_FILE ?? defaultMailboxPath();
 }
 
 const KINDS = ["task", "idea", "message", "note"] as const;
@@ -65,8 +66,11 @@ export function formatMailboxLine(event: HermesInboundEvent, now = new Date()): 
 	if (!source) throw new Error("hermes-inbound: empty source");
 	const content = oneLine(event.content);
 	if (!content) throw new Error("hermes-inbound: empty content");
-	const tag = event.project ? `**${kind}/${oneLine(event.project)}**` : `**${kind}**`;
-	return `- [ ] ${stamp(event.at ?? now)} · ${source} · ${tag} — ${content}`;
+	const project = event.project === undefined ? "" : oneLine(event.project);
+	const tag = project ? `**${kind}/${project}**` : `**${kind}**`;
+	const at = event.at ?? now;
+	if (Number.isNaN(at.getTime())) throw new Error("hermes-inbound: invalid at");
+	return `- [ ] ${stamp(at)} · ${source} · ${tag} — ${content}`;
 }
 
 /**
