@@ -10,9 +10,12 @@
 
 export const MAILBOX_SEPARATOR = "---";
 
+// node:os import for the HOME-unset fallback (no fs API expands a literal ~).
+import { homedir } from "node:os";
+
 /** Default inbox path, resolved lazily so a later HOME change is honored. */
 export function defaultMailboxPath(): string {
-	const home = process.env.HOME ?? "~";
+	const home = process.env.HOME ?? homedir();
 	return `${home}/Obsidean/00-Inbox/MAILBOX.md`;
 }
 
@@ -20,8 +23,7 @@ export function defaultMailboxPath(): string {
 export function resolveMailboxPath(): string {
 	return process.env.HERMES_MAILBOX_FILE ?? defaultMailboxPath();
 }
-
-const KINDS = ["task", "idea", "message", "note"] as const;
+const KINDS = ["task", "idea", "message", "note", "feature", "bug", "project", "decision"] as const;
 export type MailboxKind = (typeof KINDS)[number];
 
 export interface HermesInboundEvent {
@@ -55,12 +57,13 @@ function oneLine(s: string): string {
 /**
  * Format one kind-tagged mailbox line:
  * `- [ ] YYYY-MM-DD HH:MM · <source> · **<kind>** — <content>`
- * Throws on unknown kind, empty source, or empty content.
+ * Kinds per the mailbox skill: task, idea, message, note, feature, bug,
+ * project, decision. Throws on unknown kind, empty source, or empty content.
  */
 export function formatMailboxLine(event: HermesInboundEvent, now = new Date()): string {
 	const kind = event.kind.trim().toLowerCase();
 	if (!KINDS.some((k) => k === kind)) {
-		throw new Error(`hermes-inbound: unknown kind ${JSON.stringify(event.kind)} (want task|idea|message|note)`);
+		throw new Error(`hermes-inbound: unknown kind ${JSON.stringify(event.kind)} (want ${KINDS.join("|")})`);
 	}
 	const source = oneLine(event.source);
 	if (!source) throw new Error("hermes-inbound: empty source");
@@ -75,12 +78,16 @@ export function formatMailboxLine(event: HermesInboundEvent, now = new Date()): 
 
 /**
  * Insert one line newest-first under the mailbox separator without
- * rewriting existing lines. When no `---` separator exists (as in the
- * live inbox today), the line goes at the top of the file.
+ * rewriting existing lines. Doctrine (mailbox skill) places entries under
+ * the `---` separator, but the live inbox observed 2026-09-09 carries no
+ * separator, so: with a separator, insert under it; without one, insert
+ * above the first entry line so a doctrine header stays on top.
  */
 export function insertMailboxLine(fileText: string, line: string): string {
 	const lines = fileText.split("\n");
 	const sep = lines.findIndex((l) => l.trim() === MAILBOX_SEPARATOR);
-	if (sep === -1) return [line, ...lines].join("\n");
-	return [...lines.slice(0, sep + 1), line, ...lines.slice(sep + 1)].join("\n");
+	if (sep !== -1) return [...lines.slice(0, sep + 1), line, ...lines.slice(sep + 1)].join("\n");
+	const firstEntry = lines.findIndex((l) => /^- \[[ x]\]/.test(l));
+	if (firstEntry === -1) return [line, ...lines].join("\n");
+	return [...lines.slice(0, firstEntry), line, ...lines.slice(firstEntry)].join("\n");
 }

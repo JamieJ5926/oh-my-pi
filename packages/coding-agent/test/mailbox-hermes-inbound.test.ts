@@ -30,15 +30,28 @@ describe("hermes-inbound", () => {
 		expect(rows.slice(3)).toEqual(FIXTURE.split("\n").slice(2));
 	});
 
-	it("prepends at top when no separator exists", () => {
+	it("inserts above the first entry when a header precedes a missing separator", () => {
+		const body = ["doctrine header, no separator", "- [ ] 2026-09-04 21:12 · coord · **message** — old one"].join("\n");
+		const line = "- [ ] 2026-09-09 10:05 · hermes/discord · **note** — fresh";
+		const rows = insertMailboxLine(body, line).split("\n");
+		expect(rows[0]).toBe("doctrine header, no separator");
+		expect(rows[1]).toBe(line);
+		expect(rows[2]).toContain("old one");
+	});
+
+	it("prepends at top when entries start at line 0 (live-inbox shape)", () => {
 		const body = "- [ ] 2026-09-04 21:12 · coord · **message** — old one";
 		const out = insertMailboxLine(body, "- [ ] 2026-09-09 10:05 · hermes/discord · **note** — fresh");
 		expect(out.split("\n")[0]).toContain("hermes/discord");
 		expect(out).toContain(body);
 	});
 
-	it("rejects unknown kinds and empty fields", () => {
-		expect(() => formatMailboxLine({ source: "s", kind: "bug", content: "c" })).toThrow("unknown kind");
+	it("accepts all mailbox-skill kinds and rejects the rest", () => {
+		for (const kind of ["task", "idea", "message", "note", "feature", "bug", "project", "decision"]) {
+			const line = formatMailboxLine({ source: "s", kind, content: "c" }, new Date(2026, 8, 9, 10, 5));
+			expect(line).toContain(`**${kind}**`);
+		}
+		expect(() => formatMailboxLine({ source: "s", kind: "alert", content: "c" })).toThrow("unknown kind");
 		expect(() => formatMailboxLine({ source: " ", kind: "task", content: "c" })).toThrow("empty source");
 		expect(() => formatMailboxLine({ source: "s", kind: "task", content: " " })).toThrow("empty content");
 	});
@@ -92,8 +105,18 @@ describe("hermes-inbound", () => {
 		}
 	});
 
-	it("resolves the real inbox path without assuming it", () => {
-		delete process.env.HERMES_MAILBOX_FILE;
-		expect(resolveMailboxPath()).toBe(`${process.env.HOME}/Obsidean/00-Inbox/MAILBOX.md`);
+	it("resolves the default path from the live HOME with save and restore", () => {
+		const savedFile = process.env.HERMES_MAILBOX_FILE;
+		const savedHome = process.env.HOME;
+		try {
+			delete process.env.HERMES_MAILBOX_FILE;
+			process.env.HOME = "/Users/jamie";
+			expect(resolveMailboxPath()).toBe("/Users/jamie/Obsidean/00-Inbox/MAILBOX.md");
+		} finally {
+			if (savedFile === undefined) delete process.env.HERMES_MAILBOX_FILE;
+			else process.env.HERMES_MAILBOX_FILE = savedFile;
+			if (savedHome === undefined) delete process.env.HOME;
+			else process.env.HOME = savedHome;
+		}
 	});
 });
