@@ -766,15 +766,63 @@ export function requestRpcDialog<T>(
 	return promise;
 }
 /**
- * Resolves the abort reason for host-sent `abort` / `abort_and_prompt` commands.
- * A non-empty host-supplied reason rides `session.abort()` verbatim so the
- * transcript attributes the abort to the host instead of the user; anything
- * else keeps the historical `USER_INTERRUPT_LABEL` default.
+ * Max host-supplied abort reason length. The reason persists into the session
+ * transcript/JSONL and stays model-visible, so it is truncated rather than
+ * passed through unbounded.
  */
-export function rpcAbortReason(reason: string | undefined): string {
-	if (typeof reason === "string" && reason.trim() !== "") return reason;
-	return USER_INTERRUPT_LABEL;
+export const RPC_ABORT_REASON_MAX_LENGTH = 200;
+
+export interface RpcAbortResolution {
+	/** Display text for `session.abort()`; the historical default when the host sends none. */
+	reason: string;
+	/** True when the host supplied a non-empty reason: lifecycle behaves like a
+	 *  user interrupt (advisor suppression, silent consume) while `reason`
+	 *  keeps the host attribution text for display. */
+	hostInterrupt: boolean;
 }
+
+/**
+ * Resolves a host-sent `abort` / `abort_and_prompt` reason. A non-empty
+ * host-supplied reason rides `session.abort()` (trimmed, length-bounded) so the
+ * transcript attributes the abort to the host instead of the user; anything
+ * else keeps the historical `USER_INTERRUPT_LABEL` default with no host flag.
+ */
+export function resolveRpcAbort(reason: string | undefined): RpcAbortResolution {
+	if (typeof reason === "string" && reason.trim() !== "") {
+		return { reason: reason.trim().slice(0, RPC_ABORT_REASON_MAX_LENGTH), hostInterrupt: true };
+	}
+	return { reason: USER_INTERRUPT_LABEL, hostInterrupt: false };
+}
+
+/**
+ * Executes a host-sent `abort` / `abort_and_prompt` command against the
+ * session. Extracted from the dispatch cases so the wiring (reason mapping,
+ * host-interrupt flag, replacement-prompt scheduling) is directly testable.
+ */
+export async function handleRpcAbort(
+	session: Pick<AgentSession, "abort" | "prompt">,
+	command: Extract<RpcCommand, { type: "abort" | "abort_and_prompt" }>,
+	output: RpcOutput,
+): Promise<RpcResponse> {
+	const resolved = resolveRpcAbort(command.reason);
+	await session.abort({ reason: resolved.reason, hostInterrupt: resolved.hostInterrupt });
+	if (command.type === "abort") {
+		return { id: command.id, type: "response", command: "abort", success: true };
+	}
+	session
+		.prompt(command.message, { images: command.images })
+		.catch((e: unknown) =>
+			output({
+				id: command.id,
+				type: "response",
+				command: "abort_and_prompt",
+				success: false,
+				error: e instanceof Error ? e.message : String(e),
+			}),
+		);
+	return { id: command.id, type: "response", command: "abort_and_prompt", success: true };
+}
+
 
 /**
  * Run in RPC mode.
@@ -1176,16 +1224,11 @@ export async function runRpcMode(
 			}
 
 			case "abort": {
-				await session.abort({ reason: rpcAbortReason(command.reason) });
-				return success(id, "abort");
+				return handleRpcAbort(session, command, output);
 			}
 
 			case "abort_and_prompt": {
-				await session.abort({ reason: rpcAbortReason(command.reason) });
-				session
-					.prompt(command.message, { images: command.images })
-					.catch(e => output(error(id, "abort_and_prompt", e.message)));
-				return success(id, "abort_and_prompt");
+				return handleRpcAbort(session, command, output);
 			}
 
 			case "new_session":

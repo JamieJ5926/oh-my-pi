@@ -40,6 +40,7 @@ import type {
 	RpcSubagentSnapshot,
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
+import { buildRpcAbortAndPromptCommand, buildRpcAbortCommand } from "./rpc-types";
 
 /** Distributive Omit that works with union types */
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
@@ -614,14 +615,14 @@ export class RpcClient {
 	 * aborted assistant message instead of the default user-interrupt label.
 	 */
 	async abort(reason?: string): Promise<void> {
-		await this.#send({ type: "abort", ...(reason !== undefined ? { reason } : {}) });
+		await this.#send(buildRpcAbortCommand(reason));
 	}
 
 	/**
 	 * Abort current operation and immediately start a new turn with the given message.
 	 */
 	async abortAndPrompt(message: string, images?: ImageContent[], reason?: string): Promise<void> {
-		await this.#send({ type: "abort_and_prompt", message, images, ...(reason !== undefined ? { reason } : {}) });
+		await this.#send(buildRpcAbortAndPromptCommand(message, images, reason));
 	}
 
 	/**

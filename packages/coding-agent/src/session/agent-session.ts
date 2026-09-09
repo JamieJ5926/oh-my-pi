@@ -7478,14 +7478,24 @@ export class AgentSession {
 		reason?: string;
 		/** Internal `/compact` startup keeps the manual-compaction marker alive while aborting the active turn. */
 		preserveCompaction?: boolean;
+		/**
+		 * Host-initiated interrupt (RPC `abort`/`abort_and_prompt` carrying a host
+		 * reason). Behaves like a user interrupt for lifecycle purposes — advisor
+		 * auto-resume suppression, queued advisor-card extraction, and the label
+		 * forwarded into in-flight compaction/handoff cancellations so their
+		 * silent-consume predicates hold — while `reason` keeps the host
+		 * attribution text for display.
+		 */
+		hostInterrupt?: boolean;
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
+		const interruptLike = userInterrupt || options?.hostInterrupt === true;
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
-		if (userInterrupt) this.#advisors.autoResumeSuppressed = true;
+		if (interruptLike) this.#advisors.autoResumeSuppressed = true;
 		// Pull advisor concerns out of the steer/follow-up queues before any await so
 		// the post-abort stranded-message drain can't auto-resume the run on them.
 		// They are re-recorded as visible advice once the agent settles (below).
-		const strandedAdvisorCards = userInterrupt ? this.#extractQueuedAdvisorCards() : [];
+		const strandedAdvisorCards = interruptLike ? this.#extractQueuedAdvisorCards() : [];
 		// Session switch/compact paths disconnect first; explicit aborts should
 		// leave any queued steer/follow-up visible for the user rather than
 		// auto-starting a fresh turn during cleanup.
@@ -7496,21 +7506,25 @@ export class AgentSession {
 			this.abortRetry();
 			this.#promptGeneration++;
 			this.#scheduledHiddenNextTurnGeneration = undefined;
-			// Abort the handoff first so generic compaction cancellation cannot replace
-			// the harness reason with an unreasoned "Handoff cancelled".
-			this.#handoff.abortHandoff(new Error(options?.reason ?? "Handoff aborted by session"));
-			let manualCompactionCleanup: Promise<void> | undefined;
-			if (options?.preserveCompaction) {
-				// Manual `/compact` installed its own #compactionAbortController before
-				// this internal abort and must keep it alive (that marker is what makes
-				// isCompacting report true during startup). Any in-flight
-				// auto-compaction MUST still be cancelled, though: otherwise a
-				// background maintenance pass races the manual run and both
-				// appendCompaction/replaceMessages, double-rewriting session history.
-				this.#maintenance.abortAutomaticCompaction();
-			} else {
-				manualCompactionCleanup = this.#maintenance.abortCompaction(options?.reason);
-			}
+		// Abort the handoff first so generic compaction cancellation cannot replace
+		// the harness reason with an unreasoned "Handoff cancelled".
+		// Forward the interrupt label (not host attribution text) into handoff
+		// and compaction cancellations so their silent-consume predicates keep
+		// matching; display text still rides `agent.abort(reason)` below.
+		const forwardedReason = interruptLike ? USER_INTERRUPT_LABEL : options?.reason;
+		this.#handoff.abortHandoff(new Error(forwardedReason ?? "Handoff aborted by session"));
+		let manualCompactionCleanup: Promise<void> | undefined;
+		if (options?.preserveCompaction) {
+			// Manual `/compact` installed its own #compactionAbortController before
+			// this internal abort and must keep it alive (that marker is what makes
+			// isCompacting report true during startup). Any in-flight
+			// auto-compaction MUST still be cancelled, though: otherwise a
+			// background maintenance pass races the manual run and both
+			// appendCompaction/replaceMessages, double-rewriting session history.
+			this.#maintenance.abortAutomaticCompaction();
+		} else {
+			manualCompactionCleanup = this.#maintenance.abortCompaction(forwardedReason);
+		}
 			this.abortBash();
 			this.abortEval();
 			const postPromptDrain = this.#cancelPostPromptTasks();

@@ -117,7 +117,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[], reason?: string }`
 - `{ id?, type: "new_session", parentSession?: string }`
 
-When `reason` is a non-empty string it is recorded verbatim as the aborted assistant message's `errorMessage` (e.g. `"Interrupted by host (turn replaced)"`) instead of the default `"Interrupted by user"`, so orchestration-driven aborts are not misattributed to the human. When omitted or blank, the default user-interrupt label is kept for compatibility. Non-user reasons do not trigger the Esc-specific advisor auto-resume suppression in `AgentSession.abort()`.
+When `reason` is a non-empty string it is recorded verbatim (trimmed, truncated to 200 characters) as the aborted assistant message's `errorMessage` (e.g. `"Interrupted by host (turn replaced)"`) instead of the default `"Interrupted by user"`, so orchestration-driven aborts are not misattributed to the human. When omitted or blank, the default user-interrupt label is kept for compatibility. Warning: the reason persists into the session transcript/JSONL and stays model-visible on the next turn — keep it short, factual attribution text, never secrets or prompt content. Lifecycle is decoupled from display: a host reason behaves like a user interrupt (advisor auto-resume stays suppressed, in-flight compaction/handoff cancellations are still silently consumed), only the recorded text differs.
 
 ### Protocol
 

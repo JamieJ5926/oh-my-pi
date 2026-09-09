@@ -28,7 +28,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { isUserInterruptAbort, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -481,6 +481,36 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(persisted).toEqual(["breaks the build"]);
 		// No advisor-driven resume: only the original (aborted) turn called the model.
 		expect(mock.calls.length).toBe(1);
+
+		await running.catch(() => {});
+	});
+	it("suppresses advisor auto-resume for a host interrupt while keeping host attribution", async () => {
+		// RPC `abort` with a host reason must behave like a user interrupt for
+		// lifecycle purposes (no advisor-driven resume, card preserved) while the
+		// aborted turn keeps the host text instead of the user-interrupt label.
+		const { session, sessionManager, mock, streamStarted } = await createParkedSession();
+		const persisted = capturePersistedAdvice(sessionManager);
+
+		const running = session.prompt("do the thing");
+		await streamStarted;
+
+		await session.sendCustomMessage(advisorCard("breaks the build"), { deliverAs: "steer", triggerTurn: true });
+		expect(session.agent.peekSteeringQueue().some(isAdvisorCard)).toBe(true);
+
+		await session.abort({ reason: "Interrupted by host (turn replaced)", hostInterrupt: true });
+		await session.waitForIdle();
+
+		expect(session.agent.peekSteeringQueue()).toEqual([]);
+		expect(session.agent.state.messages.filter(isAdvisorCard)).toHaveLength(1);
+		expect(persisted).toEqual(["breaks the build"]);
+		expect(mock.calls.length).toBe(1);
+
+		const aborted = session.agent.state.messages.find(
+			message => message.role === "assistant" && message.stopReason === "aborted",
+		);
+		if (!aborted || aborted.role !== "assistant") throw new Error("Expected aborted assistant turn");
+		expect(aborted.errorMessage).toBe("Interrupted by host (turn replaced)");
+		expect(isUserInterruptAbort(aborted)).toBe(false);
 
 		await running.catch(() => {});
 	});

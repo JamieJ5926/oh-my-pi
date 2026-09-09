@@ -37,6 +37,7 @@ export type RpcCommand =
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[]; reason?: string }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
+
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
@@ -91,6 +92,27 @@ export type RpcCommand =
 	// Login
 	| { id?: string; type: "get_login_providers" }
 	| { id?: string; type: "login"; providerId: string };
+/**
+ * Build the `abort` wire frame. `reason` is an optional host attribution string
+ * (omitted entirely when undefined for old-daemon compat); the daemon trims,
+ * length-bounds, and defaults it, and treats a present reason as a
+ * host interrupt for lifecycle purposes.
+ */
+export function buildRpcAbortCommand(reason?: string): Extract<RpcCommand, { type: "abort" }> {
+	return reason === undefined ? { type: "abort" } : { type: "abort", reason };
+}
+
+/** Build the `abort_and_prompt` wire frame; same `reason` contract as `buildRpcAbortCommand`. */
+export function buildRpcAbortAndPromptCommand(
+	message: string,
+	images?: ImageContent[],
+	reason?: string,
+): Extract<RpcCommand, { type: "abort_and_prompt" }> {
+	return reason === undefined
+		? { type: "abort_and_prompt", message, images }
+		: { type: "abort_and_prompt", message, images, reason };
+}
+
 
 // ============================================================================
 // RPC State
@@ -112,7 +134,6 @@ export interface RpcSessionState {
 	fastModeActive: boolean;
 	tokensPerSecond: number | null;
 	messageCount: number;
-	queuedMessageCount: number;
 	todoPhases: TodoPhase[];
 	/** For session dump / export (plain-text parity with /dump). */
 	systemPrompt?: string[];
