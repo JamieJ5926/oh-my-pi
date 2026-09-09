@@ -35,7 +35,7 @@ import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
-import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
+import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setMarkdownMermaidRendering, setMarkdownMermaidSpacing, setSymbolPreset } from "../modes/theme/theme";
 import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
@@ -3043,6 +3043,22 @@ class SettingSignal<A extends unknown[] = []> {
 	}
 }
 
+/**
+ * Reapply Mermaid ASCII spacing from the effective settings. Reads all three
+ * values together because `setMarkdownMermaidSpacing` takes the full triple
+ * while each hook fires for a single key. `set()` rebuilds the merged layers
+ * before firing hooks and `reloadForCwd()` re-fires every hook after its
+ * rebuild, so global reads observe the new values in both paths.
+ */
+function applyMermaidSpacingFromSettings(): void {
+	if (!globalInstance) return;
+	setMarkdownMermaidSpacing({
+		paddingX: globalInstance.get("tui.mermaidPaddingX"),
+		paddingY: globalInstance.get("tui.mermaidPaddingY"),
+		boxBorderPadding: globalInstance.get("tui.mermaidBoxBorderPadding"),
+	});
+}
+
 const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"theme.dark": value => {
 		if (typeof value === "string") {
@@ -3073,6 +3089,15 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	// track it the same instant path/resource links do. Runtime `/settings` edits
 	// also go through the selector controller to invalidate and repaint live views.
 	"tui.hyperlinks": value => applyHyperlinkSetting(value),
+	// Mermaid rendering and spacing track the effective settings the same way:
+	// `reloadForCwd()` re-fires every hook, so `/move` and cross-project resume
+	// pick up the destination project's values without a restart or manual edit.
+	"tui.renderMermaid": value => {
+		if (typeof value === "boolean") setMarkdownMermaidRendering(value);
+	},
+	"tui.mermaidPaddingX": () => applyMermaidSpacingFromSettings(),
+	"tui.mermaidPaddingY": () => applyMermaidSpacingFromSettings(),
+	"tui.mermaidBoxBorderPadding": () => applyMermaidSpacingFromSettings(),
 	"provider.appendOnlyContext": value => {
 		if (typeof value === "string") {
 			appendOnlyModeSignal.fire(value);

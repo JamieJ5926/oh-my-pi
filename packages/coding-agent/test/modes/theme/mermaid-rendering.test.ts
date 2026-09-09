@@ -22,6 +22,13 @@ const workspaceTree = {
 function stripAnsi(text: string): string {
 	return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
+function renderMermaidAscii(source: string, maxWidth = 120): string {
+	const resolve = getMarkdownTheme().resolveMermaidAscii;
+	if (!resolve) throw new Error("Mermaid renderer unavailable");
+	const rendered = resolve(source, maxWidth);
+	if (rendered === null) throw new Error("Mermaid renderer returned null");
+	return stripAnsi(rendered);
+}
 
 beforeAll(async () => {
 	await Settings.init({ inMemory: true });
@@ -87,37 +94,46 @@ describe("Mermaid rendering setting", () => {
 		}
 	});
 
-	it("exposes ASCII spacing defaults through settings", () => {
-		expect(settings.get("tui.mermaidPaddingX")).toBe(5);
-		expect(settings.get("tui.mermaidPaddingY")).toBe(5);
-		expect(settings.get("tui.mermaidBoxBorderPadding")).toBe(1);
+	it("applies settings overrides to rendered diagrams", () => {
+		const source = "flowchart TD\n  A[alpha] --> B[beta]";
+		const baseline = renderMermaidAscii(source);
+		try {
+			settings.set("tui.mermaidPaddingX", 0);
+			settings.set("tui.mermaidPaddingY", 0);
+			settings.set("tui.mermaidBoxBorderPadding", 0);
+			const tight = renderMermaidAscii(source);
+			expect(tight).not.toBe(baseline);
+			expect(tight.length).toBeLessThan(baseline.length);
+		} finally {
+			settings.set("tui.mermaidPaddingX", 5);
+			settings.set("tui.mermaidPaddingY", 5);
+			settings.set("tui.mermaidBoxBorderPadding", 1);
+		}
+		expect(renderMermaidAscii(source)).toBe(baseline);
 	});
 
 	it("applies configured spacing to rendered diagrams", () => {
 		const source = "flowchart TD\n  A[alpha] --> B[beta]\n  B --> C[gamma]";
-		const renderer = () => {
-			const resolve = getMarkdownTheme().resolveMermaidAscii;
-			if (!resolve) throw new Error("Mermaid renderer unavailable");
-			return resolve;
-		};
-		const baseline = stripAnsi(renderer()(source, 120));
+		const baseline = renderMermaidAscii(source);
 		setMarkdownMermaidSpacing({ paddingX: 0, paddingY: 0, boxBorderPadding: 0 });
-		const tight = stripAnsi(renderer()(source, 120));
+		const tight = renderMermaidAscii(source);
 		expect(tight).not.toBe(baseline);
 		expect(tight.length).toBeLessThan(baseline.length);
 		setMarkdownMermaidSpacing({ paddingX: 5, paddingY: 5, boxBorderPadding: 1 });
-		expect(stripAnsi(renderer()(source, 120))).toBe(baseline);
+		expect(renderMermaidAscii(source)).toBe(baseline);
 	});
 
 	it("falls back to defaults for invalid spacing values", () => {
 		const source = "flowchart TD\n  A[alpha] --> B[beta]";
-		const renderer = () => {
-			const resolve = getMarkdownTheme().resolveMermaidAscii;
-			if (!resolve) throw new Error("Mermaid renderer unavailable");
-			return resolve;
-		};
-		const baseline = stripAnsi(renderer()(source, 120));
+		const baseline = renderMermaidAscii(source);
 		setMarkdownMermaidSpacing({ paddingX: NaN, paddingY: -3, boxBorderPadding: 1.9 });
-		expect(stripAnsi(renderer()(source, 120))).toBe(baseline);
+		expect(renderMermaidAscii(source)).toBe(baseline);
+	});
+
+	it("falls back to the default for fractional paddingX instead of flooring", () => {
+		const source = "flowchart TD\n  A[alpha] --> B[beta]";
+		const baseline = renderMermaidAscii(source);
+		setMarkdownMermaidSpacing({ paddingX: 1.9, paddingY: 5, boxBorderPadding: 1 });
+		expect(renderMermaidAscii(source)).toBe(baseline);
 	});
 });
