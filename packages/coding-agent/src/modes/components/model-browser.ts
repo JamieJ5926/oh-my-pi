@@ -27,9 +27,13 @@ import { getModelMatchPreferences, resolveModelRoleValue } from "../../config/mo
 import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import type { ModelPerfStats } from "../../session/agent-storage";
-import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+	parseConfiguredThinkingLevel,
+} from "../../thinking";
 import { thinkingLevelGlyph as sharedThinkingLevelGlyph } from "../../tools/render-utils";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata, parseConfiguredThinkingLevel } from "../../thinking";
 import { type ThemeColor, theme } from "../theme/theme";
 import {
 	matchesSelectCancel,
