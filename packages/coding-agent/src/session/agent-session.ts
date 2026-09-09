@@ -2087,18 +2087,28 @@ export class AgentSession {
 			return result;
 		}
 		const preview = `${result.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
+		// A spill failure must never degrade to preview-only: the preview would
+		// be delivered and consumed while evict-on-consume releases the row
+		// body, destroying the last full copy. Throw instead so the throw
+		// propagates through the delivery sink to the manager's delivery catch,
+		// which re-queues with the full delivery text and the row intact —
+		// retryable, not terminal.
+		let artifactPath: string | undefined;
+		let artifactId: string | undefined;
 		try {
-			const { path: artifactPath, id: artifactId } = await this.sessionManager.allocateArtifactPath("async");
-			if (artifactPath && artifactId) {
-				await writeArtifact(artifactPath, result);
-				return `${preview}\nFull output: artifact://${artifactId}`;
-			}
+			({ path: artifactPath, id: artifactId } = await this.sessionManager.allocateArtifactPath("async"));
 		} catch (error) {
-			logger.warn("Failed to persist async follow-up artifact", {
+			logger.warn("Failed to allocate async follow-up artifact", {
 				error: error instanceof Error ? error.message : String(error),
 			});
+			throw error;
 		}
-		return preview;
+		if (!artifactPath || !artifactId) {
+			logger.warn("Failed to allocate async follow-up artifact path", { jobResultChars: result.length });
+			throw new Error("Failed to allocate async follow-up artifact path");
+		}
+		await writeArtifact(artifactPath, result);
+		return `${preview}\nFull output: artifact://${artifactId}`;
 	}
 
 	// =========================================================================

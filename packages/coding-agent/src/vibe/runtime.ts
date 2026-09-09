@@ -1005,7 +1005,12 @@ export class VibeSessionRegistry {
 					id: record.id,
 					jobId,
 					status: job.status,
-					resultText: job.resultText ?? job.errorText ?? "(no output)",
+					// A consumed large body was released by evict-on-consume after
+					// its delivery or snapshot recovery; report that instead of
+					// "(no output)". Mirrors the hub snapshot wording.
+					resultText: manager.isJobResultConsumed(jobId)
+						? "Delivery: already delivered or recovered."
+						: (job.resultText ?? job.errorText ?? "(no output)"),
 				});
 			}
 			return settled;

@@ -1,11 +1,24 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, vi } from "bun:test";
+import { join } from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AsyncResultEntry } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import {
 	ASYNC_INLINE_RESULT_MAX_CHARS,
 	ASYNC_PREVIEW_MAX_CHARS,
-	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
 } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 
 function entry(jobId: string, sizeChars: string | number): AsyncResultEntry {
 	const result = typeof sizeChars === "string" ? sizeChars : "x".repeat(sizeChars);
@@ -103,6 +116,95 @@ describe("async job manager evict-on-consume", () => {
 			expect(delivered).toEqual([]);
 		} finally {
 			await manager.dispose({ timeoutMs: 1_000 });
+		}
+	});
+});
+
+describe("spill-failure retry + row intact", () => {
+	async function buildSpillSession(tempDir: TempDir) {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "SubAgent",
+			asyncJobManager: manager,
+		});
+		return { manager, sessionManager, session, authStorage };
+	}
+
+	async function spillFailureCase(mode: "throw" | "falsy") {
+		const tempDir = TempDir.createSync("@pi-o32-spill-");
+		const { manager, sessionManager, session, authStorage } = await buildSpillSession(tempDir);
+		try {
+			const allocateSpy = vi.spyOn(sessionManager, "allocateArtifactPath");
+			if (mode === "throw") allocateSpy.mockRejectedValue(new Error("disk gone"));
+			else allocateSpy.mockResolvedValue({});
+			const big = "s".repeat(ASYNC_INLINE_RESULT_MAX_CHARS + 10_000);
+			const jobId = manager.register("bash", "spill job", async () => big, { ownerId: "SubAgent" });
+			await manager.waitForAll();
+			// Retryable, not terminal: the delivery is still queued, nothing consumed.
+			expect(await manager.drainDeliveries({ timeoutMs: 300 })).toBe(false);
+			expect(manager.hasPendingDeliveries()).toBe(true);
+			expect(manager.isJobResultConsumed(jobId)).toBe(false);
+			expect(manager.getJob(jobId)?.resultText).toBe(big);
+			// Spill succeeds on retry: full body lands in the artifact, delivery settles.
+			const spillPath = join(tempDir.path(), `async-spill-${mode}.txt`);
+			allocateSpy.mockResolvedValue({ path: spillPath, id: `spill-${mode}` });
+			expect(await manager.drainDeliveries({ timeoutMs: 5_000 })).toBe(true);
+			expect(manager.isJobResultConsumed(jobId)).toBe(true);
+			expect(await Bun.file(spillPath).text()).toBe(big);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+			AsyncJobManager.resetForTests();
+			tempDir.removeSync();
+		}
+	}
+
+	test("allocate throw: delivery retries with row intact, then recovers", () => spillFailureCase("throw"));
+	test("falsy allocate: delivery retries with row intact, then recovers", () => spillFailureCase("falsy"));
+});
+
+describe("vibe wait consumed note", () => {
+	test("consumed large bodies report delivery instead of (no output)", async () => {
+		const manager = new AsyncJobManager({});
+		const vibes = VibeSessionRegistry.global();
+		try {
+			const toolSession = {
+				getAgentId: () => "o32-owner",
+				getSessionId: () => "test-parent-session",
+				getSessionFile: () => null,
+				asyncJobManager: manager,
+			} as unknown as ToolSession;
+			const big = "v".repeat(ASYNC_INLINE_RESULT_MAX_CHARS + 10_000);
+			const jobId = manager.register("task", "vibe turn", async () => big, { ownerId: "o32-owner" });
+			vibes.registerRecordForTests({ id: "o32-worker", ownerId: "o32-owner", jobId });
+			await manager.waitForAll();
+			// First recovery carries the full body (no regression).
+			const first = await vibes.wait(toolSession, { timeoutMs: 1_000 });
+			expect(first.settled.map(entry => entry.jobId)).toEqual([jobId]);
+			expect(first.settled[0]?.resultText).toBe(big);
+			// After foreground recovery releases the row, wait reports delivery.
+			expect(manager.consumeJobResults([jobId])).toBe(1);
+			const second = await vibes.wait(toolSession, { timeoutMs: 1_000 });
+			expect(second.settled[0]?.resultText).toBe("Delivery: already delivered or recovered.");
+		} finally {
+			await manager.dispose({ timeoutMs: 100 });
+			VibeSessionRegistry.resetGlobalForTests();
 		}
 	});
 });
