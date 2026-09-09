@@ -1694,7 +1694,8 @@ describe("ExtensionRunner", () => {
 				undefined,
 				Settings.isolated({ "extensionHandlers.timeoutMs": 10 }),
 			);
-			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
 			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
 			runner.onError(err => {
 				errors.push(err);
@@ -1718,9 +1719,10 @@ describe("ExtensionRunner", () => {
 					error: "handler timed out after 10ms",
 				},
 			]);
-
+		} finally {
 			warnSpy.mockRestore();
-		});
+		}
+	});
 
 		it("prefers toolCallTimeoutMs over the global handler timeout for tool_call (#11286)", async () => {
 			const extensionPath = path.join(tempDir.path(), "tool-call-precedence.ts");
