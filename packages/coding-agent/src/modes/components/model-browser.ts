@@ -532,7 +532,7 @@ export class ModelBrowser implements Component {
 	constructor(settings: Settings, options: ModelBrowserOptions = {}) {
 		this.#settings = settings;
 		this.#showProvider = options.showProvider ?? true;
-		const tokens = options.currentContextTokens ?? 0;
+		this.#currentContextTokens = options.currentContextTokens ?? 0;
 		this.#markOverContext = options.markOverContext ?? false;
 		this.#emptyText = options.emptyText;
 		this.#sessionThinkingLevel = options.sessionThinkingLevel;
@@ -981,11 +981,11 @@ export class ModelBrowser implements Component {
 			if (!assignment || assignment.autoSelected) return;
 			if (!modelsAreEqual(assignment.model, item.model)) return;
 			if (getRoleInfo(role, this.#settings).hidden) return;
-		// Picker-only suppression: derived levels (e.g. `defaultThinkingLevel`
-		// with no `:level` suffix) are not applied by the Alt+P picker, so
-		// the picker hides them as a fallback. The hub applies role
-		// configuration and keeps them. Absent means explicit (predates the flag).
-		if (this.#suppressDerivedThinkingLevels && assignment.explicitThinkingLevel === false) return;
+			// Picker-only suppression: derived levels (e.g. `defaultThinkingLevel`
+			// with no `:level` suffix) are not applied by the Alt+P picker, so
+			// the picker hides them as a fallback. The hub applies role
+			// configuration and keeps them. Absent means explicit (predates the flag).
+			if (this.#suppressDerivedThinkingLevels && assignment.explicitThinkingLevel === false) return;
 			if (assignment.thinkingLevel === ThinkingLevel.Inherit) return;
 			if (!levels.has(assignment.thinkingLevel)) levels.set(assignment.thinkingLevel, role);
 		};
