@@ -350,6 +350,32 @@ describe("ModelBrowser effort badge", () => {
 		expect(rows[2]).toContain("low");
 	});
 
+	test("hidden badges suppress session, own-role, and role-derived levels", () => {
+		// Task-subagent target mode: neither the session effort nor any role
+		// level transfers, so every row stays unbadged while hidden.
+		const shared = makeModel("openai", "gpt-5");
+		const browser = new ModelBrowser(Settings.isolated({}), {
+			sessionThinkingLevel: ThinkingLevel.High,
+		});
+		browser.setCurrentSelector("openai/gpt-5");
+		browser.setRoles({
+			default: { model: shared, thinkingLevel: ThinkingLevel.Low, autoSelected: false },
+		});
+		browser.setItems([
+			...buildBrowserItems([shared]),
+			{ provider: "", id: "@slow", model: shared, selector: "@slow", thinkingLevel: ThinkingLevel.Max },
+		]);
+		browser.setShowThinkingBadges(false);
+		const hidden = browser.render(160).map(line => Bun.stripANSI(line));
+		expect(hidden[2]).not.toContain("high");
+		expect(hidden[2]).not.toContain("low");
+		expect(hidden[3]).not.toContain("max");
+		browser.setShowThinkingBadges(true);
+		const shown = browser.render(160).map(line => Bun.stripANSI(line));
+		expect(shown[2]).toContain("high");
+		expect(shown[3]).toContain("max");
+	});
+
 	test("quick-role row without an explicit level renders no fallback badge", () => {
 		// `@fast` with no explicit effort shares its model with `default` at
 		// low, but applying the row sets no effort: the row stays unbadged.

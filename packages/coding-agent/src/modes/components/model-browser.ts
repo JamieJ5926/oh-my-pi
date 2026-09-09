@@ -448,6 +448,12 @@ export interface ModelBrowserOptions {
 	 * role configuration. Undefined leaves every row on role data.
 	 */
 	sessionThinkingLevel?: ConfiguredThinkingLevel;
+	/**
+	 * Hide every effort badge. Hosts set this when the rows pick something
+	 * effortless — e.g. the Task-subagent target, whose agent runs its own
+	 * configured effort regardless of session or role levels.
+	 */
+	showThinkingBadges?: boolean;
 }
 
 /** Rendered rows before the list window: search row + blank. */
@@ -493,6 +499,8 @@ export class ModelBrowser implements Component {
 	#currentSelector: string | undefined;
 	/** Session effort rendered on the session-model row; undefined disables it. */
 	#sessionThinkingLevel: ConfiguredThinkingLevel | undefined;
+	/** False suppresses every effort badge (Task-subagent target mode). */
+	#showThinkingBadges = true;
 
 	/** Enter or click-on-selected. */
 	onActivate?: (item: ModelBrowserItem) => void;
@@ -509,12 +517,18 @@ export class ModelBrowser implements Component {
 		this.#markOverContext = options.markOverContext ?? false;
 		this.#emptyText = options.emptyText;
 		this.#sessionThinkingLevel = options.sessionThinkingLevel;
+		this.#showThinkingBadges = options.showThinkingBadges ?? true;
 		this.#syncAffinity();
 	}
 
 	/** Override the session effort rendered on the session-model row (undefined clears it). */
 	setSessionThinkingLevel(level: ConfiguredThinkingLevel | undefined): void {
 		this.#sessionThinkingLevel = level;
+	}
+
+	/** Show or hide every effort badge without touching roles or selection. */
+	setShowThinkingBadges(show: boolean): void {
+		this.#showThinkingBadges = show;
 	}
 
 	/** Mark `selector` as the session's active model (undefined clears the mark). */
@@ -905,9 +919,11 @@ export class ModelBrowser implements Component {
 	}
 
 	/**
-	 * Resolved effort badge for `item`'s row. Precedence: the row's own role
-	 * level for virtual `@role` rows, then the session effort on the
-	 * session-model row, then the configured roles backing the model. Virtual
+	 * Resolved effort badge for `item`'s row. Hidden entirely while
+	 * `showThinkingBadges` is false (Task-subagent target mode). Precedence:
+	 * the row's own role level for virtual `@role` rows, then the session
+	 * effort on the session-model row, then the configured roles backing
+	 * the model. Virtual
 	 * `@role` rows are terminal — without an explicit own level they render
 	 * no badge rather than a sibling role's level, since applying the row
 	 * leaves the session effort untouched. A model backing several roles at
@@ -915,6 +931,7 @@ export class ModelBrowser implements Component {
 	 * (`default ◔ low · slow ◉ max`); empty when nothing pins a level.
 	 */
 	#thinkingBadgeFor(item: ModelBrowserItem): string {
+		if (!this.#showThinkingBadges) return "";
 		if (item.thinkingLevel !== undefined && item.thinkingLevel !== ThinkingLevel.Inherit) {
 			return ` ${formatThinkingLevelBadge(item.thinkingLevel)}`;
 		}
