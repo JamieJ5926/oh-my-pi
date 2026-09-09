@@ -13,7 +13,7 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { resolveConfiguredDefaultBudget, resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -604,5 +604,21 @@ describe("resolveSoftRequestBudget", () => {
 		expect(resolveSoftRequestBudget("scout", 0)).toBe(0);
 		expect(resolveSoftRequestBudget("scout", -5)).toBe(0);
 		expect(resolveSoftRequestBudget("scout", 20.9)).toBe(20);
+	});
+});
+
+describe("resolveConfiguredDefaultBudget", () => {
+	it("falls back to the agent entry when task.softRequestBudget is unset", () => {
+		const settings = Settings.isolated();
+		expect(settings.isConfigured("task.softRequestBudget")).toBe(false);
+		expect(resolveSoftRequestBudget("poteto-agent-deep", resolveConfiguredDefaultBudget("poteto-agent-deep", settings))).toBe(400);
+		expect(resolveSoftRequestBudget("scout", resolveConfiguredDefaultBudget("scout", settings))).toBe(100);
+		expect(resolveSoftRequestBudget("task", resolveConfiguredDefaultBudget("task", settings))).toBe(200);
+	});
+
+	it("passes an explicitly configured value through, including 0 to disable", () => {
+		expect(resolveConfiguredDefaultBudget("poteto-agent-deep", Settings.isolated({ "task.softRequestBudget": 50 }))).toBe(50);
+		expect(resolveSoftRequestBudget("poteto-agent-deep", resolveConfiguredDefaultBudget("poteto-agent-deep", Settings.isolated({ "task.softRequestBudget": 50 })))).toBe(50);
+		expect(resolveSoftRequestBudget("poteto-agent-deep", resolveConfiguredDefaultBudget("poteto-agent-deep", Settings.isolated({ "task.softRequestBudget": 0 })))).toBe(0);
 	});
 });

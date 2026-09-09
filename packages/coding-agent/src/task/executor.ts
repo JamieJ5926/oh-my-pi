@@ -113,6 +113,21 @@ export const SOFT_REQUEST_BUDGET: Record<string, number> = {
 };
 
 /**
+ * Resolves the configured-side input for {@link resolveSoftRequestBudget}.
+ * `settings.get` returns the schema default (200) when unset, which would
+ * swallow a higher per-agent entry through the min() trap, so the configured
+ * flag gates it: an explicitly configured value (including 0 to disable)
+ * passes through, while unset falls back to the agent's own entry, then the
+ * global default.
+ */
+export function resolveConfiguredDefaultBudget(agentName: string, settings: Settings): number {
+	const raw = settings.isConfigured("task.softRequestBudget")
+		? settings.get("task.softRequestBudget")
+		: (SOFT_REQUEST_BUDGET[agentName] ?? SOFT_REQUEST_BUDGET.default);
+	return Math.max(0, Math.trunc(Number(raw) || 0));
+}
+
+/**
  * Resolves the effective soft request budget for an agent. The configured
  * `task.softRequestBudget` and the agent's bundled entry are both upper
  * bounds, so the tighter one wins; a configured budget of 0 disables the
@@ -2835,10 +2850,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// TTL before an adopted idle subagent is parked by the lifecycle manager.
 	// <= 0 disables parking (the session stays live until process teardown).
 	const agentIdleTtlMs = Math.trunc(Number(settings.get("task.agentIdleTtlMs") ?? 420_000) || 0);
-	const configuredDefaultBudget = Math.max(
-		0,
-		Math.trunc(Number(settings.get("task.softRequestBudget") ?? SOFT_REQUEST_BUDGET[agent.name] ?? SOFT_REQUEST_BUDGET.default) || 0),
-	);
+	const configuredDefaultBudget = resolveConfiguredDefaultBudget(agent.name, settings);
 	const softRequestBudget = resolveSoftRequestBudget(agent.name, configuredDefaultBudget);
 	const softRequestBudgetNotice = settings.get("task.softRequestBudgetNotice") ?? false;
 	const parentDepth = options.taskDepth ?? 0;
