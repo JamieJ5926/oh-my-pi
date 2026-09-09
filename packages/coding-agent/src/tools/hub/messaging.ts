@@ -59,6 +59,20 @@ export interface HubListParams {
 function isAddressablePeer(ref: { id: string; kind: string; status: string }, senderId: string): boolean {
 	return ref.id !== senderId && ref.kind !== "advisor" && ref.status !== "aborted";
 }
+/**
+ * Resolve a `send` recipient to its registry id. Exact ids (and "all") pass
+ * through untouched. Otherwise a displayName shown by `irc list` resolves
+ * only to a single live (running | idle) non-advisor peer: zero or multiple
+ * matches fall back to the raw input so the caller keeps the existing
+ * Unknown-agent failure instead of risking a misdelivery.
+ */
+function resolveHubSendRecipient(registry: AgentRegistry, to: string): string {
+	if (to === "all" || registry.get(to)) return to;
+	const matches = registry
+		.list()
+		.filter(ref => ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle") && ref.displayName === to);
+	return matches.length === 1 ? matches[0].id : to;
+}
 
 function resolveHubListLimit(limit: number | undefined): number {
 	if (limit === undefined || !Number.isFinite(limit) || limit <= 0) return DEFAULT_HUB_LIST_LIMIT;
@@ -262,7 +276,14 @@ export async function executeSend(
 	if (to === senderId) {
 		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	}
-	const isBroadcast = to === "all";
+	// `irc list` shows each peer as `id [displayName · …]`; resolve a unique
+	// live displayName to its id so a name copied from the roster reaches the
+	// peer instead of failing Unknown-agent. Exact ids pass through unchanged.
+	const resolvedTo = resolveHubSendRecipient(registry, to);
+	if (resolvedTo === senderId) {
+		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
+	}
+	const isBroadcast = resolvedTo === "all";
 	if (isBroadcast && params.await) {
 		return hubErrorResult('`await` is invalid with to:"all" — broadcasts have no single replier.', {
 			op: "send",
@@ -301,8 +322,8 @@ export async function executeSend(
 		await ensurePersistedRoster(registry, sessionFileHint);
 	}
 	let remote: ClaimResult | undefined;
-	if (!isBroadcast && !registry.get(to)) {
-		try { remote = await registry.findPublishedSession(to); } catch (error) {
+	if (!isBroadcast && !registry.get(resolvedTo)) {
+		try { remote = await registry.findPublishedSession(resolvedTo); } catch (error) {
 			if (error instanceof Error && error.message.startsWith("Ambiguous remote session")) return hubErrorResult(error.message, { op: "send", from: senderId, to });
 			logger.warn("Published session lookup failed", { error: String(error) });
 		}
@@ -317,9 +338,9 @@ export async function executeSend(
 	let removeAwaitAbortListener: (() => void) | undefined;
 	const waiting = params.await
 		? bus
-				.wait(senderId, { from: remote ? formatSessionAddress(remote.address) : to }, timeoutMs ?? DEFAULT_IRC_TIMEOUT_MS, awaitAbort?.signal, {
+				.wait(senderId, { from: remote ? formatSessionAddress(remote.address) : resolvedTo }, timeoutMs ?? DEFAULT_IRC_TIMEOUT_MS, awaitAbort?.signal, {
 					drainPending: false,
-					awaitTarget: remote ? undefined : { registry, target: to },
+					awaitTarget: remote ? undefined : { registry, target: resolvedTo },
 				})
 				.then(
 					message => ({ message, error: null as Error | null }),
@@ -345,7 +366,7 @@ export async function executeSend(
 		// Broadcasts fan out to live peers only (running | idle); reviving every
 		// parked agent on a broadcast would be a stampede. Direct sends go
 		// through the bus unfiltered so parked recipients are revived.
-		const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
+		const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [resolvedTo];
 		// A broadcast that also reaches the main agent delivers the body to it
 		// directly (its own incoming card); relaying the sibling legs to the
 		// main UI would then show the same body once per other recipient.
@@ -391,8 +412,8 @@ export async function executeSend(
 						// still succeeded, so surface a clean note instead of erroring
 						// out — and settle now rather than blocking the full timeout.
 						lines.push(
-							`${to} stopped without replying. ` +
-								`Check \`inbox\` or their transcript (history://${to}) for a later answer.`,
+							`${resolvedTo} stopped without replying. ` +
+								`Check \`inbox\` or their transcript (history://${resolvedTo}) for a later answer.`,
 						);
 					} else if (signal?.aborted) {
 						// The send already succeeded; if the wait was interrupted by our
@@ -400,7 +421,7 @@ export async function executeSend(
 						// so the agent loop keeps this tool as "sent" instead of marking it
 						// skipped, which would prompt a duplicate resend on the next turn.
 						lines.push(
-							`Send accepted but the reply wait was interrupted before ${to} answered. ` +
+							`Send accepted but the reply wait was interrupted before ${resolvedTo} answered. ` +
 								"Check `inbox` or `wait` again after handling the interrupt.",
 						);
 					} else {
@@ -413,7 +434,7 @@ export async function executeSend(
 						lines.push(waited.body);
 					} else {
 						lines.push(
-							`No reply from ${to} within ${formatDuration(timeoutMs)}. ` +
+							`No reply from ${resolvedTo} within ${formatDuration(timeoutMs)}. ` +
 								"They may answer later — check `inbox` or `wait` again.",
 						);
 					}
@@ -430,7 +451,7 @@ export async function executeSend(
 			details: {
 				op: "send",
 				from: senderId,
-				to,
+				to: resolvedTo,
 				receipts,
 				...(waited !== undefined ? { waited } : {}),
 			},
