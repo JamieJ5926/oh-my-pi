@@ -175,8 +175,7 @@ const MERMAID_SPACING_DEFAULTS = { paddingX: 5, paddingY: 5, boxBorderPadding: 1
 let markdownMermaidSpacing: MarkdownMermaidSpacing = { ...MERMAID_SPACING_DEFAULTS };
 
 function sanitizeMermaidSpacing(value: number, fallback: number): number {
-	if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0)
-		return fallback;
+	if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) return fallback;
 	return value;
 }
 
