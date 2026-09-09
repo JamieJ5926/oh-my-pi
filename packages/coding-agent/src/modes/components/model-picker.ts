@@ -199,14 +199,16 @@ export class ModelPickerComponent implements Component {
 		// unqualified selector match the scoped row here while resolving to
 		// another provider at activation, advertising effort the switch will
 		// not apply. Displayed rows stay scoped; only the badge lookup uses
-		// the activation candidate set.
+		// the activation candidate set. An empty activation catalog stays
+		// authoritative: it resolves no effort (matching the resolver's early
+		// undefined return) instead of falling back to scoped display models,
+		// which would advertise effort Enter will not apply.
 		let activationModels: ReadonlyArray<Model>;
 		try {
 			activationModels = this.#registry.getAvailable();
 		} catch {
 			activationModels = models;
 		}
-		if (activationModels.length === 0) activationModels = models;
 		const roles = resolveRoleAssignments(this.#settings, activationModels, models);
 		const storage = this.#settings.getStorage();
 		const mruOrder = storage?.getModelUsageOrder() ?? [];

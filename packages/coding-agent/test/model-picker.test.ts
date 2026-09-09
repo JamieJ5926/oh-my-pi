@@ -53,6 +53,7 @@ interface PickerHarness {
 
 function createPicker(options: {
 	models: Model[] | (() => Model[]);
+	available?: Model[] | (() => Model[]);
 	scoped?: boolean;
 	scopedModels?: Model[];
 	settings?: Settings;
@@ -61,11 +62,17 @@ function createPicker(options: {
 }): PickerHarness {
 	installTestTheme();
 	const modelsFn = typeof options.models === "function" ? options.models : () => options.models as Model[];
+	const availableFn =
+		options.available === undefined
+			? modelsFn
+			: typeof options.available === "function"
+				? options.available
+				: () => options.available as Model[];
 	const settings = options.settings ?? Settings.isolated({});
 	const registry = {
 		refresh: options.registry?.refresh ?? (async () => {}),
 		getError: () => undefined,
-		getAvailable: modelsFn,
+		getAvailable: availableFn,
 		getAll: modelsFn,
 	} as unknown as ModelRegistry;
 	const ui = { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI;
@@ -295,5 +302,26 @@ describe("ModelPicker", () => {
 		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
 		expect(rendered).toContain("providerA/shared-x");
 		expect(rendered).toContain(highBadge);
+	});
+	test("empty activation catalog shows no effort badge on scoped rows", () => {
+		// P2 (PR #11330, thread 3968188070): scoped rows remain while
+		// getAvailable() returns an empty list. Enter
+		// (resolveTemporaryModelThinkingLevel) returns undefined for the same
+		// empty catalog, so even an explicitly suffixed role must not
+		// advertise effort the switch will not apply.
+		const scoped = makeModel("providerA", "shared-x");
+		const settings = Settings.isolated({
+			modelRoles: { default: "providerA/shared-x:high" },
+		});
+		const { picker } = createPicker({
+			models: [scoped],
+			available: [],
+			scopedModels: [scoped],
+			settings,
+		});
+		const rendered = normalize(picker.render(220));
+		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
+		expect(rendered).toContain("providerA/shared-x");
+		expect(rendered).not.toContain(highBadge);
 	});
 });
