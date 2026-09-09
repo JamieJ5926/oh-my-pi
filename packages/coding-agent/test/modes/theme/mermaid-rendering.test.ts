@@ -1,11 +1,12 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { Markdown } from "@oh-my-pi/pi-tui";
-import { Settings } from "../../../src/config/settings";
+import { Settings, settings } from "../../../src/config/settings";
 import { createTheme, getBuiltinThemes } from "../../../src/modes/theme/loader";
 import {
 	getMarkdownTheme,
 	getThemeByName,
 	setMarkdownMermaidRendering,
+	setMarkdownMermaidSpacing,
 	setThemeInstance,
 } from "../../../src/modes/theme/theme";
 import { buildSystemPrompt } from "../../../src/system-prompt";
@@ -30,6 +31,7 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
+	setMarkdownMermaidSpacing({ paddingX: 5, paddingY: 5, boxBorderPadding: 1 });
 	setMarkdownMermaidRendering(true);
 });
 
@@ -83,5 +85,39 @@ describe("Mermaid rendering setting", () => {
 		} finally {
 			setThemeInstance(dark);
 		}
+	});
+
+	it("exposes ASCII spacing defaults through settings", () => {
+		expect(settings.get("tui.mermaidPaddingX")).toBe(5);
+		expect(settings.get("tui.mermaidPaddingY")).toBe(5);
+		expect(settings.get("tui.mermaidBoxBorderPadding")).toBe(1);
+	});
+
+	it("applies configured spacing to rendered diagrams", () => {
+		const source = "flowchart TD\n  A[alpha] --> B[beta]\n  B --> C[gamma]";
+		const renderer = () => {
+			const resolve = getMarkdownTheme().resolveMermaidAscii;
+			if (!resolve) throw new Error("Mermaid renderer unavailable");
+			return resolve;
+		};
+		const baseline = stripAnsi(renderer()(source, 120));
+		setMarkdownMermaidSpacing({ paddingX: 0, paddingY: 0, boxBorderPadding: 0 });
+		const tight = stripAnsi(renderer()(source, 120));
+		expect(tight).not.toBe(baseline);
+		expect(tight.length).toBeLessThan(baseline.length);
+		setMarkdownMermaidSpacing({ paddingX: 5, paddingY: 5, boxBorderPadding: 1 });
+		expect(stripAnsi(renderer()(source, 120))).toBe(baseline);
+	});
+
+	it("falls back to defaults for invalid spacing values", () => {
+		const source = "flowchart TD\n  A[alpha] --> B[beta]";
+		const renderer = () => {
+			const resolve = getMarkdownTheme().resolveMermaidAscii;
+			if (!resolve) throw new Error("Mermaid renderer unavailable");
+			return resolve;
+		};
+		const baseline = stripAnsi(renderer()(source, 120));
+		setMarkdownMermaidSpacing({ paddingX: NaN, paddingY: -3, boxBorderPadding: 1.9 });
+		expect(stripAnsi(renderer()(source, 120))).toBe(baseline);
 	});
 });

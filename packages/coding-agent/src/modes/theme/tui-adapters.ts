@@ -164,6 +164,37 @@ export function getSymbolTheme(): SymbolTheme {
 	};
 }
 
+export interface MarkdownMermaidSpacing {
+	paddingX: number;
+	paddingY: number;
+	boxBorderPadding: number;
+}
+
+const MERMAID_SPACING_DEFAULTS = { paddingX: 5, paddingY: 5, boxBorderPadding: 1 } as const;
+
+let markdownMermaidSpacing = { ...MERMAID_SPACING_DEFAULTS };
+
+function sanitizeMermaidSpacing(value: number, fallback: number): number {
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return fallback;
+	return Math.floor(value);
+}
+
+export function setMarkdownMermaidSpacing(spacing: MarkdownMermaidSpacing): void {
+	const next = {
+		paddingX: sanitizeMermaidSpacing(spacing.paddingX, MERMAID_SPACING_DEFAULTS.paddingX),
+		paddingY: sanitizeMermaidSpacing(spacing.paddingY, MERMAID_SPACING_DEFAULTS.paddingY),
+		boxBorderPadding: sanitizeMermaidSpacing(spacing.boxBorderPadding, MERMAID_SPACING_DEFAULTS.boxBorderPadding),
+	};
+	if (
+		next.paddingX === markdownMermaidSpacing.paddingX &&
+		next.paddingY === markdownMermaidSpacing.paddingY &&
+		next.boxBorderPadding === markdownMermaidSpacing.boxBorderPadding
+	)
+		return;
+	markdownMermaidSpacing = next;
+	cachedMarkdownTheme = undefined;
+}
+
 let cachedMarkdownTheme: MarkdownTheme | undefined;
 let cachedMarkdownThemeRef: Theme | undefined;
 let markdownMermaidRendering = true;
@@ -217,6 +248,9 @@ export function getMarkdownTheme(): MarkdownTheme {
 						maxWidth,
 						theme: mermaid.mermaidTheme,
 						colorMode: mermaid.mermaidColorMode,
+						paddingX: markdownMermaidSpacing.paddingX,
+						paddingY: markdownMermaidSpacing.paddingY,
+						boxBorderPadding: markdownMermaidSpacing.boxBorderPadding,
 					})
 			: undefined,
 		highlightCode: (code: string, lang?: string): string[] => {

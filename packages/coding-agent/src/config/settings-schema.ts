@@ -1209,6 +1209,27 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.mermaidPaddingX": {
+		type: "number",
+		default: 5,
+		description:
+			"Horizontal spacing between nodes in ASCII Mermaid diagrams (default 5). Must be a non-negative integer; invalid values fall back to the default.",
+	},
+
+	"tui.mermaidPaddingY": {
+		type: "number",
+		default: 5,
+		description:
+			"Vertical spacing between nodes in ASCII Mermaid diagrams (default 5). Must be a non-negative integer; invalid values fall back to the default.",
+	},
+
+	"tui.mermaidBoxBorderPadding": {
+		type: "number",
+		default: 1,
+		description:
+			"Padding inside node boxes in ASCII Mermaid diagrams (default 1). Must be a non-negative integer; invalid values fall back to the default.",
+	},
+
 	"tui.reactions": {
 		type: "boolean",
 		default: true,

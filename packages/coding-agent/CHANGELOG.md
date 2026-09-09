@@ -3,6 +3,10 @@
 ## [Unreleased]
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
+### Added
+
+- Added `tui.mermaidPaddingX`, `tui.mermaidPaddingY`, and `tui.mermaidBoxBorderPadding` settings to control spacing in ASCII Mermaid diagrams (defaults 5/5/1, matching the previous rendering).
+
 ### Changed
 
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
