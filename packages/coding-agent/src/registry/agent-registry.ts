@@ -10,6 +10,14 @@
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
+import { formatSessionAddress, type SessionAddress, type SessionIdentity } from "../bridge/core/address";
+import type { ClaimResult, SessionDirectory, SessionGenerationAllocator } from "../bridge/core/directory";
+
+type PublicationDirectory = SessionDirectory & SessionGenerationAllocator & { listActive(): Promise<ClaimResult[]> };
+export interface SessionPublication {
+	readonly address: SessionAddress;
+	close(): Promise<void>;
+}
 import type { AgentSession } from "../session/agent-session";
 import { oneLineLabel } from "../task/types";
 
@@ -131,6 +139,85 @@ export class AgentRegistry {
 
 	readonly #refs = new Map<string, AgentRef>();
 	readonly #listeners = new Set<RegistryListener>();
+	#publication: { directory: PublicationDirectory; identity: Omit<SessionIdentity, "session">; ttlMs: number } | undefined;
+	readonly #published = new Map<AgentRef, SessionPublication>();
+
+	configurePublication(directory: PublicationDirectory, identity: Omit<SessionIdentity, "session">, ttlMs = 30_000): void {
+		if (this.#published.size > 0) throw new Error("Cannot replace publication directory with live sessions");
+		if (!Number.isSafeInteger(ttlMs) || ttlMs < 3) throw new Error("Invalid publication TTL");
+		this.#publication = { directory, identity, ttlMs };
+	}
+
+	async publishSession(ref: AgentRef, sessionId: string): Promise<SessionPublication | undefined> {
+		const context = this.#publication;
+		if (!context) return undefined;
+		if (this.#refs.get(ref.id) !== ref || !ref.session) throw new Error("Cannot publish an unattached session");
+		const existing = this.#published.get(ref);
+		if (existing) return existing;
+		const { directory, identity, ttlMs } = context;
+		const record = await directory.claimNext({ identity: { ...identity, session: sessionId }, ttlMs });
+		let closing: Promise<void> | undefined;
+		let heartbeat = Promise.resolve();
+		const timer = setInterval(() => {
+			heartbeat = heartbeat.then(async () => {
+				if (closing) return;
+				const result = await directory.heartbeat(record.address, ttlMs);
+				if (!result.ok) {
+					logger.warn("Session publication heartbeat rejected", { address: formatSessionAddress(record.address), reason: result.reason });
+					clearInterval(timer);
+					this.#published.delete(ref);
+				}
+			}).catch(error => logger.warn("Session publication heartbeat failed", { error: String(error) }));
+		}, Math.floor(ttlMs / 3));
+		timer.unref();
+		const publication: SessionPublication = {
+			address: record.address,
+			close: () => {
+				if (closing) return closing;
+				clearInterval(timer);
+				closing = heartbeat.then(async () => {
+					try {
+						const result = await directory.tombstone(record.address, "session disposed");
+						if (!result.ok) logger.warn("Session publication tombstone rejected", { address: formatSessionAddress(record.address), reason: result.reason });
+					} finally {
+						this.#published.delete(ref);
+					}
+				}).catch(error => {
+					closing = undefined;
+					throw error;
+				});
+				return closing;
+			},
+		};
+		if (this.#refs.get(ref.id) !== ref || !ref.session) {
+			await publication.close();
+			throw new Error("Session replaced during publication");
+		}
+		this.#published.set(ref, publication);
+		return publication;
+	}
+
+	async listPublishedSessions(): Promise<ClaimResult[]> {
+		const context = this.#publication;
+		if (!context) return [];
+		return (await context.directory.listActive()).filter(record => {
+			const address = record.address;
+			if (address.namespace !== context.identity.namespace || address.host !== context.identity.host || address.backend !== context.identity.backend || address.process === context.identity.process) return false;
+			if (!/^[1-9][0-9]*$/.test(address.process)) return false;
+			try {
+				process.kill(Number(address.process), 0);
+				return true;
+			} catch (error) {
+				return error instanceof Error && "code" in error && error.code === "EPERM";
+			}
+		});
+	}
+
+	async findPublishedSession(id: string): Promise<ClaimResult | undefined> {
+		const matches = (await this.listPublishedSessions()).filter(record => formatSessionAddress(record.address) === id || record.address.session === id);
+		if (matches.length > 1) throw new Error(`Ambiguous remote session "${id}"; use its full published address`);
+		return matches[0];
+	}
 
 	#matchesExpected(ref: AgentRef, expected?: AgentRefExpectation): boolean {
 		return expected === undefined || ref === expected || ref.session === expected;
@@ -257,6 +344,11 @@ export class AgentRegistry {
 	unregister(id: string, expected?: AgentRefExpectation): boolean {
 		const ref = this.#refs.get(id);
 		if (!ref || !this.#matchesExpected(ref, expected)) return false;
+		const publication = this.#published.get(ref);
+		if (publication) {
+			this.#published.delete(ref);
+			void publication.close().catch(error => logger.warn("Session publication close on unregister failed", { error: String(error) }));
+		}
 		this.#refs.delete(id);
 		this.#emit({ type: "removed", ref });
 		return true;

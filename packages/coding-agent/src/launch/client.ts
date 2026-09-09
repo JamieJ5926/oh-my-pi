@@ -490,6 +490,27 @@ export async function createDaemonBrokerClient(
 	return new SocketDaemonClient(canonical, runtimeDir, token, options);
 }
 
+/**
+ * Ensure the project daemon broker is running. The broker hosts the bridge
+ * transport server that cross-process IRC sends deliver through. Idle roots
+ * never create a daemon client, so without this call nothing spawns the
+ * broker and remote sends journal locally as "queued" with nothing to ever
+ * deliver them. Uses an independent connection that is closed before
+ * returning; the broker persists while project presence is live. Best-effort:
+ * callers log-and-continue on failure.
+ */
+export async function ensureProjectDaemonBroker(
+	projectDir: string,
+	options: DaemonBrokerClientOptions = {},
+): Promise<void> {
+	const client = await createDaemonBrokerClient(projectDir, options);
+	try {
+		await client.request({ op: "ping" });
+	} finally {
+		client.close();
+	}
+}
+
 /** Get the process-shared daemon broker client for one canonical project directory. */
 export async function daemonClientForProject(projectDir: string): Promise<DaemonBrokerClient> {
 	const canonical = await canonicalProjectDir(projectDir);

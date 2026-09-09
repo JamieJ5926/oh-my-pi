@@ -8,6 +8,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { AsyncJobType } from "../../async";
 import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
 import type { LaunchParams, LaunchToolDetails } from "./launch";
+import type { PublishedPeer } from "./messaging";
 
 /**
  * Hub operations: messaging (`send`/`wait`/`inbox`/`list`), jobs
@@ -108,6 +109,7 @@ export interface CoordinationDetails {
 	waited?: IrcMessage | null;
 	inbox?: IrcMessage[];
 	peers?: HubPeerInfo[];
+	readonly publishedPeers?: PublishedPeer[];
 	/** Present on `op:"list"`: addressable running/idle/parked plus page size. */
 	counts?: HubRosterCounts;
 	jobs?: JobSnapshot[];

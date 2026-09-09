@@ -16,6 +16,9 @@
  */
 
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { formatSessionAddress, type SessionAddress } from "../bridge/core/address";
+import { createMessageEnvelope } from "../bridge/core/envelope";
+import type { TransportAdapter } from "../bridge/transport/transport";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
@@ -36,7 +39,7 @@ export interface IrcMessage {
 
 export interface IrcDeliveryReceipt {
 	to: string;
-	outcome: "injected" | "woken" | "revived" | "failed";
+	outcome: "injected" | "woken" | "revived" | "queued" | "failed";
 	error?: string;
 }
 
@@ -82,6 +85,35 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
+	#transport: TransportAdapter | undefined;
+	readonly #addresses = new Map<string, SessionAddress>();
+
+	attachTransport(transport: TransportAdapter): void {
+		if (this.#transport && this.#transport !== transport) throw new Error("IRC transport already attached");
+		this.#transport = transport;
+	}
+
+	hasTransport(): boolean {
+		return this.#transport !== undefined;
+	}
+
+	async registerPublished(id: string, address: SessionAddress): Promise<(() => Promise<void>) | undefined> {
+		const transport = this.#transport;
+		if (!transport) return undefined;
+		await transport.register(address, async envelope => {
+			if (formatSessionAddress(envelope.destination) !== formatSessionAddress(address)) throw new Error("IRC destination mismatch");
+			if (envelope.body.kind !== "payload") throw new Error("Invalid IRC payload");
+			const payload = envelope.body.payload;
+			if (!payload || typeof payload !== "object" || !("body" in payload) || typeof payload.body !== "string") throw new Error("Invalid IRC payload");
+			const receipt = await this.#deliver({ id: envelope.id, ts: envelope.createdAt, from: formatSessionAddress(envelope.source), to: id, body: payload.body, replyTo: envelope.correlationId }, { expectsReply: "expectsReply" in payload && payload.expectsReply === true });
+			if (receipt.outcome === "failed") throw new Error(receipt.error);
+		});
+		this.#addresses.set(id, address);
+		return async () => {
+			if (this.#addresses.get(id) === address) this.#addresses.delete(id);
+			await transport.unregister(address);
+		};
+	}
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
@@ -119,8 +151,25 @@ export class IrcBus {
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		return this.#deliver(message, opts);
+	}
+
+	async #deliver(message: IrcMessage, opts?: { expectsReply?: boolean; suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
+			try {
+				const remote = await this.#registry.findPublishedSession(message.to);
+				if (remote) {
+					const source = this.#addresses.get(message.from);
+					if (!this.#transport || !source) return { to: message.to, outcome: "failed", error: "Remote session is unreachable: sender transport is not registered." };
+					const result = await this.#transport.send(createMessageEnvelope({ id: message.id, source, destination: remote.address, body: { kind: "payload", payload: { body: message.body, expectsReply: opts?.expectsReply === true } }, correlationId: message.replyTo, sequence: 1, idempotencyKey: message.id, createdAt: message.ts }));
+					if (result.kind === "delivered") return { to: message.to, outcome: "injected" };
+					if (result.kind === "queued") return { to: message.to, outcome: "queued" };
+					return { to: message.to, outcome: "failed", error: `Remote transport ${result.kind}` };
+				}
+			} catch (error) {
+				return { to: message.to, outcome: "failed", error: String(error) };
+			}
 			return {
 				to: message.to,
 				outcome: "failed",

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { formatSessionIdentity, formatSessionAddress, parseSessionAddress, createSessionAddress, sessionIdentity, type SessionAddress, type SessionIdentity } from "./address";
@@ -69,6 +69,7 @@ export interface SessionDirectory {
 
 const MAX_DIRECTORY_BYTES = 8 * 1024 * 1024;
 const MAX_TTL_MS = 31 * 24 * 60 * 60 * 1000;
+const TOMBSTONE_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 function validateIdentity(identity: SessionIdentity): SessionIdentity {
 	return sessionIdentity(createSessionAddress({ ...identity, generation: 1 }));
@@ -132,10 +133,18 @@ export class InMemorySessionDirectory implements SessionDirectory, SessionGenera
 		if (observed >= Number.MAX_SAFE_INTEGER) throw new Error("Session generation exhausted");
 		const address = createSessionAddress({ ...identity, generation: observed + 1 });
 		const now = Date.now();
+		for (const [key, existing] of this.#records) {
+			if (existing.kind === "active" ? existing.expiresAt <= now : existing.tombstonedAt + TOMBSTONE_RETENTION_MS <= now) this.#records.delete(key);
+		}
 		const record: ClaimResult = Object.freeze({ kind: "active", address, registeredAt: now, lastHeartbeatAt: now, expiresAt: now + ttlMs, revival });
 		this.#records.set(identityKey(identity), record);
 		this.#lastGeneration = address.generation;
 		return record;
+	}
+
+	async listActive(): Promise<ClaimResult[]> {
+		const now = Date.now();
+		return [...this.#records.values()].filter((record): record is ClaimResult => record.kind === "active" && record.expiresAt > now);
 	}
 
 	async heartbeat(address: SessionAddress, ttlMs: number): Promise<HeartbeatResult> {
@@ -186,7 +195,7 @@ export class InMemorySessionDirectory implements SessionDirectory, SessionGenera
 	async purgeExpired(now = Date.now()): Promise<number> {
 		let count = 0;
 		for (const [key, record] of this.#records) {
-			if (record.kind === "active" && record.expiresAt <= now) {
+			if (record.kind === "active" ? record.expiresAt <= now : record.tombstonedAt + TOMBSTONE_RETENTION_MS <= now) {
 				this.#records.delete(key);
 				count++;
 			}
@@ -302,9 +311,53 @@ export class FileSessionDirectory implements SessionDirectory, SessionGeneration
 		while (true) {
 			try {
 				await mkdir(this.#lockPath);
+				await writeFile(join(this.#lockPath, "owner"), String(process.pid), { flag: "wx" });
 				break;
 			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() - started > this.#lockTimeoutMs) throw error;
+				if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
+				try {
+					const lock = await stat(this.#lockPath);
+					let abandoned = false;
+					try {
+						const owner = Number(await readFile(join(this.#lockPath, "owner"), "utf8"));
+						if (Number.isSafeInteger(owner) && owner > 0) {
+							try { process.kill(owner, 0); } catch (ownerError) {
+								abandoned = ownerError instanceof Error && "code" in ownerError && ownerError.code === "ESRCH";
+							}
+						}
+					} catch (ownerError) {
+						if (!(ownerError instanceof Error) || !("code" in ownerError) || ownerError.code !== "ENOENT") throw ownerError;
+						abandoned = Date.now() - lock.mtimeMs > 30_000;
+					}
+					if (abandoned) {
+						const aside = `${this.#lockPath}.stale-${process.pid}-${randomUUID()}`;
+						try {
+							await rename(this.#lockPath, aside);
+						} catch (stealError) {
+							if (stealError instanceof Error && "code" in stealError && stealError.code === "ENOENT") continue;
+							throw stealError;
+						}
+						try {
+							const moved = await stat(aside);
+							if (moved.ino !== lock.ino) {
+								try {
+									await rename(aside, this.#lockPath);
+								} catch {
+									await rm(aside, { recursive: true, force: true });
+								}
+								continue;
+							}
+							await rm(aside, { recursive: true, force: true });
+						} catch {
+							await rm(aside, { recursive: true, force: true });
+							continue;
+						}
+						continue;
+					}
+				} catch (lockError) {
+					if (!(lockError instanceof Error) || !("code" in lockError) || lockError.code !== "ENOENT") throw lockError;
+				}
+				if (Date.now() - started > this.#lockTimeoutMs) throw error;
 				await Bun.sleep(10);
 			}
 		}
@@ -341,6 +394,9 @@ export class FileSessionDirectory implements SessionDirectory, SessionGeneration
 			if (observed >= Number.MAX_SAFE_INTEGER) throw new Error("Session generation exhausted");
 			const address = createSessionAddress({ ...identity, generation: observed + 1 });
 			const now = Date.now();
+			for (const [key, existing] of records) {
+				if (existing.kind === "active" ? existing.expiresAt <= now : existing.tombstonedAt + TOMBSTONE_RETENTION_MS <= now) records.delete(key);
+			}
 			const record: ClaimResult = Object.freeze({ kind: "active", address, registeredAt: now, lastHeartbeatAt: now, expiresAt: now + ttlMs, revival });
 			records.set(identityKey(identity), record);
 			return { result: record, changed: true, generation: address.generation };
@@ -365,6 +421,11 @@ export class FileSessionDirectory implements SessionDirectory, SessionGeneration
 		const records = await this.#read();
 		const current = records.get(identityKey(address));
 		return current?.kind === "active" && current.expiresAt <= Date.now() ? null : current ?? null;
+	}
+
+	async listActive(): Promise<ClaimResult[]> {
+		const now = Date.now();
+		return [...(await this.#read()).values()].filter((record): record is ClaimResult => record.kind === "active" && record.expiresAt > now);
 	}
 
 	async compareAndSwap(address: SessionAddress, expectedGeneration: number, replacement: SessionRecord): Promise<CasResult> {
@@ -396,7 +457,7 @@ export class FileSessionDirectory implements SessionDirectory, SessionGeneration
 		return this.#locked<number>(async records => {
 			let count = 0;
 			for (const [key, record] of records) {
-				if (record.kind === "active" && record.expiresAt <= now) {
+				if (record.kind === "active" ? record.expiresAt <= now : record.tombstonedAt + TOMBSTONE_RETENTION_MS <= now) {
 					records.delete(key);
 					count++;
 				}
