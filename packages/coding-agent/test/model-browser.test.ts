@@ -440,6 +440,37 @@ describe("ModelBrowser effort badge", () => {
 		expect(rows[2]).not.toContain("slow");
 	});
 
+	test("picker badges a hidden role's explicit level when it wins activation", () => {
+		// P2 (PR #11330, thread 3967989278): hidden default:low + visible
+		// slow:max on one model. resolveTemporaryModelThinkingLevel still
+		// iterates the hidden role and applies low on Enter, so the picker
+		// row must advertise low, not max.
+		const shared = makeModel("openai", "gpt-5");
+		const lowBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Low));
+		const maxBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Max));
+		const browser = new ModelBrowser(Settings.isolated({ modelTags: { default: { hidden: true } } }), {
+			suppressDerivedThinkingLevels: true,
+		});
+		browser.setRoles({
+			default: {
+				model: shared,
+				thinkingLevel: ThinkingLevel.Low,
+				autoSelected: false,
+				explicitThinkingLevel: true,
+			},
+			slow: {
+				model: shared,
+				thinkingLevel: ThinkingLevel.Max,
+				autoSelected: false,
+				explicitThinkingLevel: true,
+			},
+		});
+		browser.setItems(buildBrowserItems([shared]));
+		const rows = browser.render(160).map(line => Bun.stripANSI(line));
+		expect(rows[2]).toContain(lowBadge);
+		expect(rows[2]).not.toContain(maxBadge);
+	});
+
 	test("custom roles outside the built-in ids badge their level", () => {
 		const shared = makeModel("openai", "gpt-5");
 		const rows = renderRows([shared], {

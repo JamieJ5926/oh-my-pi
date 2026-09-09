@@ -981,7 +981,11 @@ export class ModelBrowser implements Component {
 			const assignment = this.#roles[role];
 			if (!assignment || assignment.autoSelected) return;
 			if (!modelsAreEqual(assignment.model, item.model)) return;
-			if (getRoleInfo(role, this.#settings).hidden) return;
+			// Picker parity with resolveTemporaryModelThinkingLevel (P2 #11330):
+			// the activation path iterates every known role including hidden
+			// ones, so the picker badge must too. The hub (flag unset) keeps
+			// hiding them.
+			if (!this.#suppressDerivedThinkingLevels && getRoleInfo(role, this.#settings).hidden) return;
 			// Picker-only suppression: derived levels (e.g. `defaultThinkingLevel`
 			// with no `:level` suffix) are not applied by the Alt+P picker, so
 			// the picker hides them as a fallback. The hub applies role
