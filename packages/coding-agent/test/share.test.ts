@@ -563,7 +563,19 @@ describe("buildShareSnapshot", () => {
 						tools: [],
 					},
 					contextFiles: [{ path: "/ctx/notes.md", content: `notes ${secret}` }],
-					rules: [{ name: "r", path: "/rules/r.md", content: `rule body ${secret}`, _source: { provider: "project", providerName: "Project", path: `/home/${secret}/rules/r.md`, level: "project" } }],
+					rules: [
+						{
+							name: "r",
+							path: "/rules/r.md",
+							content: `rule body ${secret}`,
+							_source: {
+								provider: "project",
+								providerName: "Project",
+								path: `/home/${secret}/rules/r.md`,
+								level: "project",
+							},
+						},
+					],
 					skills: [
 						{
 							name: "s",
