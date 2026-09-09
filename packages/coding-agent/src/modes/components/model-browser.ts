@@ -993,6 +993,16 @@ export class ModelBrowser implements Component {
 		for (const role of MODEL_ROLE_IDS) match(role);
 		for (const role in this.#roles) match(role);
 		if (levels.size === 0) return "";
+		if (this.#suppressDerivedThinkingLevels) {
+			// Picker-specific single result: Enter applies the first matching
+			// configured role (resolveTemporaryModelThinkingLevel), so the
+			// ordinary row advertises only that level. Insertion follows
+			// MODEL_ROLE_IDS first, matching the resolver's role order. The hub
+			// (flag unset) keeps multi-role attribution below.
+			const only = [...levels.keys()][0];
+			if (only === undefined) return "";
+			return ` ${formatThinkingLevelBadge(only)}`;
+		}
 		if (levels.size === 1) {
 			const only = [...levels.keys()][0];
 			if (only === undefined) return "";

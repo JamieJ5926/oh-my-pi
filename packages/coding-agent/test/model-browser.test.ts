@@ -419,6 +419,27 @@ describe("ModelBrowser effort badge", () => {
 		expect(rows[2]).toContain("max");
 	});
 
+	test("picker renders only the applied level for a shared model", () => {
+		// P2 (PR #11330): shared model default:low + slow:max. Enter applies
+		// the first matching role (low), so the picker row must show low
+		// only; the hub keeps both attributions (previous test).
+		const shared = makeModel("openai", "gpt-5");
+		const lowBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Low));
+		const maxBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Max));
+		const rows = renderRows(
+			[shared],
+			{
+				default: { model: shared, thinkingLevel: ThinkingLevel.Low, autoSelected: false },
+				slow: { model: shared, thinkingLevel: ThinkingLevel.Max, autoSelected: false },
+			},
+			{ suppressDerivedThinkingLevels: true },
+		);
+
+		expect(rows[2]).toContain(lowBadge);
+		expect(rows[2]).not.toContain(maxBadge);
+		expect(rows[2]).not.toContain("slow");
+	});
+
 	test("custom roles outside the built-in ids badge their level", () => {
 		const shared = makeModel("openai", "gpt-5");
 		const rows = renderRows([shared], {
