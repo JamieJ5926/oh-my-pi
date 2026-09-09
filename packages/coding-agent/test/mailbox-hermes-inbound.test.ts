@@ -3,6 +3,7 @@
  * Fixture copies only; never touches the live inbox.
  */
 import { describe, expect, it } from "bun:test";
+import { homedir } from "node:os";
 import {
 	formatMailboxLine,
 	insertMailboxLine,
@@ -100,6 +101,26 @@ describe("hermes-inbound", () => {
 		} finally {
 			if (savedFile === undefined) delete process.env.HERMES_MAILBOX_FILE;
 			else process.env.HERMES_MAILBOX_FILE = savedFile;
+			if (savedHome === undefined) delete process.env.HOME;
+			else process.env.HOME = savedHome;
+		}
+	});
+
+	it("appends after header text when no entries exist yet, top only when empty", () => {
+		const line = "- [ ] 2026-09-09 10:05 · hermes/telegram · **task** — first";
+		const headerOnly = insertMailboxLine("doctrine header, no entries yet", line);
+		expect(headerOnly).toBe(["doctrine header, no entries yet", line].join("\n"));
+		expect(insertMailboxLine("", line)).toBe(line);
+	});
+
+	it("falls back to homedir() when HOME is unset or empty", () => {
+		const savedHome = process.env.HOME;
+		try {
+			delete process.env.HOME;
+			expect(resolveMailboxPath().startsWith(`${homedir()}/Obsidean/00-Inbox/MAILBOX.md`)).toBe(true);
+			process.env.HOME = "";
+			expect(resolveMailboxPath().startsWith(`${homedir()}/Obsidean/00-Inbox/MAILBOX.md`)).toBe(true);
+		} finally {
 			if (savedHome === undefined) delete process.env.HOME;
 			else process.env.HOME = savedHome;
 		}

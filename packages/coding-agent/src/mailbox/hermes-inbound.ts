@@ -15,7 +15,7 @@ import { homedir } from "node:os";
 
 /** Default inbox path, resolved lazily so a later HOME change is honored. */
 export function defaultMailboxPath(): string {
-	const home = process.env.HOME ?? homedir();
+	const home = process.env.HOME || homedir();
 	return `${home}/Obsidean/00-Inbox/MAILBOX.md`;
 }
 
@@ -28,8 +28,7 @@ export type MailboxKind = (typeof KINDS)[number];
 
 export interface HermesInboundEvent {
 	/** Origin label, e.g. `hermes/telegram` or `hermes/discord:#ops`. */
-	source: string;
-	/** One of task|idea|message|note. Anything else is rejected. */
+	/** One of task|idea|message|note|feature|bug|project|decision. Anything else is rejected. */
 	kind: string;
 	/** Body text; single line, never empty. */
 	content: string;
@@ -81,13 +80,16 @@ export function formatMailboxLine(event: HermesInboundEvent, now = new Date()): 
  * rewriting existing lines. Doctrine (mailbox skill) places entries under
  * the `---` separator, but the live inbox observed 2026-09-09 carries no
  * separator, so: with a separator, insert under it; without one, insert
- * above the first entry line so a doctrine header stays on top.
+ * above the first entry line so a doctrine header stays on top; with
+ * header text but no entries yet, append after the header; only genuinely
+ * empty input takes the line at the top.
  */
 export function insertMailboxLine(fileText: string, line: string): string {
 	const lines = fileText.split("\n");
 	const sep = lines.findIndex((l) => l.trim() === MAILBOX_SEPARATOR);
 	if (sep !== -1) return [...lines.slice(0, sep + 1), line, ...lines.slice(sep + 1)].join("\n");
 	const firstEntry = lines.findIndex((l) => /^- \[[ x]\]/.test(l));
-	if (firstEntry === -1) return [line, ...lines].join("\n");
-	return [...lines.slice(0, firstEntry), line, ...lines.slice(firstEntry)].join("\n");
+	if (firstEntry !== -1) return [...lines.slice(0, firstEntry), line, ...lines.slice(firstEntry)].join("\n");
+	if (fileText.trim() === "") return line;
+	return [...lines, line].join("\n");
 }
