@@ -1760,6 +1760,44 @@ describe("ExtensionRunner", () => {
 			expect(elapsedMs).toBeLessThan(500);
 		});
 
+		it("falls back to the global handler timeout for tool_call when toolCallTimeoutMs is unset (#11286)", async () => {
+			const extensionPath = path.join(tempDir.path(), "tool-call-global-fallback.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.on("tool_call", async () => {
+							await Promise.withResolvers().promise;
+						});
+					}
+				`,
+			);
+			const loaded = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				Settings.isolated({ "extensionHandlers.timeoutMs": 10 }),
+			);
+			const startedAt = performance.now();
+			const decision = await runner.emitToolCall({
+				type: "tool_call",
+				toolName: "guarded",
+				toolCallId: "global-fallback-call",
+				input: {},
+			});
+			const elapsedMs = performance.now() - startedAt;
+
+			expect(decision).toEqual({
+				block: true,
+				reason: `Extension ${extensionPath} timed out after 10ms`,
+			});
+			expect(elapsedMs).toBeLessThan(500);
+		});
+
 		it("fails closed when a tool_call handler registration cannot activate", async () => {
 			const extensionPath = path.join(tempDir.path(), "tool-call-registration.ts");
 			fs.writeFileSync(

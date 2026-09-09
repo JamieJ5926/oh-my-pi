@@ -5984,7 +5984,7 @@ export const SETTINGS_SCHEMA = {
 			label: "Handler Timeout (ms)",
 			description:
 				"Positive finite wall-clock timeout for extension handlers. " +
-				"toolCallTimeoutMs overrides this for tool_call; session_shutdown keeps its dedicated 2s cap",
+				"When explicitly configured, toolCallTimeoutMs overrides this for tool_call; session_shutdown keeps its dedicated 2s cap",
 		},
 	},
 
@@ -5996,7 +5996,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Extensions",
 			label: "Tool Call Handler Timeout (ms)",
 			description:
-				"Positive finite active-work timeout for extension tool_call handlers; invalid values use 30000ms, and time awaiting OMP-owned dialogs does not count",
+				"Positive finite active-work timeout for extension tool_call handlers; when unconfigured, extensionHandlers.timeoutMs applies, invalid values use 30000ms, and time awaiting OMP-owned dialogs does not count",
 		},
 	},
 

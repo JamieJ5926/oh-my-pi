@@ -114,11 +114,6 @@ export function testSetSessionShutdownHandlerTimeoutMs(timeoutMs: number): void 
 	sessionShutdownHandlerTimeoutMs = timeoutMs;
 }
 
-/** Per-event handler budget. Defaults to the generic cap; `session_shutdown`
- *  uses its own short cap so teardown stays prompt. */
-function handlerTimeoutForEvent(eventType: string): number {
-	return eventType === "session_shutdown" ? sessionShutdownHandlerTimeoutMs : extensionHandlerTimeoutMs;
-}
 
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
 const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
@@ -946,8 +941,9 @@ export class ExtensionRunner {
 				if (!tool) return;
 				try {
 					const scope = this.#toolRegistrationScope.getStore();
-					const registrationSignal =
-						scope && !scope.closed ? scope.signal : AbortSignal.timeout(this.#handlerTimeoutMsForEvent("tool_registration"));
+					const registrationSignal = scope && !scope.closed
+						? scope.signal
+						: AbortSignal.timeout(this.#handlerTimeoutMsForEvent("tool_registration"));
 					const pending = listener(tool, registrationSignal);
 					if (pending) trackRegistration(pending);
 				} catch (error) {
@@ -1349,24 +1345,28 @@ export class ExtensionRunner {
 	/**
 	 * Settings-aware per-event handler budget (issue #11286). `session_shutdown`
 	 * stays pinned to its dedicated 2s cap so teardown latency is unaffected;
-	 * `tool_call` prefers `extensionHandlers.toolCallTimeoutMs` with
-	 * `extensionHandlers.timeoutMs` as fallback; every other event uses
-	 * `extensionHandlers.timeoutMs`. All values run through
+	 * `tool_call` prefers an explicitly configured
+	 * `extensionHandlers.toolCallTimeoutMs`, falling back to an explicitly
+	 * configured `extensionHandlers.timeoutMs`; every other event uses an
+	 * explicitly configured `extensionHandlers.timeoutMs`. Unset keys fall
+	 * through to the module-level default (honouring
+	 * `testSetExtensionHandlerTimeoutMs`) because `Settings.get` returns the
+	 * schema default for unconfigured keys. All values run through
 	 * `normalizeHandlerTimeout`, so invalid input falls back to 30s and 0 can
 	 * never disable the watchdog (#3948).
 	 */
 	#handlerTimeoutMsForEvent(eventType: string): number {
-		if (eventType === "session_shutdown") return handlerTimeoutForEvent(eventType);
+		if (eventType === "session_shutdown") return sessionShutdownHandlerTimeoutMs;
+		const globalTimeoutMs = this.settings?.isConfigured("extensionHandlers.timeoutMs")
+			? this.settings.get("extensionHandlers.timeoutMs")
+			: undefined;
 		if (eventType === "tool_call") {
-			return normalizeHandlerTimeout(
-				this.settings?.get("extensionHandlers.toolCallTimeoutMs") ??
-					this.settings?.get("extensionHandlers.timeoutMs") ??
-					extensionHandlerTimeoutMs,
-			);
+			const toolCallTimeoutMs = this.settings?.isConfigured("extensionHandlers.toolCallTimeoutMs")
+				? this.settings.get("extensionHandlers.toolCallTimeoutMs")
+				: undefined;
+			return normalizeHandlerTimeout(toolCallTimeoutMs ?? globalTimeoutMs ?? extensionHandlerTimeoutMs);
 		}
-		return normalizeHandlerTimeout(
-			this.settings?.get("extensionHandlers.timeoutMs") ?? extensionHandlerTimeoutMs,
-		);
+		return normalizeHandlerTimeout(globalTimeoutMs ?? extensionHandlerTimeoutMs);
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
@@ -1378,7 +1378,7 @@ export class ExtensionRunner {
 		let result: SessionBeforeEventResult | SessionCompactingResult | SessionStopEventResult | undefined;
 
 		if (this.#isSessionShutdownEvent(event)) {
-		const timeoutMs = this.#handlerTimeoutMsForEvent(event.type);
+			const timeoutMs = this.#handlerTimeoutMsForEvent(event.type);
 			const promises: Promise<unknown>[] = [];
 			for (const ext of this.extensions) {
 				const handlers = ext.handlers.get(event.type);
@@ -1622,9 +1622,13 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			for (const handler of ext.handlers.get("input") ?? []) {
 				const event: InputEvent = { type: "input", text: currentText, images: currentImages, source };
-				const result = (await this.#runHandlerWithTimeout(handler, event, ctx, ext, this.#handlerTimeoutMsForEvent("input"))) as
-					| InputEventResult
-					| undefined;
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					this.#handlerTimeoutMsForEvent("input"),
+				)) as InputEventResult | undefined;
 				if (result?.handled) return result;
 				if (result?.text !== undefined) currentText = result.text;
 				if (result?.images !== undefined) currentImages = result.images;
@@ -1728,7 +1732,13 @@ export class ExtensionRunner {
 					requestId: response.requestId,
 					metadata: response.metadata,
 				};
-				await this.#runHandlerWithTimeout(handler, event, ctx, ext, this.#handlerTimeoutMsForEvent("after_provider_response"));
+				await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					this.#handlerTimeoutMsForEvent("after_provider_response"),
+				);
 			}
 		}
 	}
