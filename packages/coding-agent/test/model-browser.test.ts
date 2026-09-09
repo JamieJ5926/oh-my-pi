@@ -318,8 +318,18 @@ describe("ModelBrowser effort badge", () => {
 		const rows = renderRows(
 			[derived, explicit],
 			{
-				default: { model: derived, thinkingLevel: ThinkingLevel.High, autoSelected: false, explicitThinkingLevel: false },
-				slow: { model: explicit, thinkingLevel: ThinkingLevel.High, autoSelected: false, explicitThinkingLevel: true },
+				default: {
+					model: derived,
+					thinkingLevel: ThinkingLevel.High,
+					autoSelected: false,
+					explicitThinkingLevel: false,
+				},
+				slow: {
+					model: explicit,
+					thinkingLevel: ThinkingLevel.High,
+					autoSelected: false,
+					explicitThinkingLevel: true,
+				},
 			},
 			{ suppressDerivedThinkingLevels: true },
 		);
@@ -334,7 +344,12 @@ describe("ModelBrowser effort badge", () => {
 		const derived = makeModel("openai", "gpt-5");
 		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
 		const rows = renderRows([derived], {
-			default: { model: derived, thinkingLevel: ThinkingLevel.High, autoSelected: false, explicitThinkingLevel: false },
+			default: {
+				model: derived,
+				thinkingLevel: ThinkingLevel.High,
+				autoSelected: false,
+				explicitThinkingLevel: false,
+			},
 		});
 
 		expect(rows[2]).toContain(highBadge);
