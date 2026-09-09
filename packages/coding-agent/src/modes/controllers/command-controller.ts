@@ -1297,6 +1297,10 @@ export class CommandController {
 
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
+		// A project reload can change spacing-effective settings (e.g.
+		// tui.mermaidPaddingX/Y); visible transcript components cache their
+		// rendered lines, so rebuild them like direct /settings edits do.
+		this.ctx.rebuildChatFromMessages();
 		this.ctx.ui.requestRender();
 		return true;
 	}

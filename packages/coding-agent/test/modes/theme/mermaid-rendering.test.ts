@@ -136,4 +136,18 @@ describe("Mermaid rendering setting", () => {
 		setMarkdownMermaidSpacing({ paddingX: 1.9, paddingY: 5, boxBorderPadding: 1 });
 		expect(renderMermaidAscii(source)).toBe(baseline);
 	});
+
+	it("falls back to the default for oversized spacing instead of hanging", () => {
+		const source = "flowchart TD\n  A[alpha] --> B[beta]";
+		const baseline = renderMermaidAscii(source);
+		setMarkdownMermaidSpacing({ paddingX: 100000, paddingY: 100000, boxBorderPadding: 100000 });
+		expect(renderMermaidAscii(source)).toBe(baseline);
+	});
+
+	it("leaves sequence diagrams unaffected by spacing settings", () => {
+		const source = "sequenceDiagram\n  A->>B: hello\n  B-->>A: world";
+		const baseline = renderMermaidAscii(source);
+		setMarkdownMermaidSpacing({ paddingX: 0, paddingY: 0, boxBorderPadding: 0 });
+		expect(renderMermaidAscii(source)).toBe(baseline);
+	});
 });

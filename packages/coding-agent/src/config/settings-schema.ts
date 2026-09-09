@@ -1233,21 +1233,21 @@ export const SETTINGS_SCHEMA = {
 		type: "number",
 		default: 5,
 		description:
-			"Horizontal spacing between nodes in ASCII Mermaid diagrams (default 5). Must be a non-negative integer; invalid values fall back to the default.",
+			"Horizontal spacing between nodes in flowchart and state ASCII Mermaid diagrams (default 5). Must be an integer from 0 to 32; invalid values fall back to the default. Sequence, class, ER, and xychart diagrams ignore spacing settings.",
 	},
 
 	"tui.mermaidPaddingY": {
 		type: "number",
 		default: 5,
 		description:
-			"Vertical spacing between nodes in ASCII Mermaid diagrams (default 5). Must be a non-negative integer; invalid values fall back to the default.",
+			"Vertical spacing between nodes in flowchart and state ASCII Mermaid diagrams (default 5). Must be an integer from 0 to 32; invalid values fall back to the default. Sequence, class, ER, and xychart diagrams ignore spacing settings.",
 	},
 
 	"tui.mermaidBoxBorderPadding": {
 		type: "number",
 		default: 1,
 		description:
-			"Padding inside node boxes in ASCII Mermaid diagrams (default 1). Must be a non-negative integer; invalid values fall back to the default.",
+			"Padding inside node boxes in flowchart and state ASCII Mermaid diagrams (default 1). Must be an integer from 0 to 32; invalid values fall back to the default. Sequence, class, ER, and xychart diagrams ignore spacing settings.",
 	},
 
 	"tui.reactions": {

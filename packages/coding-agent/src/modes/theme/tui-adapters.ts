@@ -172,13 +172,23 @@ export interface MarkdownMermaidSpacing {
 
 const MERMAID_SPACING_DEFAULTS = { paddingX: 5, paddingY: 5, boxBorderPadding: 1 } as const;
 
+// Upper bound so a configuration typo (e.g. paddingX 100000) cannot make the
+// flowchart grid pipeline build an enormous canvas and freeze the TUI.
+const MERMAID_SPACING_MAX = 32;
+
 let markdownMermaidSpacing: MarkdownMermaidSpacing = { ...MERMAID_SPACING_DEFAULTS };
 
 function sanitizeMermaidSpacing(value: number, fallback: number): number {
-	if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) return fallback;
+	if (
+		typeof value !== "number" ||
+		!Number.isFinite(value) ||
+		!Number.isInteger(value) ||
+		value < 0 ||
+		value > MERMAID_SPACING_MAX
+	)
+		return fallback;
 	return value;
 }
-
 export function setMarkdownMermaidSpacing(spacing: MarkdownMermaidSpacing): void {
 	const next = {
 		paddingX: sanitizeMermaidSpacing(spacing.paddingX, MERMAID_SPACING_DEFAULTS.paddingX),
