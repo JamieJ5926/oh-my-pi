@@ -338,6 +338,32 @@ export async function executeCancel(
 	for (const id of ids) {
 		const existing = manager.getJob(id);
 		if (!existing || (ownerId && existing.ownerId !== ownerId)) {
+			// A live row owned by another agent is normally out of reach — except
+			// when the caller is an ancestor of the row's agent (e.g. a grandparent
+			// killing a middle-owned grandchild job). Without this, the kill would
+			// fall through to the registration path below and leak the Middle-owned
+			// row with its abortController un-aborted. Cross-agent kills stay
+			// impossible: a broken or unregistered link denies.
+			if (existing?.status === "running" && ownerId && existing.ownerId !== ownerId) {
+				const registry = session.agentRegistry;
+				const ref =
+					registry?.get(id) ??
+					(existing.agentId && existing.agentId !== id ? registry?.get(existing.agentId) : undefined);
+				if (ref && isCancelAuthorized(registry, ref.parentId, ownerId)) {
+					manager.cancel(id);
+					const targetId = registry?.get(id) ? id : (existing.agentId ?? id);
+					const regOutcome = await cancelAgentRegistration(session, ownerId, targetId);
+					cancelOutcomes.push({
+						id,
+						status: "cancelled",
+						message:
+							regOutcome.status === "cancelled"
+								? `Cancelled background job ${id}.`
+								: `Cancelled background job ${id}. Registration: ${regOutcome.message}`,
+					});
+					continue;
+				}
+			}
 			// No job by this id (or it belongs to another agent): a budget-aborted
 			// keep-alive subagent lives on as a jobless registration long after its
 			// job row is reaped, so let cancel reach the agent registration too.
@@ -372,6 +398,26 @@ export async function executeCancel(
 }
 
 /**
+ * Ancestor cancel authority: the caller may cancel a registration whose
+ * parentId chain reaches the caller, not only a direct child. Intermediate
+ * parents need not be running (a parked midpoint still confers grandparent
+ * authority), but every link must resolve: an unregistered midpoint breaks
+ * the chain and denies. Bounded walk guards against a corrupt parentId cycle.
+ */
+function isCancelAuthorized(
+	registry: ToolSession["agentRegistry"],
+	parentId: string | undefined,
+	ownerId: string,
+): boolean {
+	let current = parentId;
+	for (let hops = 0; hops < 64 && current; hops += 1) {
+		if (current === ownerId) return true;
+		current = registry?.get(current)?.parentId;
+	}
+	return false;
+}
+
+/**
  * Kill a non-job-backed agent registration named by `id`: abort any in-flight
  * turn, then release it from the lifecycle (dispose session + unregister). This
  * is the only kill path for a keep-alive subagent that was budget-aborted, went
@@ -393,7 +439,7 @@ async function cancelAgentRegistration(
 	if (id === ownerId) {
 		return { id, status: "not_found", message: `Cannot cancel yourself (${id}).` };
 	}
-	if (ownerId && ref.parentId !== ownerId) {
+	if (ownerId && !isCancelAuthorized(registry, ref.parentId, ownerId)) {
 		return { id, status: "not_found", message: `Agent ${id} was not spawned by you and cannot be cancelled.` };
 	}
 	const lifecycle = session.agentLifecycle?.();
