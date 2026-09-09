@@ -51,6 +51,12 @@ export interface ModelBrowserItem {
 	selector: string;
 	/** Optional foreground color for the row label. */
 	labelColor?: ThemeColor;
+	/**
+	 * The row's own role thinking level for virtual `@role` rows: the level
+	 * applying that row would set, so the badge never falls back to an
+	 * unrelated role sharing the same model.
+	 */
+	thinkingLevel?: ConfiguredThinkingLevel;
 }
 
 /** Resolved role assignment as displayed by the browser and the hub. */
@@ -338,6 +344,18 @@ export function thinkingLevelGlyph(level: ConfiguredThinkingLevel): string {
 }
 
 /**
+ * Styled effort badge (`◉ max`) for a configured thinking level; empty for
+ * `inherit` (nothing to show). Shared by the browser rows and the hub role
+ * rows so the two surfaces cannot drift.
+ */
+export function formatThinkingLevelBadge(level: ConfiguredThinkingLevel): string {
+	if (level === ThinkingLevel.Inherit) return "";
+	const glyph = thinkingLevelGlyph(level);
+	const label = getConfiguredThinkingLevelMetadata(level).label;
+	return theme.fg("dim", glyph ? `${glyph} ${label}` : label);
+}
+
+/**
  * A slim role chip: `● default ◉` — solid dot for configured assignments,
  * hollow for auto-selected fallbacks, thinking glyph attached when set.
  *
@@ -425,6 +443,12 @@ export interface ModelBrowserOptions {
 	markOverContext?: boolean;
 	/** Host-provided empty-state text (e.g. provider discovery status). */
 	emptyText?: () => string | undefined;
+	/**
+	 * The session's current thinking level. Rendered on the session-model row
+	 * so the badge confirms the active session effort, not just persisted
+	 * role configuration. Undefined leaves every row on role data.
+	 */
+	sessionThinkingLevel?: ConfiguredThinkingLevel;
 }
 
 /** Rendered rows before the list window: search row + blank. */
@@ -468,6 +492,8 @@ export class ModelBrowser implements Component {
 	#focused = true;
 	/** `provider/id` of the session's active model; marked in rows and detail. */
 	#currentSelector: string | undefined;
+	/** Session effort rendered on the session-model row; undefined disables it. */
+	#sessionThinkingLevel: ConfiguredThinkingLevel | undefined;
 
 	/** Enter or click-on-selected. */
 	onActivate?: (item: ModelBrowserItem) => void;
@@ -483,7 +509,13 @@ export class ModelBrowser implements Component {
 		this.#currentContextTokens = Number.isFinite(tokens) && tokens > 0 ? Math.floor(tokens) : 0;
 		this.#markOverContext = options.markOverContext ?? false;
 		this.#emptyText = options.emptyText;
+		this.#sessionThinkingLevel = options.sessionThinkingLevel;
 		this.#syncAffinity();
+	}
+
+	/** Override the session effort rendered on the session-model row (undefined clears it). */
+	setSessionThinkingLevel(level: ConfiguredThinkingLevel | undefined): void {
+		this.#sessionThinkingLevel = level;
 	}
 
 	/** Mark `selector` as the session's active model (undefined clears the mark). */
@@ -873,30 +905,51 @@ export class ModelBrowser implements Component {
 		return index;
 	}
 
-	/** Resolved effort badge for `item`'s model (` ◉ max`), or empty when no configured role pins a level. */
+	/**
+	 * Resolved effort badge for `item`'s row. Precedence: the row's own role
+	 * level for virtual `@role` rows, then the session effort on the
+	 * session-model row, then the configured roles backing the model. A model
+	 * backing several roles at different levels renders one role-attributed
+	 * badge per level (`default ◔ low · slow ◉ max`); empty when nothing pins
+	 * a level.
+	 */
 	#thinkingBadgeFor(item: ModelBrowserItem): string {
+		if (item.thinkingLevel !== undefined && item.thinkingLevel !== ThinkingLevel.Inherit) {
+			return ` ${formatThinkingLevelBadge(item.thinkingLevel)}`;
+		}
+		if (
+			this.#sessionThinkingLevel !== undefined &&
+			this.#sessionThinkingLevel !== ThinkingLevel.Inherit &&
+			!item.selector.startsWith("@") &&
+			item.selector === this.#currentSelector
+		) {
+			return ` ${formatThinkingLevelBadge(this.#sessionThinkingLevel)}`;
+		}
 		const seen = new Set<string>();
-		const match = (role: string): string => {
-			if (seen.has(role)) return "";
+		const levels = new Map<ConfiguredThinkingLevel, string>();
+		const match = (role: string): void => {
+			if (seen.has(role)) return;
 			seen.add(role);
 			const assignment = this.#roles[role];
-			if (!assignment || assignment.autoSelected) return "";
-			if (!modelsAreEqual(assignment.model, item.model)) return "";
-			if (getRoleInfo(role, this.#settings).hidden) return "";
-			if (assignment.thinkingLevel === ThinkingLevel.Inherit) return "";
-			const glyph = thinkingLevelGlyph(assignment.thinkingLevel);
-			const label = getConfiguredThinkingLevelMetadata(assignment.thinkingLevel).label;
-			return ` ${theme.fg("dim", glyph ? `${glyph} ${label}` : label)}`;
+			if (!assignment || assignment.autoSelected) return;
+			if (!modelsAreEqual(assignment.model, item.model)) return;
+			if (getRoleInfo(role, this.#settings).hidden) return;
+			if (assignment.thinkingLevel === ThinkingLevel.Inherit) return;
+			if (!levels.has(assignment.thinkingLevel)) levels.set(assignment.thinkingLevel, role);
 		};
-		for (const role of MODEL_ROLE_IDS) {
-			const badge = match(role);
-			if (badge) return badge;
+		for (const role of MODEL_ROLE_IDS) match(role);
+		if (levels.size === 0) return "";
+		if (levels.size === 1) {
+			const only = [...levels.keys()][0];
+			if (only === undefined) return "";
+			return ` ${formatThinkingLevelBadge(only)}`;
 		}
-		for (const role in this.#roles) {
-			const badge = match(role);
-			if (badge) return badge;
-		}
-		return "";
+		const parts = [...levels].map(([level, role]) => {
+			const glyph = thinkingLevelGlyph(level);
+			const label = getConfiguredThinkingLevelMetadata(level).label;
+			return glyph ? `${role} ${glyph} ${label}` : `${role} ${label}`;
+		});
+		return ` ${theme.fg("dim", parts.join(" · "))}`;
 	}
 
 	/** Measured TPS/TTFT, falling back to the catalog TPS as an estimated `~118t/s`. */

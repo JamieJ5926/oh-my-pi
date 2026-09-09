@@ -8,6 +8,7 @@
 ### Added
 
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
+- Model browser rows now show the selected thinking-effort level next to the model name: the live session effort on the active model, the row's own role level in `@` quick-role mode, and role-attributed badges when one model backs several roles at different levels.
 
 ## [18.1.15] - 2026-09-08
 

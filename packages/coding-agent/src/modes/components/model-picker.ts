@@ -9,6 +9,7 @@ import { addKeyAliases, type Component, canonicalKeyId, type KeyId, parseKey, ty
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import type { ResolvedRoleModel } from "../../session/agent-session";
+import type { ConfiguredThinkingLevel } from "../../thinking";
 import { type ThemeColor, theme } from "../theme/theme";
 import {
 	buildBrowserItems,
@@ -44,6 +45,11 @@ export interface ModelPickerOptions {
 	currentContextTokens?: number;
 	/** `provider/id` of the session's active model; highlighted and preselected. */
 	currentSelector?: string;
+	/**
+	 * The session's current thinking level, rendered on the session-model row
+	 * so a session-only effort switch stays visible on reopen.
+	 */
+	sessionThinkingLevel?: ConfiguredThinkingLevel;
 	/** Resolved role models in the same order used by the ctrl+p quick-role cycle. */
 	quickRoles?: ReadonlyArray<ResolvedRoleModel>;
 	/** Complete ctrl+p order, including unavailable roles, to preserve segment colors. */
@@ -125,6 +131,7 @@ export class ModelPickerComponent implements Component {
 			currentContextTokens: options.currentContextTokens,
 			markOverContext: true,
 			emptyText: () => (this.#roleMode ? "  No quick roles in the Ctrl+P cycle" : undefined),
+			sessionThinkingLevel: options.sessionThinkingLevel,
 		});
 		this.#browser.onActivate = item => {
 			const quickRole = this.#quickRoles.get(item.selector);
@@ -211,6 +218,13 @@ export class ModelPickerComponent implements Component {
 				model: entry.model,
 				selector,
 				labelColor: palette[(orderIndex >= 0 ? orderIndex : index) % palette.length],
+				// The row's own role level wins over any model-wide fallback, so
+				// two roles sharing a model never show each other's effort.
+				// Only explicit levels qualify: applying a role without one
+				// leaves the session effort untouched.
+				...(entry.explicitThinkingLevel && entry.thinkingLevel !== undefined
+					? { thinkingLevel: entry.thinkingLevel }
+					: {}),
 			};
 		});
 	}

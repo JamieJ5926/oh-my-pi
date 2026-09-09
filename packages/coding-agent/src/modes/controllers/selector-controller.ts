@@ -937,6 +937,10 @@ export class SelectorController {
 			{
 				currentContextTokens,
 				currentSelector,
+				// The session's live effort, so the selected row confirms the
+				// active level even after a session-only switch with no
+				// configured role behind it.
+				sessionThinkingLevel: this.ctx.session.thinkingLevel ?? undefined,
 				taskModeKeys: this.ctx.keybindings.getKeys("app.model.selectTemporary"),
 				taskModeKeyLabel: this.ctx.keybindings.getDisplayString("app.model.selectTemporary") || "alt+p",
 				taskSelector,
