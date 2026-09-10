@@ -295,8 +295,10 @@ export class ModelPickerComponent implements Component {
 		this.#browser.setShowThinkingBadges(!this.#taskMode);
 		// A quick-role query (for example `@slow`) would otherwise keep
 		// filtering the swapped-in Task rows to an empty view, so entering
-		// Task mode clears it; leaving Task mode preserves the typed query.
-		if (this.#taskMode) this.#browser.setQuery("");
+		// Task mode clears it; ordinary model queries filter the same
+		// provider/id rows in both modes and are preserved, and leaving
+		// Task mode preserves the typed query either way.
+		if (this.#taskMode && this.#browser.query.startsWith("@")) this.#browser.setQuery("");
 		this.#syncItemsForQuery(this.#browser.query, true);
 		const target = this.#taskMode ? this.#taskSelector : this.#currentSelector;
 		if (target) this.#browser.selectSelector(target);

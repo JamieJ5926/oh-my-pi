@@ -730,6 +730,50 @@ describe("ModelPicker Task toggle from quick-role mode", () => {
 		expect(onPickRole).not.toHaveBeenCalled();
 		expect(onPick).not.toHaveBeenCalled();
 	});
+	test("ordinary query + Task toggle + Enter applies the filtered model, not the old Task override", () => {
+		// Regression (Codex P2 on PR #11330, thread 3968188060): typing a
+		// normal model query such as `sonnet` and then toggling Task mode
+		// must preserve the filter so Enter picks the filtered candidate.
+		// Only leading-`@` quick-role queries need clearing.
+		const sonnetModel = makeModel("test", "sonnet-pro");
+		const taskModel = makeModel("test", "task-model");
+		const sessionModel = makeModel("test", "session-model");
+		const models = [taskModel, sessionModel, sonnetModel];
+		const registry = {
+			refresh: async () => {},
+			getError: () => undefined,
+			getAvailable: () => models,
+			getAll: () => models,
+		} as unknown as ModelRegistry;
+		const ui = { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI;
+		const onPick = vi.fn();
+		const onPickRole = vi.fn();
+		const onCancel = vi.fn();
+		const onPickTask = vi.fn();
+		const picker = new ModelPickerComponent(
+			ui,
+			Settings.isolated({}),
+			registry,
+			models.map(model => ({ model })),
+			{ onPick, onPickRole, onPickTask, onCancel },
+			{
+				currentSelector: "test/session-model",
+				taskModeKeys: ["ctrl+t"],
+				taskSelector: "test/task-model",
+			},
+		);
+
+		for (const ch of "sonnet") picker.handleInput(ch);
+		picker.handleInput(String.fromCharCode(20)); // ctrl+t: Task-mode toggle
+
+		expect(picker.render(220).join("\n")).toContain("Switch Task Model");
+
+		picker.handleInput("\n");
+		expect(onPickTask).toHaveBeenCalledTimes(1);
+		expect(onPickTask.mock.calls[0]?.[1]).toBe("test/sonnet-pro");
+		expect(onPickRole).not.toHaveBeenCalled();
+		expect(onPick).not.toHaveBeenCalled();
+	});
 });
 
 describe("ModelBrowser over-context flagging", () => {
