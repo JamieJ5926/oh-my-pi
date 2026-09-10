@@ -2,14 +2,10 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
-
 ### Added
 
-- Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
 - Added `tui.mermaidPaddingX`, `tui.mermaidPaddingY`, and `tui.mermaidBoxBorderPadding` settings to control spacing in ASCII Mermaid diagrams (defaults 5/5/1, matching the previous rendering).
+
 ## [18.1.16] - 2026-09-09
 
 ### Added

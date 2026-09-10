@@ -845,7 +845,6 @@ export class Settings {
 			}
 		}
 	}
-
 	async #reloadPersistedLayers(): Promise<void> {
 		for (;;) {
 			await this.flush();
@@ -894,7 +893,7 @@ export class Settings {
 			this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
 			for (const [key, previous] of previousHookValues) {
 				const next = this.get(key);
-				if (!Bun.deepEquals(next, previous)) {
+				if (!Bun.deepEquals(next, previous) && !DISK_RELOAD_SILENT_HOOKS[key]) {
 					SETTING_HOOKS[key]?.(next, previous);
 				}
 			}
@@ -3053,6 +3052,24 @@ class SettingSignal<A extends unknown[] = []> {
 		}
 	}
 }
+
+/**
+ * Hooks skipped by disk reloads (`reloadFromDisk`, called only from
+ * task/eval preflight in `task/structured-subagent.ts`). The Mermaid
+ * renderer and spacing flags are process-global side effects, and that path
+ * has no UI handle for the base-prompt refresh and transcript rebuild the
+ * `/settings` and `/move` paths pair with the same change — firing them
+ * would flip live diagrams while the cached prompt still instructs the
+ * previous mode. Effective values still follow the disk via `get()` (so a
+ * freshly spawned child prompts correctly); the renderer picks them up at
+ * the next explicit refresh. `set()` and `reloadForCwd()` still fire them.
+ */
+const DISK_RELOAD_SILENT_HOOKS: Partial<Record<SettingPath, true>> = {
+	"tui.renderMermaid": true,
+	"tui.mermaidPaddingX": true,
+	"tui.mermaidPaddingY": true,
+	"tui.mermaidBoxBorderPadding": true,
+};
 
 /**
  * Reapply Mermaid ASCII spacing from the effective settings. Reads all three
