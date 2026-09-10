@@ -18,6 +18,7 @@ import {
 	type LspConfig,
 	loadConfig,
 } from "@oh-my-pi/pi-coding-agent/lsp/config";
+import { getLspServerForFile } from "@oh-my-pi/pi-coding-agent/lsp/servers";
 import { waitForDiagnostics } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
 import {
 	applyTextEditsToString,
@@ -5258,6 +5259,11 @@ describe("ansible lsp", () => {
 		for (const file of ["playbook.yml", "playbook.yaml"]) {
 			const names = getServersForFile(config, file).map(([name]) => name);
 			expect(names).toContain("ansible");
+			// Single-server operations (hover/definition/references) take index 0,
+			// so ansible must precede the generic yaml server for its files.
+			expect(names).toContain("yamlls");
+			expect(names.indexOf("ansible")).toBeLessThan(names.indexOf("yamlls"));
+			expect(getLspServerForFile(config, file)?.[0]).toBe("ansible");
 		}
 		expect(config.servers.ansible.command).toBe("ansible-language-server");
 		expect(config.servers.ansible.args).toEqual(["--stdio"]);
@@ -5278,6 +5284,30 @@ describe("ansible lsp", () => {
 			expect(config.servers.ansible?.args).toEqual(["--stdio"]);
 			expect(config.servers.ansible?.languageId).toBe("ansible");
 		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("opens ansible files on the detected ansible server with languageId ansible", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-wire-");
+		const resolved = path.join(tempDir.path(), "bin", "ansible-language-server");
+		vi.spyOn(piUtils, "$which").mockImplementation(command =>
+			command === "ansible-language-server" ? resolved : null,
+		);
+		try {
+			await Bun.write(path.join(tempDir.path(), "ansible.cfg"), "[defaults]\n");
+			const filePath = path.join(tempDir.path(), "playbook.yml");
+			await Bun.write(filePath, "- hosts: all\n");
+			const server = installHandshakeLsp();
+			const config = loadConfig(tempDir.path());
+			const selected = getLspServerForFile(config, filePath);
+			if (!selected) throw new Error("No LSP server selected for the ansible playbook");
+			expect(selected[0]).toBe("ansible");
+			const client = await lspClient.getOrCreateClient(selected[1], tempDir.path(), 1_000);
+			await lspClient.ensureFileOpen(client, filePath);
+			const didOpen = await server.waitFor(message => message.method === "textDocument/didOpen");
+			expect(didOpen.params).toMatchObject({ textDocument: { languageId: "ansible" } });
+		} finally {
+			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
 	});

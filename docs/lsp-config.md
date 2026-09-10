@@ -253,6 +253,7 @@ The following servers ship in `defaults.json` and are eligible for auto-detectio
 | `intelephense`                | PHP                           | `intelephense`                    |
 | `phpactor`                    | PHP                           | `phpactor`                        |
 | `omnisharp`                   | C#                            | `omnisharp`                       |
+| `ansible`                     | Ansible                       | `ansible-language-server`         |
 | `yamlls`                      | YAML                          | `yaml-language-server`            |
 | `terraformls`                 | Terraform                     | `terraform-ls`                    |
 | `dockerls`                    | Dockerfile                    | `docker-langserver`               |
