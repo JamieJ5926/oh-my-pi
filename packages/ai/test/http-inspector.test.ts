@@ -1,9 +1,13 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import {
 	buildHttp400DumpPayload,
 	type RawHttpRequestDump,
 	rewriteClinePassError,
 	shouldDumpRejectedRequest,
+	writeRejectedRequestDump,
 } from "@oh-my-pi/pi-ai/utils/http-inspector";
 
 class HttpError extends Error {
@@ -120,5 +124,103 @@ describe("rewriteClinePassError", () => {
 
 	it("leaves unrelated cline-pass errors untouched", () => {
 		expect(rewriteClinePassError("500 internal server error", "cline-pass")).toBe("500 internal server error");
+	});
+});
+
+describe("writeRejectedRequestDump", () => {
+	it("writes one file per distinct rejected payload and reuses it across retries", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
+		try {
+			const payload = buildHttp400DumpPayload(dump, new HttpError(400, "400 Provider returned error"), "400 Provider returned error");
+
+			const first = await writeRejectedRequestDump(dir, payload);
+			const retry = await writeRejectedRequestDump(dir, payload);
+
+			expect(first.duplicate).toBe(false);
+			expect(retry.duplicate).toBe(true);
+			expect(retry.filePath).toBe(first.filePath);
+			expect(await readdir(dir)).toEqual([path.basename(first.filePath)]);
+
+			const other = await writeRejectedRequestDump(
+				dir,
+				buildHttp400DumpPayload({ ...dump, body: { messages: [] } }, new HttpError(400, "400 other"), "400 other"),
+			);
+
+			expect(other.duplicate).toBe(false);
+			expect((await readdir(dir)).length).toBe(2);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("recognises a payload dumped by an earlier process instead of appending a second copy", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
+		try {
+			const payload = buildHttp400DumpPayload(dump, new HttpError(413, "413 payload too large"), "413 payload too large");
+			const hash = Bun.hash(JSON.stringify(payload)).toString(36);
+			const earlier = path.join(dir, `1789000000000-${hash}.json`);
+			await Bun.write(earlier, "{}\n");
+
+			const result = await writeRejectedRequestDump(dir, payload);
+
+			expect(result).toEqual({ filePath: earlier, duplicate: true });
+			expect(await readdir(dir)).toEqual([path.basename(earlier)]);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("grows with every distinct payload when no byte cap is applied", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
+		try {
+			for (let index = 0; index < 10; index++) {
+				await writeRejectedRequestDump(
+					dir,
+					buildHttp400DumpPayload(
+						{ ...dump, body: { messages: [{ role: "user", content: `distinct-${index}` }] } },
+						new HttpError(400, `400 distinct ${index}`),
+						`400 distinct ${index}`,
+					),
+					Number.POSITIVE_INFINITY,
+				);
+			}
+
+			expect(await readdir(dir)).toHaveLength(10);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("holds diverse distinct payloads under the byte cap and keeps the newest", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
+		try {
+			const cap = 4000;
+			let first = "";
+			let newest = "";
+			for (let index = 0; index < 40; index++) {
+				const { filePath } = await writeRejectedRequestDump(
+					dir,
+					buildHttp400DumpPayload(
+						{ ...dump, body: { messages: [{ role: "user", content: `distinct-${index}-${"x".repeat(200)}` }] } },
+						new HttpError(400, `400 distinct ${index}`),
+						`400 distinct ${index}`,
+					),
+					cap,
+				);
+				if (index === 0) first = filePath;
+				newest = filePath;
+			}
+
+			const files = await readdir(dir);
+			const sizes = await Promise.all(files.map(async name => (await stat(path.join(dir, name))).size));
+			const total = sizes.reduce((sum, size) => sum + size, 0);
+
+			expect(files.length).toBeLessThan(40);
+			expect(total).toBeLessThanOrEqual(cap);
+			expect(files).toContain(path.basename(newest));
+			expect(files).not.toContain(path.basename(first));
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
 	});
 });
