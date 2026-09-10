@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `extensionHandlers.timeoutMs` setting: a global wall-clock timeout for all extension handler events, so long legitimate workloads (e.g. multi-model compaction) are no longer killed by the fixed 30s cap ([#11286](https://github.com/can1357/oh-my-pi/issues/11286)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Added
@@ -76,10 +80,6 @@
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
-
-### Added
-
-- Added the `extensionHandlers.timeoutMs` setting: a global wall-clock timeout for all extension handler events, so long legitimate workloads (e.g. multi-model compaction) are no longer killed by the fixed 30s cap ([#11286](https://github.com/can1357/oh-my-pi/issues/11286)).
 
 ### Changed
 
