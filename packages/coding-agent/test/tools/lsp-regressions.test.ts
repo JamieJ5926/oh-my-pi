@@ -5370,4 +5370,66 @@ describe("ansible lsp", () => {
 			tempDir.removeSync();
 		}
 	});
+
+	it("routes playbooks embedding inline manifests to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-inline-");
+		try {
+			const filePath = path.join(tempDir.path(), "deploy.yml");
+			fs.writeFileSync(
+				filePath,
+				"- hosts: web\n  tasks:\n    - name: apply manifest\n      kubernetes.core.k8s:\n        definition:\n          apiVersion: apps/v1\n          kind: Deployment\n",
+			);
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath).map(([name]) => name);
+			expect(names.indexOf("ansible")).toBeLessThan(names.indexOf("yamlls"));
+			expect(getLspServerForFile(config, filePath)?.[0]).toBe("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not grant ansible by path for manifests outside the project root", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-scope-");
+		const projectDir = TempDir.createSync("@omp-lsp-ansible-root-");
+		try {
+			const dir = path.join(tempDir.path(), "tasks");
+			fs.mkdirSync(dir, { recursive: true });
+			const filePath = path.join(dir, "deployment.yml");
+			fs.writeFileSync(filePath, "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath, { projectRoot: projectDir.path() }).map(([name]) => name);
+			expect(names).not.toContain("ansible");
+			expect(getLspServerForFile(config, filePath, { projectRoot: projectDir.path() })?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+			projectDir.removeSync();
+		}
+	});
+
+	it("vetoes manifests even when the project-relative path looks like ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-veto-");
+		try {
+			const dir = path.join(tempDir.path(), "tasks");
+			fs.mkdirSync(dir, { recursive: true });
+			const filePath = path.join(dir, "deployment.yml");
+			fs.writeFileSync(filePath, "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+			expect(names).not.toContain("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("classifies pending write content without a disk read", () => {
+		const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+		const filePath = path.join("proj", "deploy.yml");
+		const names = getServersForFile(config, filePath, {
+			content: "- hosts: all\n  tasks:\n    - name: ping\n",
+		}).map(([name]) => name);
+		expect(names.indexOf("ansible")).toBeLessThan(names.indexOf("yamlls"));
+		expect(
+			getLspServerForFile(config, filePath, { content: "- hosts: all\n  tasks:\n    - name: ping\n" })?.[0],
+		).toBe("ansible");
+	});
 });

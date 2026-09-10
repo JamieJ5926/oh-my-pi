@@ -573,9 +573,39 @@ const ANSIBLE_SNIFF_BYTES = 8192;
 const ANSIBLE_CONTENT_SIGNAL =
 	/(^|\n)\s*(-\s+)?(hosts|tasks|roles|handlers|pre_tasks|post_tasks|gather_facts)\s*:|become\s*:\s*(true|yes)|ansible\.builtin\./;
 
-const KUBERNETES_SIGNAL = /apiVersion\s*:\s*\S[\s\S]*?^\s*kind\s*:\s*\S/m;
+/** Top-level Kubernetes manifest keys. Anchored to column 0 so playbooks that embed an inline manifest under `definition:` (indented keys) are not mistaken for manifests. */
+const KUBERNETES_SIGNAL = /^apiVersion\s*:\s*\S[\s\S]*?^kind\s*:\s*\S/m;
 const WORKFLOW_SIGNAL = /^\s*on\s*:/m;
 const WORKFLOW_JOBS_SIGNAL = /^\s*jobs\s*:/m;
+
+/**
+ * Optional classifier inputs for Ansible file detection.
+ *
+ * - `content`: in-memory file text. The disk read is only a fallback, so
+ *   callers holding pending (not-yet-committed) text classify what will be
+ *   written instead of the stale or missing bytes on disk.
+ * - `projectRoot`: config root the path scan is scoped to. Only segments of
+ *   the project-relative path count, so an absolute prefix outside the
+ *   project (temporary directories, home folders) can never contribute an
+ *   Ansible segment. Files outside the root get no path signal.
+ */
+export interface AnsibleFileOptions {
+	content?: string;
+	projectRoot?: string;
+}
+
+function hasAnsiblePathSignal(loweredFilePath: string, projectRoot?: string): boolean {
+	let relative = loweredFilePath;
+	if (projectRoot !== undefined) {
+		const root = path.resolve(projectRoot.toLowerCase());
+		const absolute = path.resolve(loweredFilePath);
+		const scoped = path.relative(root, absolute);
+		if (scoped === "" || scoped.startsWith("..") || path.isAbsolute(scoped)) return false;
+		relative = scoped;
+	}
+	const segments = path.dirname(relative).split(path.sep);
+	return segments.some(segment => ANSIBLE_PATH_SEGMENTS[segment]);
+}
 
 function readFileHead(filePath: string): string | null {
 	let fd = -1;
@@ -603,24 +633,31 @@ function readFileHead(filePath: string): string | null {
  * an Ansible project (Kubernetes manifests, workflows, Compose files) must
  * fall through to the generic YAML server instead of being claimed by
  * extension alone. Unreadable files fall back to the path signal only.
+ *
+ * Ansible content wins over the manifest/workflow vetoes so playbooks that
+ * embed inline manifests stay Ansible; manifests only veto files without
+ * Ansible content, and the veto applies to path-matched files too.
  */
-export function isAnsibleFile(filePath: string): boolean {
+export function isAnsibleFile(filePath: string, options?: AnsibleFileOptions): boolean {
 	const lowered = filePath.toLowerCase();
 	if (ANSIBLE_BASENAMES[path.basename(lowered)]) return true;
-	const segments = path.dirname(lowered).split(path.sep);
-	if (segments.some(segment => ANSIBLE_PATH_SEGMENTS[segment])) return true;
-	const head = readFileHead(filePath);
-	if (head === null) return false;
+	const head = options?.content ?? readFileHead(filePath);
+	if (head === null) return hasAnsiblePathSignal(lowered, options?.projectRoot);
+	if (ANSIBLE_CONTENT_SIGNAL.test(head)) return true;
 	if (KUBERNETES_SIGNAL.test(head)) return false;
 	if (WORKFLOW_SIGNAL.test(head) && WORKFLOW_JOBS_SIGNAL.test(head)) return false;
-	return ANSIBLE_CONTENT_SIGNAL.test(head);
+	return hasAnsiblePathSignal(lowered, options?.projectRoot);
 }
 
 /**
  * Find all servers that can handle a file based on extension.
  * Returns servers sorted with primary (non-linter) servers first.
  */
-export function getServersForFile(config: LspConfig, filePath: string): Array<[string, ServerConfig]> {
+export function getServersForFile(
+	config: LspConfig,
+	filePath: string,
+	options?: AnsibleFileOptions,
+): Array<[string, ServerConfig]> {
 	const ext = path.extname(filePath).toLowerCase();
 	const extNoDot = ext.startsWith(".") ? ext.slice(1) : ext;
 	const fileName = path.basename(filePath).toLowerCase();
@@ -645,7 +682,7 @@ export function getServersForFile(config: LspConfig, filePath: string): Array<[s
 		// serves Ansible files. Without this gate every YAML file in an Ansible
 		// project (manifests, workflows, Compose) would take the ansible slot
 		// for single-server operations instead of the generic YAML server.
-		if (supportsFile && !(name === "ansible" && !isAnsibleFile(filePath))) {
+		if (supportsFile && !(name === "ansible" && !isAnsibleFile(filePath, options))) {
 			matches.push([name, serverConfig]);
 		}
 	}
@@ -662,8 +699,12 @@ export function getServersForFile(config: LspConfig, filePath: string): Array<[s
  * Find the primary server for a file (prefers type-checkers over linters).
  * Used for operations like definition, hover, references that need type intelligence.
  */
-export function getServerForFile(config: LspConfig, filePath: string): [string, ServerConfig] | null {
-	const servers = getServersForFile(config, filePath);
+export function getServerForFile(
+	config: LspConfig,
+	filePath: string,
+	options?: AnsibleFileOptions,
+): [string, ServerConfig] | null {
+	const servers = getServersForFile(config, filePath, options);
 	return servers.length > 0 ? servers[0] : null;
 }
 
