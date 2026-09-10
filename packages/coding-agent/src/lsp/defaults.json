@@ -406,6 +406,13 @@
 		"fileTypes": [".dockerfile", "Dockerfile"],
 		"rootMarkers": ["Dockerfile", "docker-compose.yml", "docker-compose.yaml", ".dockerignore"]
 	},
+	"ansible": {
+		"command": "ansible-language-server",
+		"args": ["--stdio"],
+		"fileTypes": [".yml", ".yaml"],
+		"languageId": "ansible",
+		"rootMarkers": ["ansible.cfg", ".ansible-lint", "ansible", "roles", "playbooks"]
+	},
 	"helm-ls": {
 		"command": "helm_ls",
 		"args": ["serve"],

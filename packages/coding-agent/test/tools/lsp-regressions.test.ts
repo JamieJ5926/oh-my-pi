@@ -5247,3 +5247,38 @@ describe("ty python lsp", () => {
 		}
 	});
 });
+
+describe("ansible lsp", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("registers ansible for .yml and .yaml with the ansible languageId", () => {
+		const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+		for (const file of ["playbook.yml", "playbook.yaml"]) {
+			const names = getServersForFile(config, file).map(([name]) => name);
+			expect(names).toContain("ansible");
+		}
+		expect(config.servers.ansible.command).toBe("ansible-language-server");
+		expect(config.servers.ansible.args).toEqual(["--stdio"]);
+		expect(config.servers.ansible.languageId).toBe("ansible");
+	});
+
+	it("auto-detects ansible when its binary and an Ansible root marker are present", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-detect-");
+		const resolved = path.join(tempDir.path(), "bin", "ansible-language-server");
+		vi.spyOn(piUtils, "$which").mockImplementation(command =>
+			command === "ansible-language-server" ? resolved : null,
+		);
+		try {
+			await Bun.write(path.join(tempDir.path(), "ansible.cfg"), "[defaults]\n");
+			const config = loadConfig(tempDir.path());
+			expect(config.servers.ansible?.resolvedCommand).toBe(resolved);
+			expect(config.servers.ansible?.command).toBe("ansible-language-server");
+			expect(config.servers.ansible?.args).toEqual(["--stdio"]);
+			expect(config.servers.ansible?.languageId).toBe("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+});
