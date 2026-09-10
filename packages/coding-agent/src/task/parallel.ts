@@ -16,11 +16,13 @@ export interface ParallelResult<R> {
  * On abort: returns partial results with `aborted: true`. Completed tasks are preserved,
  * in-progress tasks will complete with their abort handling, skipped tasks are `undefined`.
  *
- * On error: cancels siblings immediately, waits for launched work to drain, then rejects with the first error.
+ * On error: stops scheduling new work, lets every launched sibling settle, then
+ * rejects with the first error. Launched siblings are never cancelled: a fast
+ * failure cannot erase a slow lane's result (artifact-first completion).
  *
  * @param items - Items to process
  * @param concurrency - Maximum concurrent operations
- * @param fn - Async function to execute for each item; receives a worker signal that fires on abort or fail-fast so in-flight siblings can cancel
+ * @param fn - Async function to execute for each item; receives the caller's abort signal so in-flight work can honor external cancellation
  * @param signal - Optional abort signal to stop scheduling new work
  */
 export async function mapWithConcurrencyLimit<T, R>(
@@ -36,9 +38,7 @@ export async function mapWithConcurrencyLimit<T, R>(
 	const results: (R | undefined)[] = new Array(items.length);
 	let nextIndex = 0;
 
-	// Create internal abort controller to cancel workers on any rejection
-	const abortController = new AbortController();
-	const workerSignal = signal ? AbortSignal.any([signal, abortController.signal]) : abortController.signal;
+	const workerSignal = signal ?? new AbortController().signal;
 
 	let firstError: unknown;
 	let failed = false;
@@ -47,18 +47,22 @@ export async function mapWithConcurrencyLimit<T, R>(
 		while (true) {
 			// On abort, stop picking up new work - but don't throw
 			if (workerSignal.aborted) return;
+			// Fail-fast scheduling only: never start new work after the first
+			// failure, but never cancel launched siblings - every launched lane
+			// settles and keeps its artifact.
+			if (failed) return;
 			const index = nextIndex++;
 			if (index >= items.length) return;
 			try {
 				results[index] = await fn(items[index], index, workerSignal);
 			} catch (error) {
-				// The first non-cancellation failure stops new work immediately.
-				// Every worker then returns normally so the pool can be drained
-				// before the original error escapes to its caller.
-				if (!workerSignal.aborted) {
+				// The first failure stops new work immediately. Every worker then
+				// returns normally so the pool can be drained before the original
+				// error escapes to its caller. Launched siblings keep running to
+				// settlement; nothing aborts them.
+				if (!failed) {
 					failed = true;
 					firstError = error;
-					abortController.abort();
 				}
 				return;
 			}
