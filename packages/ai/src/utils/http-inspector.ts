@@ -109,13 +109,21 @@ function scheduleDumpPrune(dir: string, maxBytes: number): Promise<void> {
 
 	const state = { running: Promise.resolve(), rerun: false };
 	state.running = (async () => {
-		do {
-			state.rerun = false;
-			await pruneDumpDir(dir, maxBytes);
-		} while (state.rerun);
-	})().finally(() => {
-		dumpPruneRuns.delete(dir);
-	});
+		try {
+			do {
+				state.rerun = false;
+				await pruneDumpDir(dir, maxBytes);
+			} while (state.rerun);
+			// Retire the entry in the same synchronous block as the exit check:
+			// a write that lands after the loop's last await either sets the flag
+			// and forces another pass, or finds no entry and starts a fresh sweep.
+			// Deleting it from an async continuation instead would leave a window
+			// where that write's flag is set on an entry about to disappear.
+			dumpPruneRuns.delete(dir);
+		} catch {
+			dumpPruneRuns.delete(dir);
+		}
+	})();
 	dumpPruneRuns.set(dir, state);
 	return state.running;
 }

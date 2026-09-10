@@ -198,7 +198,7 @@ describe("writeRejectedRequestDump", () => {
 	it("grows with every distinct payload when no byte cap is applied", async () => {
 		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
 		try {
-			for (let index = 0; index < 10; index++) {
+			for (let index = 0; index < 40; index++) {
 				await writeRejectedRequestDump(
 					dir,
 					buildHttp400DumpPayload(
@@ -210,7 +210,7 @@ describe("writeRejectedRequestDump", () => {
 				);
 			}
 
-			expect(await readdir(dir)).toHaveLength(10);
+			expect(await readdir(dir)).toHaveLength(40);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
