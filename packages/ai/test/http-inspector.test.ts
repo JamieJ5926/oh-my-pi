@@ -163,8 +163,33 @@ describe("writeRejectedRequestDump", () => {
 
 			const result = await writeRejectedRequestDump(dir, payload);
 
-			expect(result).toEqual({ filePath: earlier, duplicate: true });
+			expect(result.duplicate).toBe(true);
+			expect(result.filePath).toBe(earlier);
 			expect(await readdir(dir)).toEqual([path.basename(earlier)]);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("stores every concurrent distinct payload exactly once", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
+		try {
+			const results = await Promise.all(
+				Array.from({ length: 12 }, (_, index) =>
+					writeRejectedRequestDump(
+						dir,
+						buildHttp400DumpPayload(
+							{ ...dump, body: { messages: [{ role: "user", content: `concurrent-${index}` }] } },
+							new HttpError(400, `400 concurrent ${index}`),
+							`400 concurrent ${index}`,
+						),
+						Number.POSITIVE_INFINITY,
+					),
+				),
+			);
+
+			expect(results.filter(result => result.duplicate)).toHaveLength(0);
+			expect(await readdir(dir)).toHaveLength(12);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
@@ -195,10 +220,10 @@ describe("writeRejectedRequestDump", () => {
 		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
 		try {
 			const cap = 4000;
-			let first = "";
-			let newest = "";
+			let newestWrittenAt = 0;
+			let prune = Promise.resolve();
 			for (let index = 0; index < 40; index++) {
-				const { filePath } = await writeRejectedRequestDump(
+				const written = await writeRejectedRequestDump(
 					dir,
 					buildHttp400DumpPayload(
 						{ ...dump, body: { messages: [{ role: "user", content: `distinct-${index}-${"x".repeat(200)}` }] } },
@@ -207,9 +232,10 @@ describe("writeRejectedRequestDump", () => {
 					),
 					cap,
 				);
-				if (index === 0) first = filePath;
-				newest = filePath;
+				newestWrittenAt = Math.max(newestWrittenAt, Number.parseInt(path.basename(written.filePath), 10));
+				prune = written.prune;
 			}
+			await prune;
 
 			const files = await readdir(dir);
 			const sizes = await Promise.all(files.map(async name => (await stat(path.join(dir, name))).size));
@@ -217,8 +243,25 @@ describe("writeRejectedRequestDump", () => {
 
 			expect(files.length).toBeLessThan(40);
 			expect(total).toBeLessThanOrEqual(cap);
-			expect(files).toContain(path.basename(newest));
-			expect(files).not.toContain(path.basename(first));
+			// The newest generation of dumps always survives the eviction.
+			expect(files.some(name => Number.parseInt(name, 10) === newestWrittenAt)).toBe(true);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("writes a fresh copy when the dump the index points at is gone", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
+		try {
+			const payload = buildHttp400DumpPayload(dump, new HttpError(400, "400 swept"), "400 swept");
+			const first = await writeRejectedRequestDump(dir, payload);
+			await rm(first.filePath, { force: true });
+
+			const again = await writeRejectedRequestDump(dir, payload);
+
+			expect(again.duplicate).toBe(false);
+			expect(await Bun.file(again.filePath).exists()).toBe(true);
+			expect(await readdir(dir)).toEqual([path.basename(again.filePath)]);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
