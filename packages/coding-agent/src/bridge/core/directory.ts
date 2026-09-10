@@ -324,6 +324,9 @@ export class FileSessionDirectory implements SessionDirectory, SessionGeneration
 							try { process.kill(owner, 0); } catch (ownerError) {
 								abandoned = ownerError instanceof Error && "code" in ownerError && ownerError.code === "ESRCH";
 							}
+						} else {
+							// An empty or unparsable owner cannot vouch for a live holder; use the same staleness test.
+							abandoned = Date.now() - lock.mtimeMs > 30_000;
 						}
 					} catch (ownerError) {
 						if (!(ownerError instanceof Error) || !("code" in ownerError) || ownerError.code !== "ENOENT") throw ownerError;

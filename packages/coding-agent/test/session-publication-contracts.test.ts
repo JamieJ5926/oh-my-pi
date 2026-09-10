@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtemp, rm, mkdir, utimes } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSessionDirectory, InMemorySessionDirectory } from "../src/bridge/core/directory";
@@ -148,6 +148,46 @@ describe("production session publication", () => {
 			expect(await directory.purgeExpired(Date.now() + 86_400_001)).toBe(1);
 			const second = await directory.claimNext({ identity: { ...identity, session: "retained" }, ttlMs: 10_000 });
 			expect(second.address.generation).toBeGreaterThan(first.address.generation);
+		} finally { await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("reclaims a stale lock whose owner pid is empty or unparsable instead of burning the lock timeout", async () => {
+		for (const owner of ["", "not-a-pid"]) {
+			const root = await mkdtemp(join(tmpdir(), "publication-empty-owner-"));
+			const file = join(root, "sessions.json");
+			try {
+				await mkdir(`${file}.lock`);
+				await writeFile(join(`${file}.lock`, "owner"), owner);
+				await utimes(`${file}.lock`, new Date(0), new Date(0));
+				const directory = new FileSessionDirectory(file, { lockTimeoutMs: 2_000 });
+				const started = Date.now();
+				const claimed = await directory.claimNext({ identity: { ...identity, session: "reclaimed" }, ttlMs: 10_000 });
+				expect(claimed.address.generation).toBe(1);
+				expect(Date.now() - started).toBeLessThan(1_000);
+			} finally { await rm(root, { recursive: true, force: true }); }
+		}
+	});
+
+	it("never steals a young lock whose owner is still being written", async () => {
+		const root = await mkdtemp(join(tmpdir(), "publication-young-lock-"));
+		const file = join(root, "sessions.json");
+		try {
+			await mkdir(`${file}.lock`);
+			await writeFile(join(`${file}.lock`, "owner"), "");
+			const directory = new FileSessionDirectory(file, { lockTimeoutMs: 250 });
+			await expect(directory.claimNext({ identity: { ...identity, session: "blocked" }, ttlMs: 10_000 })).rejects.toThrow(/EEXIST/);
+		} finally { await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("never steals a lock held by a live process even when it is old", async () => {
+		const root = await mkdtemp(join(tmpdir(), "publication-live-owner-"));
+		const file = join(root, "sessions.json");
+		try {
+			await mkdir(`${file}.lock`);
+			await writeFile(join(`${file}.lock`, "owner"), String(process.pid));
+			await utimes(`${file}.lock`, new Date(0), new Date(0));
+			const directory = new FileSessionDirectory(file, { lockTimeoutMs: 250 });
+			await expect(directory.claimNext({ identity: { ...identity, session: "held" }, ttlMs: 10_000 })).rejects.toThrow(/EEXIST/);
 		} finally { await rm(root, { recursive: true, force: true }); }
 	});
 
