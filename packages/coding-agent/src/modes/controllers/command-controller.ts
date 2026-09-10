@@ -1300,8 +1300,16 @@ export class CommandController {
 		// A project reload can change prompt-effective settings (e.g.
 		// tui.renderMermaid) as well as spacing-effective settings (e.g.
 		// tui.mermaidPaddingX/Y). Refresh the cached base prompt like direct
-		// /settings edits do, and rebuild cached transcript lines.
-		await this.ctx.session.refreshBaseSystemPrompt();
+		// /settings edits do, and rebuild cached transcript lines. The cwd move
+		// above already committed, so a refresh failure must not escape as a
+		// failed move: report it and continue with the rebuilt transcript.
+		try {
+			await this.ctx.session.refreshBaseSystemPrompt();
+		} catch (error) {
+			this.ctx.showError(
+				`Failed to refresh system prompt after move: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		this.ctx.rebuildChatFromMessages();
 		this.ctx.ui.requestRender();
 		return true;
@@ -1416,13 +1424,21 @@ export class CommandController {
 			await this.#restoreAfterMoveFailure(previousState);
 			return;
 		}
-
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
+
 		// Shell-driven cwd changes rescope settings via applyCwdChange like
 		// /move does; refresh the cached base prompt and rebuild cached
 		// transcript lines so the new project's Mermaid settings take effect.
-		await this.ctx.session.refreshBaseSystemPrompt();
+		// The cwd move above already committed, so a refresh failure must not
+		// escape as a failed cwd update: report it and continue.
+		try {
+			await this.ctx.session.refreshBaseSystemPrompt();
+		} catch (error) {
+			this.ctx.showError(
+				`Failed to refresh system prompt after directory change: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		this.ctx.rebuildChatFromMessages();
 		this.ctx.ui.requestRender();
 	}

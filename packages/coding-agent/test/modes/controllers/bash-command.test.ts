@@ -377,4 +377,4 @@ describe("bash shortcut command", () => {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}
 	});
-	});
+});

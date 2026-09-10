@@ -3103,7 +3103,12 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	// Mermaid rendering and spacing track the effective settings the same way:
 	// `reloadForCwd()` re-fires every hook, so `/move` and cross-project resume
 	// pick up the destination project's values without a restart or manual edit.
-	"tui.renderMermaid": value => {
+	// Read the active instance like the spacing hooks below: `cloneForCwd()` and
+	// `loadIsolated()` re-fire every hook, and applying a clone's value here would
+	// flip the process-global renderer for sessions that never changed projects
+	// (e.g. a security scan cloning settings for its execution root).
+	"tui.renderMermaid": () => {
+		const value = globalInstance?.get("tui.renderMermaid");
 		if (typeof value === "boolean") setMarkdownMermaidRendering(value);
 	},
 	"tui.mermaidPaddingX": () => applyMermaidSpacingFromSettings(),
