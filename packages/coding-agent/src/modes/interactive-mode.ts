@@ -493,6 +493,27 @@ const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
 
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
 
+/**
+ * Subagents HUD row cells: a name column starting at 22, 2-space gutters, a
+ * left-aligned child-dot strip, a right-aligned token cell and the model cell.
+ */
+const SUBAGENT_HUD_DESC_COL = 22;
+const SUBAGENT_HUD_GUTTER = 2;
+const SUBAGENT_HUD_STRIP_COLS = 9;
+const SUBAGENT_HUD_TOKEN_COLS = 8;
+const SUBAGENT_HUD_MODEL_COLS = 10;
+/** Resolved-model fragments rendered as an emoji plus a short code in the model cell. */
+const SUBAGENT_HUD_MODEL_CODES: readonly (readonly [RegExp, string, string])[] = [
+	[/muse/i, "🟣", "muse"],
+	[/deepseek.*flash/i, "🐳", "ds"],
+	[/deepseek/i, "🐳", "ds-v4"],
+	[/codex|astra/i, "🍏", "astra"],
+	[/fable/i, "🟠", "fable"],
+	[/opus/i, "🟠", "opus"],
+	[/grok/i, "⚡", "grok"],
+	[/gemini|gemma/i, "💎", "gem"],
+];
+
 function formatHudTokenCount(value: number): string {
 	if (value < 1_000) return value.toString();
 	const divisor = value >= 1_000_000_000 ? 1_000_000_000 : value >= 1_000_000 ? 1_000_000 : 1_000;
@@ -561,12 +582,45 @@ export function renderSubagentHudLines(
 		);
 	const localName = (session: ObservableSession) => session.id.split(".").pop() ?? session.id;
 	const tokens = (session: ObservableSession) => session.progress?.tokens ?? 0;
+	const stateGlyph = (status: ObservableSession["status"]): string =>
+		status === "failed"
+			? theme.fg("error", "✗")
+			: status === "aborted"
+				? theme.styledSymbol("status.shadowed", "muted")
+				: theme.styledSymbol("status.enabled", status === "active" ? "warning" : "success");
+	const kidsOf = (session: ObservableSession) => children.get(session.id) ?? [];
+	const subtreeTokens = (session: ObservableSession): number =>
+		tokens(session) + kidsOf(session).reduce((sum, kid) => sum + subtreeTokens(kid), 0);
+	const stripFor = (session: ObservableSession): string => {
+		const kids = kidsOf(session);
+		if (kids.length === 0) return "—";
+		const rank: Record<ObservableSession["status"], number> = { completed: 0, active: 1, failed: 2, aborted: 3 };
+		const sorted = [...kids].sort((a, b) => rank[a.status] - rank[b.status]);
+		const glyphs = sorted.slice(0, SUBAGENT_HUD_STRIP_COLS).map(kid => stateGlyph(kid.status));
+		if (sorted.length > SUBAGENT_HUD_STRIP_COLS) {
+			glyphs.length = SUBAGENT_HUD_STRIP_COLS - 1;
+			glyphs.push(`+${sorted.length - glyphs.length}`);
+		}
+		return glyphs.join("");
+	};
+	const markerFor = (session: ObservableSession): string => {
+		const kids = kidsOf(session);
+		if (kids.length === 0) return "";
+		return kids.some(isSubtreeActive) ? "▾" : "▸";
+	};
+	const modelCell = (session: ObservableSession): string => {
+		const resolved = session.progress?.resolvedModel;
+		if (!resolved) return "· ?";
+		const id = (resolved.split("/").pop() ?? resolved).toLowerCase();
+		const known = SUBAGENT_HUD_MODEL_CODES.find(([pattern]) => pattern.test(id));
+		return known ? `${known[1]} ${known[2]}` : "· ?";
+	};
 	type Rows = { lines: string[]; depths: number[] };
 	const activeRows: Rows = { lines: [], depths: [] };
 	const completed: string[] = [];
 	const add = (text: string, depth: number, target = activeRows) => {
 		target.depths.push(depth);
-		target.lines.push(truncateToWidth(text, Math.max(0, columns - (depth + 1) * 3 - 1)));
+		target.lines.push(truncateToWidth(` ${text}`, Math.max(0, columns)));
 	};
 	const summarize = (members: readonly ObservableSession[]) => {
 		const counts = { active: 0, completed: 0, failed: 0, aborted: 0 };
@@ -644,29 +698,43 @@ export function renderSubagentHudLines(
 				if (tags) add(tags, groupDepth + 1, target);
 				continue;
 			}
-			if (!isSubtreeActive(session)) {
-				if (parent === undefined) {
-					let leads = "";
-					for (const child of children.get(session.id) ?? []) {
-						const childRole = roleOf(child);
-						if (childRole !== "poteto-agent" && childRole !== "poteto-agent-deep") continue;
-						leads += `${leads ? ", " : ""}${dot(child.status)} ${theme.bold(localName(child))}`;
-					}
-					completed.push(
-						`${dot(session.status)} ${theme.bold(formatTaskId(session.id))}${leads ? ` (${leads})` : ""}`,
-					);
+			if (parent === undefined && !isSubtreeActive(session)) {
+				let leads = "";
+				for (const child of children.get(session.id) ?? []) {
+					const childRole = roleOf(child);
+					if (childRole !== "poteto-agent" && childRole !== "poteto-agent-deep") continue;
+					leads += `${leads ? ", " : ""}${dot(child.status)} ${theme.bold(localName(child))}`;
 				}
+				completed.push(
+					`${dot(session.status)} ${theme.bold(formatTaskId(session.id))}${leads ? ` (${leads})` : ""}`,
+				);
 				continue;
 			}
 			const name = parent === undefined ? formatTaskId(session.id) : localName(session);
-			const badge =
-				role === "task" ? "" : ` ${theme.format.bracketLeft}${theme.bold(role)}${theme.format.bracketRight}`;
 			const description = session.description?.trim() || session.progress?.description?.trim();
-			const preview = description && !labelEchoesHandle(session.id, description) ? `: ${description}` : "";
-			const usage = `  · ${formatHudTokenCount(tokens(session))} tok`;
-			const width = Math.max(0, columns - (depth + 1) * 3 - 1);
-			const body = `${dot(session.status)} ${theme.bold(name)}${badge}${replaceTabs(preview).replace(/\s*[\r\n]+\s*/g, " ↵ ")}`;
-			add(`${truncateToWidth(body, Math.max(0, width - visibleWidth(usage)))}${usage}`, depth);
+			const preview = description && !labelEchoesHandle(session.id, description) ? description : "";
+			const marker = markerFor(session);
+			const left = `${marker ? `${marker} ` : " "}${stateGlyph(session.status)} ${theme.bold(name)}`;
+			const prefixCols = depth === 0 ? 0 : depth * 2 + 2;
+			const descStart = Math.max(SUBAGENT_HUD_DESC_COL, prefixCols + visibleWidth(left) + SUBAGENT_HUD_GUTTER);
+			const descCols = Math.max(
+				1,
+				columns -
+					descStart -
+					(SUBAGENT_HUD_GUTTER * 3 + SUBAGENT_HUD_STRIP_COLS + SUBAGENT_HUD_TOKEN_COLS + SUBAGENT_HUD_MODEL_COLS),
+			);
+			const kids = kidsOf(session);
+			const token =
+				kids.length > 0 ? `Σ ${formatHudTokenCount(subtreeTokens(session))}` : formatHudTokenCount(tokens(session));
+			const gutter = " ".repeat(SUBAGENT_HUD_GUTTER);
+			const row =
+				`${left}${" ".repeat(Math.max(0, descStart - prefixCols - visibleWidth(left)))}` +
+				truncateToWidth(replaceTabs(preview).replace(/\s*[\r\n]+\s*/g, " ↵ "), descCols, undefined, true) +
+				`${gutter}${truncateToWidth(stripFor(session), SUBAGENT_HUD_STRIP_COLS, undefined, true)}` +
+				`${gutter}${" ".repeat(Math.max(0, SUBAGENT_HUD_TOKEN_COLS - visibleWidth(token)))}${token}` +
+				`${gutter}${theme.fg("dim", modelCell(session))}`;
+			activeRows.depths.push(depth);
+			activeRows.lines.push(truncateToWidth(row, Math.max(0, columns)));
 			if (session.status !== "active") add(`${activeBelow.get(session.id) ?? 0} active below`, depth + 1);
 			renderChildren(session.id, depth + 1);
 		}
@@ -686,12 +754,12 @@ export function renderSubagentHudLines(
 			const depth = rowDepths[index];
 			let prefix = "";
 			for (let level = 0; level < depth; level++)
-				prefix += continuations[level] ? `${theme.tree.vertical}  ` : "   ";
+				prefix += continuations[level] ? `${theme.tree.vertical} ` : "  ";
 			const hasSibling = followingSibling.has(index);
-			prefix += `${hasSibling ? theme.tree.branch : theme.tree.last} `;
+			if (depth > 0) prefix += hasSibling ? theme.tree.branch : theme.tree.last;
 			continuations[depth] = hasSibling;
 			continuations.length = depth + 1;
-			return truncateToWidth(` ${theme.fg("dim", prefix)}${row}`, Math.max(0, columns));
+			return truncateToWidth(`${theme.fg("dim", prefix)}${row}`, Math.max(0, columns));
 		});
 		return ["", truncateToWidth(theme.bold(theme.fg("accent", title)), Math.max(0, columns)), ...guided];
 	};

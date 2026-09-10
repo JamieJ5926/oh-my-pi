@@ -46,12 +46,12 @@ const GOLDEN_COMPLETED = ["● SkillsTrack -> ● ScriptsTrack"];
 const GOLDEN_SUBAGENTS = [
 	"",
 	"Subagents",
-	" └─ ● RulesTrack ⟦poteto-agent⟧: Nested rules synthesis  · 43.2k tok",
-	"    ├─ ● RulesInner ⟦poteto-agent⟧  · 42.6k tok",
-	"    │  └─ ● RulesSynth ⟦synthesizer⟧  · 38.5k tok",
-	"    │     └─ ● explorer x3 · 1 done · 2 running · 0 failed · 0 cancelled · 1.2k tok",
-	"    │        └─ ● RuleA  ● RuleB  ● RuleC",
-	"    └─ ● Owner ⟦owner⟧: Writes the merged file  · 2m tok",
+	"▾ ● RulesTrack        Nested rules synthesis                                             ●●           Σ 2.1m  · ?",
+	"  ├─▾ ● RulesInner                                                                       ●           Σ 82.3k  · ?",
+	"  │ └─▾ ● RulesSynth                                                                     ●●●         Σ 39.7k  · ?",
+	"  │   └─ ● explorer x3 · 1 done · 2 running · 0 failed · 0 cancelled · 1.2k tok",
+	"  │     └─ ● RuleA  ● RuleB  ● RuleC",
+	"  └─ ● Owner          Writes the merged file                                             —                2m  · ?",
 ];
 
 describe("subagent HUD golden render", () => {
