@@ -200,4 +200,26 @@ describe("CommandController /move", () => {
 			await fs.rm(targetDir, { recursive: true, force: true });
 		}
 	});
+	it("presents a prompt-refresh failure after rebuilding the transcript", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-refresh-error-"));
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-refresh-target-"));
+		try {
+			const { ctx } = createMoveContext(sourceDir);
+			ctx.session.refreshBaseSystemPrompt = vi.fn(async () => {
+				throw new Error("prompt boom");
+			});
+			const controller = new CommandController(ctx);
+
+			await controller.handleMoveCommand(targetDir);
+
+			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("prompt boom"));
+			expect(ctx.rebuildChatFromMessages).toHaveBeenCalledTimes(1);
+			expect(ctx.rebuildChatFromMessages.mock.invocationCallOrder[0]).toBeLessThan(
+				ctx.showError.mock.invocationCallOrder[0],
+			);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
 });

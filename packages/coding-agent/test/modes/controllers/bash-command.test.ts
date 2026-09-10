@@ -377,4 +377,37 @@ describe("bash shortcut command", () => {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}
 	});
+	it("presents a shell-driven prompt-refresh failure after rebuilding the transcript", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-refresh-error-"));
+		const childDir = path.join(sourceDir, "child");
+		await fs.mkdir(childDir);
+		try {
+			const { ctx, executeBash } = createCwdContext(sourceDir);
+			executeBash.mockImplementationOnce(async () => ({
+				output: "",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				totalLines: 0,
+				totalBytes: 0,
+				outputLines: 0,
+				outputBytes: 0,
+				workingDir: childDir,
+			}));
+			ctx.session.refreshBaseSystemPrompt = vi.fn(async () => {
+				throw new Error("shell prompt boom");
+			});
+			const controller = new CommandController(ctx);
+
+			await controller.handleBashCommand("cd child");
+
+			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("shell prompt boom"));
+			expect(ctx.rebuildChatFromMessages).toHaveBeenCalledTimes(1);
+			expect(ctx.rebuildChatFromMessages.mock.invocationCallOrder[0]).toBeLessThan(
+				ctx.showError.mock.invocationCallOrder[0],
+			);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
 });
