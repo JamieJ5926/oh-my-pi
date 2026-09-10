@@ -969,14 +969,14 @@ export class ModelBrowser implements Component {
 		) {
 			return ` ${formatThinkingLevelBadge(this.#sessionThinkingLevel)}`;
 		}
-	// The active row is terminal in the Alt+P picker only
-	// (suppressDerivedThinkingLevels): applying the current selector there
-	// leaves the session effort untouched (undefined or inherit), so it
-	// must never render another role's level as a fallback. The setup
-	// wizard (flag unset, no session level supplied) keeps rendering the
-	// configured default effort on the current/default row (P2 #11330,
-	// thread 3968351010).
-	if (this.#suppressDerivedThinkingLevels && item.selector === this.#currentSelector) return "";
+		// The active row is terminal in the Alt+P picker only
+		// (suppressDerivedThinkingLevels): applying the current selector there
+		// leaves the session effort untouched (undefined or inherit), so it
+		// must never render another role's level as a fallback. The setup
+		// wizard (flag unset, no session level supplied) keeps rendering the
+		// configured default effort on the current/default row (P2 #11330,
+		// thread 3968351010).
+		if (this.#suppressDerivedThinkingLevels && item.selector === this.#currentSelector) return "";
 		const seen = new Set<string>();
 		const levels = new Map<ConfiguredThinkingLevel, string>();
 		let inheritTerminates = false;

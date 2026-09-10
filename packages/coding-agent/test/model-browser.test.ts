@@ -16,7 +16,6 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/components/model-browser";
 import { ModelPickerComponent } from "@oh-my-pi/pi-coding-agent/modes/components/model-picker";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
@@ -499,7 +498,6 @@ describe("ModelBrowser effort badge", () => {
 
 		expect(rows[2]).not.toContain(maxBadge);
 	});
-
 
 	test("custom roles outside the built-in ids badge their level", () => {
 		const shared = makeModel("openai", "gpt-5");
