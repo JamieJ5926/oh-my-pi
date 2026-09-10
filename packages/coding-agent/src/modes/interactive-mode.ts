@@ -493,11 +493,79 @@ const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
 
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
 
-function formatHudTokenCount(value: number): string {
-	if (value < 1_000) return value.toString();
-	const divisor = value >= 1_000_000_000 ? 1_000_000_000 : value >= 1_000_000 ? 1_000_000 : 1_000;
-	const suffix = divisor === 1_000_000_000 ? "b" : divisor === 1_000_000 ? "m" : "k";
-	return `${Number((value / divisor).toFixed(1))}${suffix}`;
+/** Locked subagents-panel columns (1-based): description 27, child-strip 61, tokens end 78. */
+const SUBAGENT_PANEL_DESC_COL = 27;
+const SUBAGENT_PANEL_STRIP_COL = 61;
+const SUBAGENT_PANEL_TOKEN_END_COL = 78;
+const SUBAGENT_PANEL_WIDTH = SUBAGENT_PANEL_TOKEN_END_COL;
+const SUBAGENT_PANEL_MAX_DEPTH = 3;
+const SUBAGENT_PANEL_MAX_STRIP = 9;
+
+/** Panel token column: two-decimal millions, integer thousands, `0` for empty. */
+function formatPanelTokenCount(value: number): string {
+	if (!Number.isFinite(value) || value <= 0) return "0";
+	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+	if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+	return `${Math.round(value)}`;
+}
+
+/**
+ * One-letter role tag shown before the state dot: D deep lead, L pot lead,
+ * I implementer, O owner, M mechanical, R researcher/explorer, V
+ * reviewer/verifier, W worker, A assistant, S any sub-role seat.
+ */
+function subagentRoleTag(role: string): string {
+	switch (role) {
+		case "poteto-agent-deep":
+			return "D";
+		case "poteto-agent":
+			return "L";
+		case "implementer":
+			return "I";
+		case "owner":
+			return "O";
+		case "mechanical":
+			return "M";
+		case "researcher":
+		case "explorer":
+			return "R";
+		case "reviewer":
+		case "reviewer-fast":
+		case "security-reviewer":
+		case "comment-sicko":
+			return "V";
+		case "worker":
+			return "W";
+		case "assistant":
+			return "A";
+		default:
+			return "S";
+	}
+}
+
+/** Resolved-model id fragments that map to the panel's short model codes. */
+const SUBAGENT_MODEL_CODES: readonly (readonly [RegExp, string])[] = [
+	[/astra/i, "astra"],
+	[/muse/i, "muse"],
+	[/deepseek/i, "ds"],
+	[/gemini|gemma/i, "gem"],
+	[/opus/i, "opus"],
+	[/fable/i, "fable"],
+	[/luna/i, "luna"],
+	[/grok/i, "grok"],
+];
+
+/**
+ * `[code]` for a seat's own model record: `[?]` before the seat reports one, a
+ * trailing `!` when the resolved model is a fallback target.
+ */
+function subagentModelCode(session: ObservableSession): string {
+	const resolved = session.progress?.resolvedModel;
+	if (!resolved) return "?";
+	const id = (resolved.split("/").pop() ?? resolved).split(":")[0]?.toLowerCase() ?? "";
+	const known = SUBAGENT_MODEL_CODES.find(([pattern]) => pattern.test(id));
+	const code = known ? known[1] : id.replace(/[^a-z0-9]/g, "").slice(0, 4) || "?";
+	return session.progress?.resolvedModelIsFallback === true ? `${code}!` : code;
 }
 
 export function renderSubagentHudLines(
@@ -505,6 +573,7 @@ export function renderSubagentHudLines(
 	columns: number,
 	ancestry: readonly { id: string; parentId?: string }[] = [],
 	siblingCollapseThreshold = 0,
+	contextPercent?: number | null,
 ): { completed: readonly string[]; subagents: readonly string[] } {
 	const candidates = new Map(
 		sessions
@@ -554,43 +623,81 @@ export function renderSubagentHudLines(
 	const isSubtreeActive = (session: ObservableSession) =>
 		session.status === "active" || (activeBelow.get(session.id) ?? 0) > 0;
 	const roleOf = (session: ObservableSession) => session.agent ?? session.progress?.agent ?? "task";
-	const dot = (status: ObservableSession["status"]) =>
-		theme.styledSymbol(
-			"status.enabled",
-			status === "active" ? "warning" : status === "completed" ? "success" : status === "failed" ? "error" : "muted",
-		);
+	const stateGlyph = (status: ObservableSession["status"]): string =>
+		status === "failed"
+			? theme.fg("error", "✗")
+			: status === "aborted"
+				? theme.styledSymbol("status.shadowed", "muted")
+				: theme.styledSymbol("status.enabled", status === "active" ? "warning" : "success");
 	const localName = (session: ObservableSession) => session.id.split(".").pop() ?? session.id;
 	const tokens = (session: ObservableSession) => session.progress?.tokens ?? 0;
-	type Rows = { lines: string[]; depths: number[] };
-	const activeRows: Rows = { lines: [], depths: [] };
 	const completed: string[] = [];
-	const add = (text: string, depth: number, target = activeRows) => {
-		target.depths.push(depth);
-		target.lines.push(truncateToWidth(text, Math.max(0, columns - (depth + 1) * 3 - 1)));
-	};
-	const summarize = (members: readonly ObservableSession[]) => {
-		const counts = { active: 0, completed: 0, failed: 0, aborted: 0 };
-		let sum = 0;
-		for (const member of members) {
-			counts[member.status]++;
-			sum += tokens(member);
+	const groupCode = (group: readonly ObservableSession[]): string => {
+		let code: string | undefined;
+		for (const member of group) {
+			const memberCode = subagentModelCode(member);
+			if (code === undefined) code = memberCode;
+			else if (code !== memberCode) return "?";
 		}
-		return {
-			counts,
-			text: `${counts.completed} done · ${counts.active} running · ${counts.failed} failed · ${counts.aborted} cancelled · ${formatHudTokenCount(sum)} tok`,
-		};
+		return code ?? "?";
 	};
-	const addSummary = (text: string, depth: number, target: Rows): void => {
-		const width = Math.max(1, columns - (depth + 1) * 3 - 1);
-		let line = "";
-		for (const part of text.split(" · ")) {
-			if (line && visibleWidth(`${line} · ${part}`) > width) {
-				add(line, depth, target);
-				line = "";
-			}
-			line += `${line ? " · " : ""}${part}`;
-		}
-		if (line) add(line, depth, target);
+	const descendantCount = (id: string): number => {
+		let count = 0;
+		for (const child of children.get(id) ?? []) count += 1 + descendantCount(child.id);
+		return count;
+	};
+	const subtreeTokens = (session: ObservableSession): number => {
+		let sum = tokens(session);
+		for (const child of children.get(session.id) ?? []) sum += subtreeTokens(child);
+		return sum;
+	};
+	const stripFor = (session: ObservableSession, depth: number): string => {
+		const kids = children.get(session.id) ?? [];
+		if (kids.length === 0) return "—";
+		if (depth >= SUBAGENT_PANEL_MAX_DEPTH) return `${descendantCount(session.id)} deep`;
+		const rank: Record<ObservableSession["status"], number> = { completed: 0, active: 1, failed: 2, aborted: 3 };
+		const sorted = [...kids].sort((a, b) => rank[a.status] - rank[b.status]);
+		const glyphs = sorted.slice(0, SUBAGENT_PANEL_MAX_STRIP).map(kid => stateGlyph(kid.status));
+		if (sorted.length > SUBAGENT_PANEL_MAX_STRIP) glyphs.push(`+${sorted.length - SUBAGENT_PANEL_MAX_STRIP}`);
+		return glyphs.join("");
+	};
+	const markerFor = (session: ObservableSession, depth: number): string => {
+		const kids = children.get(session.id) ?? [];
+		if (kids.length === 0) return "";
+		return depth < SUBAGENT_PANEL_MAX_DEPTH && kids.some(isSubtreeActive) ? "▾" : "▸";
+	};
+	const leftCols = SUBAGENT_PANEL_DESC_COL - 1;
+	const descCols = SUBAGENT_PANEL_STRIP_COL - SUBAGENT_PANEL_DESC_COL;
+	const rightCols = SUBAGENT_PANEL_WIDTH - SUBAGENT_PANEL_STRIP_COL + 1;
+	const pad = (text: string, width: number): string => truncateToWidth(text, Math.max(0, width), undefined, true);
+	type PanelRow = {
+		depth: number;
+		last: boolean;
+		indents: readonly boolean[];
+		tag: string;
+		state: ObservableSession["status"];
+		marker: string;
+		name: string;
+		code: string;
+		description: string;
+		strip: string;
+		tokensText: string;
+	};
+	const rows: PanelRow[] = [];
+	const continuations: boolean[] = [];
+	const renderRow = (row: PanelRow): string => {
+		let prefix = "";
+		for (let level = 0; level < row.depth; level++) prefix += row.indents[level] ? `${theme.tree.vertical} ` : "  ";
+		if (row.depth > 0) prefix += row.last ? theme.tree.last : theme.tree.branch;
+		const marker = row.marker ? `${row.marker} ` : " ";
+		const dot = stateGlyph(row.state);
+		const codeSuffix = ` [${row.code}]`;
+		const fixed = visibleWidth(prefix) + visibleWidth(marker) + 1 + visibleWidth(dot) + 1 + visibleWidth(codeSuffix);
+		const name = truncateToWidth(row.name, Math.max(1, leftCols - fixed));
+		const left = pad(`${prefix}${marker}${row.tag}${dot} ${name}${codeSuffix}`, leftCols);
+		const desc = pad(row.description, descCols);
+		const strip = pad(row.strip, rightCols - visibleWidth(row.tokensText));
+		return truncateToWidth(`${left}${desc}${strip}${row.tokensText}`, columns);
 	};
 	const delegatingRoles: Record<string, true> = { "poteto-agent": true, "poteto-agent-deep": true, owner: true };
 	const ownRow = (session: ObservableSession): boolean =>
@@ -607,16 +714,25 @@ export function renderSubagentHudLines(
 				else groups.set(role, [session]);
 			}
 		const emitted = new Set<string>();
-		for (const session of siblings) {
+		for (let index = 0; index < siblings.length; index++) {
+			const session = siblings[index]!;
+			const last = index === siblings.length - 1;
+			// Depth-0 rows carry no connector, so a vertical continuation is only
+			// meaningful below them once a connector column exists.
+			continuations[depth] = depth > 0 && !last;
+			continuations.length = depth + 1;
 			const role = roleOf(session);
 			const group = ownRow(session) ? undefined : groups.get(role);
 			if (group && group.length > siblingCollapseThreshold) {
 				if (emitted.has(role)) continue;
 				emitted.add(role);
 				if (!group.some(isSubtreeActive)) continue;
-				const target = activeRows;
-				const groupDepth = depth;
-				const { counts, text } = summarize(group);
+				const counts = { active: 0, completed: 0, failed: 0, aborted: 0 };
+				let sum = 0;
+				for (const member of group) {
+					counts[member.status]++;
+					sum += tokens(member);
+				}
 				const state = counts.failed
 					? "failed"
 					: counts.active
@@ -624,77 +740,64 @@ export function renderSubagentHudLines(
 						: counts.aborted
 							? "aborted"
 							: "completed";
-				const heading = `${dot(state)} ${theme.bold(role)} x${group.length}`;
-				if (visibleWidth(`${heading} · ${text}`) <= Math.max(0, columns - (groupDepth + 1) * 3 - 1)) {
-					add(`${heading} · ${text}`, groupDepth, target);
-				} else {
-					add(heading, groupDepth, target);
-					addSummary(text, groupDepth + 1, target);
-				}
-				let tags = "";
-				const width = Math.max(1, columns - (groupDepth + 2) * 3 - 1);
-				for (const member of group) {
-					const tag = `${dot(member.status)} ${truncateToWidth(localName(member), Math.max(1, width - 2))}`;
-					if (tags && visibleWidth(`${tags}  ${tag}`) > width) {
-						add(tags, groupDepth + 1, target);
-						tags = "";
-					}
-					tags += `${tags ? "  " : ""}${tag}`;
-				}
-				if (tags) add(tags, groupDepth + 1, target);
+				rows.push({
+					depth,
+					last,
+					indents: continuations.slice(0, depth),
+					tag: subagentRoleTag(role),
+					state,
+					marker: "",
+					name: `${role} x${group.length}`,
+					code: groupCode(group),
+					description: group.map(member => `${stateGlyph(member.status)} ${localName(member)}`).join("  "),
+					strip: "",
+					tokensText: formatPanelTokenCount(sum),
+				});
 				continue;
 			}
-			if (!isSubtreeActive(session)) {
-				if (parent === undefined) {
-					let leads = "";
-					for (const child of children.get(session.id) ?? []) {
-						const childRole = roleOf(child);
-						if (childRole !== "poteto-agent" && childRole !== "poteto-agent-deep") continue;
-						leads += `${leads ? ", " : ""}${dot(child.status)} ${theme.bold(localName(child))}`;
-					}
-					completed.push(
-						`${dot(session.status)} ${theme.bold(formatTaskId(session.id))}${leads ? ` (${leads})` : ""}`,
-					);
+			if (parent === undefined && !isSubtreeActive(session)) {
+				let leads = "";
+				for (const child of children.get(session.id) ?? []) {
+					const childRole = roleOf(child);
+					if (childRole !== "poteto-agent" && childRole !== "poteto-agent-deep") continue;
+					leads += `${leads ? ", " : ""}${stateGlyph(child.status)} ${theme.bold(localName(child))}`;
 				}
+				completed.push(
+					`${stateGlyph(session.status)} ${theme.bold(formatTaskId(session.id))}${leads ? ` (${leads})` : ""}`,
+				);
 				continue;
 			}
-			const name = parent === undefined ? formatTaskId(session.id) : localName(session);
-			const badge =
-				role === "task" ? "" : ` ${theme.format.bracketLeft}${theme.bold(role)}${theme.format.bracketRight}`;
-			const description = session.description?.trim() || session.progress?.description?.trim();
-			const preview = description && !labelEchoesHandle(session.id, description) ? `: ${description}` : "";
-			const usage = ` · ${formatHudTokenCount(tokens(session))} tok`;
-			const width = Math.max(0, columns - (depth + 1) * 3 - 1);
-			const body = `${dot(session.status)} ${theme.bold(name)}${badge}${replaceTabs(preview).replace(/\s*[\r\n]+\s*/g, " ↵ ")}`;
-			add(`${truncateToWidth(body, Math.max(0, width - visibleWidth(usage)))}${usage}`, depth);
-			if (session.status !== "active") add(`${activeBelow.get(session.id) ?? 0} active below`, depth + 1);
-			renderChildren(session.id, depth + 1);
+			const rawDescription = session.description?.trim() || session.progress?.description?.trim() || "";
+			// A label that only echoes the spawn handle would repeat the name column.
+			const description = labelEchoesHandle(session.id, rawDescription) ? "" : rawDescription;
+			const hasChildren = (children.get(session.id) ?? []).length > 0;
+			rows.push({
+				depth,
+				last,
+				indents: continuations.slice(0, depth),
+				tag: subagentRoleTag(role),
+				state: session.status,
+				marker: markerFor(session, depth),
+				name: localName(session),
+				code: subagentModelCode(session),
+				description: replaceTabs(description).replace(/\s*[\r\n]+\s*/g, " ↵ "),
+				strip: stripFor(session, depth),
+				tokensText: hasChildren
+					? `Σ ${formatPanelTokenCount(subtreeTokens(session))}`
+					: formatPanelTokenCount(tokens(session)),
+			});
+			if (depth < SUBAGENT_PANEL_MAX_DEPTH) renderChildren(session.id, depth + 1);
 		}
 	};
 	renderChildren(undefined, 0);
-	const section = ({ lines: rows, depths: rowDepths }: Rows, title: string): string[] => {
-		if (rows.length === 0) return [];
-		const followingSibling = new Set<number>();
-		const pending: number[] = [];
-		for (let index = rows.length - 1; index >= 0; index--) {
-			while (pending.length && rowDepths[pending[pending.length - 1]] > rowDepths[index]) pending.pop();
-			if (pending.length && rowDepths[pending[pending.length - 1]] === rowDepths[index]) followingSibling.add(index);
-			pending.push(index);
-		}
-		const continuations: boolean[] = [];
-		const guided = rows.map((row, index) => {
-			const depth = rowDepths[index];
-			let prefix = "";
-			for (let level = 0; level < depth; level++)
-				prefix += continuations[level] ? `${theme.tree.vertical}  ` : "   ";
-			const hasSibling = followingSibling.has(index);
-			prefix += `${hasSibling ? theme.tree.branch : theme.tree.last} `;
-			continuations[depth] = hasSibling;
-			continuations.length = depth + 1;
-			return truncateToWidth(` ${theme.fg("dim", prefix)}${row}`, Math.max(0, columns));
-		});
-		return ["", truncateToWidth(theme.bold(theme.fg("accent", title)), Math.max(0, columns)), ...guided];
-	};
+	const totalTokens = [...candidates.values()].reduce((sum, session) => sum + tokens(session), 0);
+	const ctx =
+		typeof contextPercent === "number" && Number.isFinite(contextPercent) ? ` · ${Math.round(contextPercent)}% ctx` : "";
+	const stats = `${candidates.size} ${candidates.size === 1 ? "agent" : "agents"} · ${formatPanelTokenCount(totalTokens)}${ctx}`;
+	const headerLabel = "Subagents";
+	const header = `${theme.bold(theme.fg("accent", headerLabel))}${" ".repeat(
+		Math.max(1, SUBAGENT_PANEL_WIDTH - headerLabel.length - visibleWidth(stats)),
+	)}${stats}`;
 	const completedLines: string[] = [];
 	const completedWidth = Math.max(1, columns);
 	let completedLine = "";
@@ -710,7 +813,7 @@ export function renderSubagentHudLines(
 	if (completedLine) completedLines.push(...wrapTextWithAnsi(completedLine, completedWidth));
 	return {
 		completed: completedLines,
-		subagents: section(activeRows, "Subagents"),
+		subagents: rows.length === 0 ? [] : ["", truncateToWidth(header, columns), "", ...rows.map(renderRow)],
 	};
 }
 
@@ -2910,9 +3013,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			const ref = registry.get(session.id);
 			if (ref) this.#subagentHudAncestry.set(session.id, { id: ref.id, parentId: ref.parentId });
 		}
-		const lines = renderSubagentHudLines(sessions, Math.max(0, this.ui.terminal.columns - 2), [
-			...this.#subagentHudAncestry.values(),
-		]);
+		const lines = renderSubagentHudLines(
+			sessions,
+			Math.max(0, this.ui.terminal.columns - 2),
+			[...this.#subagentHudAncestry.values()],
+			undefined,
+			this.session.getContextUsage()?.percent,
+		);
 		if (lines.completed.length > 0) {
 			this.completedContainer.addChild(new Text(theme.bold(theme.fg("accent", "Completed")), 1, 0));
 			this.completedContainer.addChild(new Text(lines.completed.join("\n"), 1, 0));
