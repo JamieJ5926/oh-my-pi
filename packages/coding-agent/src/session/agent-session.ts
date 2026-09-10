@@ -10222,29 +10222,45 @@ export class AgentSession {
 	 * #11200). Unlike `#confirmCodexAutoRedeem` this never persists: `yes`
 	 * keeps meaning "spend without prompting" for non-final credits, while the
 	 * irreversible last-credit spend — including system-triggered continuations
-	 * such as background-job delivery — always asks. Headless hosts get a
-	 * warning notice and no spend, mirroring the unset-mode behavior.
+	 * such as background-job delivery — always asks. A single "Yes" executes
+	 * the entire plan, so the dialog enumerates every action (not just the
+	 * first) with its last-credit marking. Headless hosts get a one-shot
+	 * warning notice per episode and no spend, mirroring the unset-mode
+	 * behavior.
 	 */
-	async #confirmFinalCodexReset(actions: CodexResetAction[]): Promise<boolean> {
+	async #confirmFinalCodexReset(
+		actions: CodexResetAction[],
+		coordinator: CodexAutoRedeemCoordinator,
+	): Promise<boolean> {
 		const first = actions[0];
 		if (!first) return false;
 		const runner = this.#extensionRunner;
 		if (!runner?.hasUI()) {
-			this.emitNotice(
-				"warning",
-				`This would spend your last saved Codex rate-limit reset for ${first.label}, but no prompt UI is available. Run \`/usage reset\` to redeem it explicitly.`,
-				"codex-auto-reset",
-			);
+			if (!coordinator.notifiedKeys.has(first.attemptKey)) {
+				coordinator.notifiedKeys.add(first.attemptKey);
+				this.emitNotice(
+					"warning",
+					`This would spend your last saved Codex rate-limit reset for ${first.label}, but no prompt UI is available. Run \`/usage reset\` to redeem it explicitly.`,
+					"codex-auto-reset",
+				);
+			}
 			return false;
 		}
+		const finals = actions.filter(action => (action.availableCount ?? 1) <= 1);
+		const lines = actions.map(action =>
+			(action.availableCount ?? 1) <= 1
+				? `${action.label}: this would spend its last saved reset.`
+				: `${action.label}: ${action.availableCount} saved resets banked (not the last).`,
+		);
+		const question =
+			actions.length === 1
+				? `Spend your last saved Codex rate-limit reset?\n${lines[0]}`
+				: `Spend ${actions.length} saved Codex rate-limit resets, including ${finals.length} last saved reset${finals.length === 1 ? "" : "s"}?\n${lines.join("\n")}`;
 		try {
-			const choice = await runner.getUIContext().select(
-				`Spend your last saved Codex rate-limit reset for ${first.label}?`,
-				[
-					{ label: "Yes", description: "Redeem this one reset now. Your auto-redeem setting is unchanged." },
-					{ label: "No", description: "Keep your last saved reset." },
-				],
-			);
+			const choice = await runner.getUIContext().select(question, [
+				{ label: "Yes", description: "Redeem the listed resets now. Your auto-redeem setting is unchanged." },
+				{ label: "No", description: "Keep your saved resets." },
+			]);
 			return choice === "Yes";
 		} catch (error) {
 			logger.warn("codex-auto-reset final-credit prompt failed", { error: String(error) });
@@ -10453,7 +10469,7 @@ export class AgentSession {
 			if (
 				!shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
 				isFinalCreditSpend(plan.actions) &&
-				!(await this.#confirmFinalCodexReset(plan.actions))
+				!(await this.#confirmFinalCodexReset(plan.actions, coordinator))
 			) {
 				return false;
 			}
@@ -10491,7 +10507,20 @@ export class AgentSession {
 		coordinator.lastSweepAt = now;
 		coordinator.sweepPromise = (async () => {
 			const identity = this.#modelRegistry.authStorage.getOAuthAccountIdentity("openai-codex", this.sessionId);
-			const plan = this.#planCodexResets("sweep", reports, identity, coordinator);
+			// Live per-account credit counts: the usage snapshot's counts can be
+			// stale (kept last-good-on-failure), and a stale count above 1 would
+			// skip the final-credit consent gate below — the same overlay the
+			// blocked pass applies before planning.
+			let effectiveReports: UsageReport[] | null = reports;
+			try {
+				const statuses = await this.listResetCredits(AbortSignal.timeout(10_000));
+				effectiveReports = overlayLiveResetCredits(reports, statuses);
+			} catch (error) {
+				logger.debug("codex-auto-reset: live credit listing failed; keeping report counts", {
+					error: String(error),
+				});
+			}
+			const plan = this.#planCodexResets("sweep", effectiveReports, identity, coordinator);
 			if (plan.actions.length === 0) return;
 			if (
 				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
@@ -10502,7 +10531,7 @@ export class AgentSession {
 			if (
 				!shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
 				isFinalCreditSpend(plan.actions) &&
-				!(await this.#confirmFinalCodexReset(plan.actions))
+				!(await this.#confirmFinalCodexReset(plan.actions, coordinator))
 			) {
 				return;
 			}

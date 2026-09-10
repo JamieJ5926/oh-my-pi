@@ -54,11 +54,15 @@ interface CodexReportOpts {
 	limitReached: boolean;
 	credits: number;
 	creditExpiresInMs?: number;
+	accountId?: string;
+	email?: string;
 }
 
-/** A fresh openai-codex usage report for the stubbed account. */
+/** A fresh openai-codex usage report for a stubbed account. */
 function codexReport(opts: CodexReportOpts): UsageReport {
 	const now = Date.now();
+	const accountId = opts.accountId ?? ACCOUNT_ID;
+	const email = opts.email ?? EMAIL;
 	return {
 		provider: "openai-codex",
 		fetchedAt: now,
@@ -66,14 +70,14 @@ function codexReport(opts: CodexReportOpts): UsageReport {
 			{
 				id: "openai-codex:primary",
 				label: "5 Hour",
-				scope: { provider: "openai-codex", accountId: ACCOUNT_ID },
+				scope: { provider: "openai-codex", accountId },
 				window: { id: "5h", label: "5 Hour", resetsAt: now + 2 * HOUR },
 				amount: { usedFraction: opts.primaryUsed, unit: "percent" },
 			},
 			{
 				id: "openai-codex:secondary",
 				label: "Weekly",
-				scope: { provider: "openai-codex", accountId: ACCOUNT_ID },
+				scope: { provider: "openai-codex", accountId },
 				window: { id: "7d", label: "Weekly", resetsAt: now + 3 * 24 * HOUR },
 				amount: { usedFraction: opts.weeklyUsed, unit: "percent" },
 			},
@@ -85,16 +89,21 @@ function codexReport(opts: CodexReportOpts): UsageReport {
 					? undefined
 					: [{ status: "available", expiresAt: new Date(now + opts.creditExpiresInMs).toISOString() }],
 		},
-		metadata: { accountId: ACCOUNT_ID, email: EMAIL, limitReached: opts.limitReached },
+		metadata: { accountId, email, limitReached: opts.limitReached },
 	};
 }
 
-/** Live credits-route row for the stubbed account, as the overlay consumes it. */
-function liveCreditStatus(availableCount: number, expiresInMs?: number): ResetCreditAccountStatus {
+/** Live credits-route row for a stubbed account, as the overlay consumes it. */
+function liveCreditStatus(
+	availableCount: number,
+	expiresInMs?: number,
+	accountId?: string,
+	email?: string,
+): ResetCreditAccountStatus {
 	return {
 		credentialId: 1,
-		accountId: ACCOUNT_ID,
-		email: EMAIL,
+		accountId: accountId ?? ACCOUNT_ID,
+		email: email ?? EMAIL,
 		active: true,
 		availableCount,
 		credits:
@@ -138,14 +147,17 @@ describe("codex saved-reset trigger integration", () => {
 	interface HarnessOpts {
 		settings: Record<string, unknown>;
 		report: UsageReport;
+		reports?: UsageReport[];
 		liveCredits: ResetCreditAccountStatus[];
 		streamErrorFirst?: boolean;
+		uiSelect?: (question: string) => string | undefined;
 	}
 
 	interface Harness {
 		session: AgentSession;
 		coordinator: CodexAutoRedeemCoordinator;
 		redeemTargets: ResetCreditTarget[];
+		questions: string[];
 	}
 
 	function buildSession(opts: HarnessOpts): Harness {
@@ -153,7 +165,7 @@ describe("codex saved-reset trigger integration", () => {
 		if (!model) throw new Error("Expected bundled openai-codex/gpt-5.4 to exist");
 		authStorage.setRuntimeApiKey("openai-codex", "test-key");
 		vi.spyOn(authStorage, "getOAuthAccountIdentity").mockReturnValue({ accountId: ACCOUNT_ID, email: EMAIL });
-		vi.spyOn(authStorage, "fetchUsageReports").mockImplementation(async () => [opts.report]);
+		vi.spyOn(authStorage, "fetchUsageReports").mockImplementation(async () => opts.reports ?? [opts.report]);
 		vi.spyOn(authStorage, "listResetCredits").mockImplementation(async () => opts.liveCredits);
 		const redeemTargets: ResetCreditTarget[] = [];
 		vi.spyOn(authStorage, "redeemResetCredit").mockImplementation(async options => {
@@ -189,15 +201,29 @@ describe("codex saved-reset trigger integration", () => {
 		const sessionManager = SessionManager.inMemory();
 		managers.push(sessionManager);
 		const coordinator = createCodexAutoRedeemCoordinator();
+		const questions: string[] = [];
+		const extensionRunner =
+			opts.uiSelect === undefined
+				? undefined
+				: ({
+						hasUI: () => true,
+						getUIContext: () => ({
+							select: async (question: string) => {
+								questions.push(question);
+								return opts.uiSelect?.(question);
+							},
+						}),
+					} as never);
 		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,
 			modelRegistry,
 			codexResetCoordinator: coordinator,
+			extensionRunner,
 		});
 		sessions.push(session);
-		return { session, coordinator, redeemTargets };
+		return { session, coordinator, redeemTargets, questions };
 	}
 
 	it("spends a saved reset on a live 429 even when the report is a pre-block snapshot, then retries", async () => {
@@ -268,7 +294,7 @@ describe("codex saved-reset trigger integration", () => {
 				creditExpiresInMs: 2 * HOUR,
 			}),
 			liveCredits: [liveCreditStatus(2, 2 * HOUR)],
-			});
+		});
 
 		// The status line's heartbeat is exactly this call; the sweep handle lets
 		// us await the fire-and-forget pass instead of polling wall-clock time.
@@ -324,5 +350,47 @@ describe("codex saved-reset trigger integration", () => {
 
 		expect(redeemTargets).toHaveLength(0);
 		expect([...coordinator.attemptedKeys].some(key => key.startsWith("block|"))).toBe(false);
+	});
+	it("prompts once for a two-account sweep with a final credit and redeems exactly the listed actions", async () => {
+		// The batch-consent repro: both usage snapshots claim two credits, but
+		// the live credits route says the sibling is down to its last one. The
+		// sweep must decide on live data (prompting in `yes` mode) and the
+		// dialog must enumerate the whole batch — a single "Yes" spends both.
+		const { session, coordinator, redeemTargets, questions } = buildSession({
+			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 12 },
+			report: codexReport({ primaryUsed: 1.0, weeklyUsed: 0.2, limitReached: false, credits: 2 }),
+			reports: [
+				codexReport({
+					primaryUsed: 1.0,
+					weeklyUsed: 0.2,
+					limitReached: false,
+					credits: 2,
+					creditExpiresInMs: 2 * HOUR,
+				}),
+				codexReport({
+					primaryUsed: 1.0,
+					weeklyUsed: 0.3,
+					limitReached: false,
+					credits: 2,
+					creditExpiresInMs: 3 * HOUR,
+					accountId: "acct-2",
+					email: "second@example.com",
+				}),
+			],
+			liveCredits: [liveCreditStatus(2, 2 * HOUR), liveCreditStatus(1, 3 * HOUR, "acct-2", "second@example.com")],
+			uiSelect: () => "Yes",
+		});
+
+		await session.fetchUsageReports();
+		expect(coordinator.sweepPromise).toBeDefined();
+		await coordinator.sweepPromise;
+
+		expect(questions).toHaveLength(1);
+		expect(questions[0]).toContain(EMAIL);
+		expect(questions[0]).toContain("second@example.com");
+		expect(redeemTargets).toEqual([
+			{ accountId: ACCOUNT_ID, email: EMAIL },
+			{ accountId: "acct-2", email: "second@example.com" },
+		]);
 	});
 });

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex auto-redeem now asks for explicit consent before spending the final saved rate-limit reset, even when auto-redeem is set to `yes` ([#11200](https://github.com/can1357/oh-my-pi/issues/11200)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Added
