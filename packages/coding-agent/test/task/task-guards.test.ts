@@ -101,6 +101,10 @@ function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 		},
 		prepareForHeadlessAdvisorDrain: () => {},
 		waitForAdvisorCatchup: async () => true,
+		// The quiescence barrier's never-yield path polls this; the real
+		// AgentSession implements it (agent-session.ts), so this partial
+		// double must carry it too.
+		hasPendingAsyncWork: () => false,
 		sendUserMessage: async (content, options) => {
 			steerCalls.push({ content: String(content), options });
 		},
