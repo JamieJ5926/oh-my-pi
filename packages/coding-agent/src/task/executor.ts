@@ -676,6 +676,46 @@ function buildSchemaViolationOutcome(
 	return { rawOutput, stderr: headline, exitCode: 1 };
 }
 
+/**
+ * A terminal yield whose `error` channel carries a full delivery payload is a misfiled
+ * delivery, not an abort. Returning the payload keeps it in the subagent output instead of
+ * wrapping it into an abort-reason envelope, where callers recovered it by hand from `agent://`.
+ * The delivery record sits at `result.data`, at a top-level `data` object, or at the root, and
+ * carries its outcome in `status` or `verdict`. Delivery requires every resolved token to be a
+ * success: an explicit non-success or a contradiction between tokens — a genuine cancel, an ISSUES
+ * report, a PASS/ISSUES mix, a plain error — stays on the abort path.
+ */
+const SUCCESS_OUTCOME_TOKENS: Record<string, true> = { pass: true, success: true };
+
+function recoverDeliveredPayload(error: unknown): string | undefined {
+	if (typeof error !== "string") return undefined;
+	const text = error.trim();
+	if (!text.startsWith("{")) return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+	if (!isRecord(parsed)) return undefined;
+	const result = isRecord(parsed.result) ? parsed.result : undefined;
+	const data = isRecord(result?.data) ? result.data : isRecord(parsed.data) ? parsed.data : undefined;
+	// Only the resolved record's own `status`/`verdict` tokens count, and every present token must
+	// be a success token. A single ISSUES/BLOCKED/FAIL/ERROR on the resolution chain — the
+	// PASS/ISSUES contradiction, a top-level ISSUES beside a nested child PASS — keeps the payload
+	// on the abort path; so does the absence of any success token (a genuine cancel, a plain error).
+	const tokens = [
+		data?.status,
+		data?.verdict,
+		result?.status,
+		result?.verdict,
+		parsed.status,
+		parsed.verdict,
+	].filter((token): token is string => typeof token === "string");
+	if (tokens.length === 0) return undefined;
+	return tokens.every(token => Object.hasOwn(SUCCESS_OUTCOME_TOKENS, token.toLowerCase())) ? text : undefined;
+}
+
 export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): FinalizeSubprocessOutputResult {
 	let { rawOutput, exitCode, stderr } = args;
 	const { yieldItems, doneAborted, signalAborted, outputSchema, lastAssistantText } = args;
@@ -690,13 +730,25 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 	if (hasYield) {
 		const lastYield = yieldItems[yieldItems.length - 1];
 		if (lastYield?.status === "aborted") {
-			abortedViaYield = true;
-			exitCode = 0;
-			stderr = lastYield.error || "Subagent aborted task";
-			try {
-				rawOutput = JSON.stringify({ aborted: true, error: lastYield.error }, null, 2);
-			} catch {
-				rawOutput = `{"aborted":true,"error":"${lastYield.error || "Unknown error"}"}`;
+			const delivered = recoverDeliveredPayload(lastYield.error);
+			if (delivered !== undefined) {
+				rawOutput = delivered;
+				// Mirror the sibling delivered-yield contract below: a run that already
+				// failed before the yield keeps its non-zero exit code and stderr
+				// rather than being reset to a completed status.
+				if (!hadFailureBeforeYield) {
+					exitCode = 0;
+					stderr = "";
+				}
+			} else {
+				abortedViaYield = true;
+				exitCode = 0;
+				stderr = lastYield.error || "Subagent aborted task";
+				try {
+					rawOutput = JSON.stringify({ aborted: true, error: lastYield.error }, null, 2);
+				} catch {
+					rawOutput = `{"aborted":true,"error":"${lastYield.error || "Unknown error"}"}`;
+				}
 			}
 		} else {
 			const assembled = assembleYieldResult(yieldItems, lastAssistantText, arrayValuedLabels(outputSchema));
@@ -2070,17 +2122,22 @@ async function driveSessionToYield(
 		//
 		// Before blocking on running jobs, tell the model ONCE what it is
 		// waiting on so it can `hub` wait/cancel instead of sitting silent
-		// until the jobs (or the runtime limit) expire. Runs that never yield
-		// (ladder exhausted / terminal model error) skip the barrier — more
-		// injected turns just multiply the failure noise; the teardown reap
-		// still cancels and awaits their jobs before worktree capture.
+		// until the jobs (or the runtime limit) expire. The barrier gates the
+		// run's completion, not the ladder's outcome: a run whose ladder
+		// exhausted without a yield still owns its background jobs, and
+		// breaking out here hands them to the teardown reap, which cancels
+		// every owner job still running. Only a run with no pending owner work
+		// left is classified as a missing yield.
 		let asyncPendingNoticeSent = false;
 		while (!abortSignal.aborted) {
 			if (!monitor.yieldCalled()) {
 				await runYieldLadder();
-				// Ladder exhausted / terminal model error: classified below
-				// (missing yield, or stale yield when one was invalidated).
-				if (!monitor.yieldCalled()) break;
+				// Ladder exhausted / terminal model error. Only a run that owns
+				// no pending async work is finished — classified below (missing
+				// yield, or stale yield when one was invalidated). A run with
+				// owner jobs still running falls through to the barrier, which
+				// settles them and folds their results into the run.
+				if (!monitor.yieldCalled() && !session.hasPendingAsyncWork()) break;
 			}
 			// Let the parked yield's turn-stop session abort settle before
 			// prompting again (mirrors waitForBudgetStop).
