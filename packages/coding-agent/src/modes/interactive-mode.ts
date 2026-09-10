@@ -122,6 +122,7 @@ import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
+import { oneLineLabel } from "../task/types";
 import { formatTaskId } from "../task/render";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
@@ -498,6 +499,8 @@ const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
  * left-aligned child-dot strip, a right-aligned token cell and the model cell.
  */
 const SUBAGENT_HUD_DESC_COL = 22;
+/** Description column floor, so a terminal too narrow for every cell still labels rows. */
+const SUBAGENT_HUD_MIN_DESC_COLS = 12;
 const SUBAGENT_HUD_GUTTER = 2;
 const SUBAGENT_HUD_STRIP_COLS = 9;
 const SUBAGENT_HUD_TOKEN_COLS = 8;
@@ -622,29 +625,35 @@ export function renderSubagentHudLines(
 		target.depths.push(depth);
 		target.lines.push(truncateToWidth(` ${text}`, Math.max(0, columns)));
 	};
-	const summarize = (members: readonly ObservableSession[]) => {
-		const counts = { active: 0, completed: 0, failed: 0, aborted: 0 };
-		let sum = 0;
-		for (const member of members) {
-			counts[member.status]++;
-			sum += tokens(member);
-		}
-		return {
-			counts,
-			text: `${counts.completed} done · ${counts.active} running · ${counts.failed} failed · ${counts.aborted} cancelled · ${formatHudTokenCount(sum)} tok`,
-		};
-	};
-	const addSummary = (text: string, depth: number, target: Rows): void => {
-		const width = Math.max(1, columns - (depth + 1) * 3 - 1);
-		let line = "";
-		for (const part of text.split(" · ")) {
-			if (line && visibleWidth(`${line} · ${part}`) > width) {
-				add(line, depth, target);
-				line = "";
-			}
-			line += `${line ? " · " : ""}${part}`;
-		}
-		if (line) add(line, depth, target);
+	/** One standard-layout row: marker, dot, name, then the description, strip, token and model cells. */
+	const renderRow = (row: {
+		depth: number;
+		marker: string;
+		state: ObservableSession["status"];
+		name: string;
+		description: string;
+		strip: string;
+		token: string;
+		model: string;
+	}): string => {
+		const marker = row.marker ? `${row.marker} ` : " ";
+		const left = `${marker}${stateGlyph(row.state)} ${theme.bold(row.name)}`;
+		const prefixCols = row.depth === 0 ? 0 : row.depth * 2 + 2;
+		const descStart = Math.max(SUBAGENT_HUD_DESC_COL, prefixCols + visibleWidth(left) + SUBAGENT_HUD_GUTTER);
+		const descCols = Math.max(
+			SUBAGENT_HUD_MIN_DESC_COLS,
+			columns -
+				descStart -
+				(SUBAGENT_HUD_GUTTER * 3 + SUBAGENT_HUD_STRIP_COLS + SUBAGENT_HUD_TOKEN_COLS + SUBAGENT_HUD_MODEL_COLS),
+		);
+		const gutter = " ".repeat(SUBAGENT_HUD_GUTTER);
+		return (
+			`${left}${" ".repeat(Math.max(0, descStart - prefixCols - visibleWidth(left)))}` +
+			truncateToWidth(row.description, descCols, undefined, true) +
+			`${gutter}${truncateToWidth(row.strip, SUBAGENT_HUD_STRIP_COLS, undefined, true)}` +
+			`${gutter}${" ".repeat(Math.max(0, SUBAGENT_HUD_TOKEN_COLS - visibleWidth(row.token)))}${row.token}` +
+			`${gutter}${theme.fg("dim", row.model)}`
+		);
 	};
 	const delegatingRoles: Record<string, true> = { "poteto-agent": true, "poteto-agent-deep": true, owner: true };
 	const ownRow = (session: ObservableSession): boolean =>
@@ -668,9 +677,12 @@ export function renderSubagentHudLines(
 				if (emitted.has(role)) continue;
 				emitted.add(role);
 				if (!group.some(isSubtreeActive)) continue;
-				const target = activeRows;
-				const groupDepth = depth;
-				const { counts, text } = summarize(group);
+				const counts = { active: 0, completed: 0, failed: 0, aborted: 0 };
+				let sum = 0;
+				for (const member of group) {
+					counts[member.status]++;
+					sum += tokens(member);
+				}
 				const state = counts.failed
 					? "failed"
 					: counts.active
@@ -678,24 +690,23 @@ export function renderSubagentHudLines(
 						: counts.aborted
 							? "aborted"
 							: "completed";
-				const heading = `${dot(state)} ${theme.bold(role)} x${group.length}`;
-				if (visibleWidth(`${heading} · ${text}`) <= Math.max(0, columns - (groupDepth + 1) * 3 - 1)) {
-					add(`${heading} · ${text}`, groupDepth, target);
-				} else {
-					add(heading, groupDepth, target);
-					addSummary(text, groupDepth + 1, target);
-				}
-				let tags = "";
-				const width = Math.max(1, columns - (groupDepth + 2) * 3 - 1);
-				for (const member of group) {
-					const tag = `${dot(member.status)} ${truncateToWidth(localName(member), Math.max(1, width - 2))}`;
-					if (tags && visibleWidth(`${tags}  ${tag}`) > width) {
-						add(tags, groupDepth + 1, target);
-						tags = "";
-					}
-					tags += `${tags ? "  " : ""}${tag}`;
-				}
-				if (tags) add(tags, groupDepth + 1, target);
+				const groupModel = modelCell(group[0]!);
+				activeRows.depths.push(depth);
+				activeRows.lines.push(
+					truncateToWidth(
+						renderRow({
+							depth,
+							marker: "",
+							state,
+							name: `${role} ×${group.length}`,
+							description: group.map(member => `${stateGlyph(member.status)} ${localName(member)}`).join("  "),
+							strip: group.map(member => stateGlyph(member.status)).join(""),
+							token: formatHudTokenCount(sum),
+							model: group.every(member => modelCell(member) === groupModel) ? groupModel : "···",
+						}),
+						Math.max(0, columns),
+					),
+				);
 				continue;
 			}
 			if (parent === undefined && !isSubtreeActive(session)) {
@@ -712,29 +723,36 @@ export function renderSubagentHudLines(
 			}
 			const name = parent === undefined ? formatTaskId(session.id) : localName(session);
 			const description = session.description?.trim() || session.progress?.description?.trim();
-			const preview = description && !labelEchoesHandle(session.id, description) ? description : "";
-			const marker = markerFor(session);
-			const left = `${marker ? `${marker} ` : " "}${stateGlyph(session.status)} ${theme.bold(name)}`;
-			const prefixCols = depth === 0 ? 0 : depth * 2 + 2;
-			const descStart = Math.max(SUBAGENT_HUD_DESC_COL, prefixCols + visibleWidth(left) + SUBAGENT_HUD_GUTTER);
-			const descCols = Math.max(
-				1,
-				columns -
-					descStart -
-					(SUBAGENT_HUD_GUTTER * 3 + SUBAGENT_HUD_STRIP_COLS + SUBAGENT_HUD_TOKEN_COLS + SUBAGENT_HUD_MODEL_COLS),
-			);
+			// A generated label can arrive wrapped in a prompt tag (`<label>…</label>`),
+			// which is prompt scaffolding, never text to show.
+			const preview =
+				description && !labelEchoesHandle(session.id, description)
+					? oneLineLabel(
+							description
+								.replace(/^<[a-z][\w-]*>\s*/i, "")
+								.replace(/\s*<\/[a-z][\w-]*>$/i, "")
+								.replace(/\s*[\r\n]+\s*/g, " ↵ "),
+						)
+					: "";
 			const kids = kidsOf(session);
 			const token =
 				kids.length > 0 ? `Σ ${formatHudTokenCount(subtreeTokens(session))}` : formatHudTokenCount(tokens(session));
-			const gutter = " ".repeat(SUBAGENT_HUD_GUTTER);
-			const row =
-				`${left}${" ".repeat(Math.max(0, descStart - prefixCols - visibleWidth(left)))}` +
-				truncateToWidth(replaceTabs(preview).replace(/\s*[\r\n]+\s*/g, " ↵ "), descCols, undefined, true) +
-				`${gutter}${truncateToWidth(stripFor(session), SUBAGENT_HUD_STRIP_COLS, undefined, true)}` +
-				`${gutter}${" ".repeat(Math.max(0, SUBAGENT_HUD_TOKEN_COLS - visibleWidth(token)))}${token}` +
-				`${gutter}${theme.fg("dim", modelCell(session))}`;
 			activeRows.depths.push(depth);
-			activeRows.lines.push(truncateToWidth(row, Math.max(0, columns)));
+			activeRows.lines.push(
+				truncateToWidth(
+					renderRow({
+						depth,
+						marker: markerFor(session),
+						state: session.status,
+						name,
+						description: preview,
+						strip: stripFor(session),
+						token,
+						model: modelCell(session),
+					}),
+					Math.max(0, columns),
+				),
+			);
 			if (session.status !== "active") add(`${activeBelow.get(session.id) ?? 0} active below`, depth + 1);
 			renderChildren(session.id, depth + 1);
 		}
