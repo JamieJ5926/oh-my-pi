@@ -720,8 +720,13 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 			const delivered = recoverDeliveredPayload(lastYield.error);
 			if (delivered !== undefined) {
 				rawOutput = delivered;
-				exitCode = 0;
-				stderr = "";
+				// Mirror the sibling delivered-yield contract below: a run that already
+				// failed before the yield keeps its non-zero exit code and stderr
+				// rather than being reset to a completed status.
+				if (!hadFailureBeforeYield) {
+					exitCode = 0;
+					stderr = "";
+				}
 			} else {
 				abortedViaYield = true;
 				exitCode = 0;

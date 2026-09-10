@@ -77,4 +77,21 @@ describe("terminal yield with a PASS payload on the error channel", () => {
 		expect(result.stderr).toBe(issues);
 		expect(result.rawOutput).toBe(JSON.stringify({ aborted: true, error: issues }, null, 2));
 	});
+
+	it("keeps a pre-yield failure exit code while still delivering the PASS payload", () => {
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 1,
+			stderr: "stream error: ECONNRESET",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [{ status: "aborted", error: PASS_DELIVERY }],
+			outputSchema: undefined,
+		});
+
+		expect(result.abortedViaYield).toBe(false);
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toBe("stream error: ECONNRESET");
+		expect(result.rawOutput).toBe(PASS_DELIVERY);
+	});
 });
