@@ -9,6 +9,7 @@
  * drains pending messages; `list` shows actionable running+idle peers by default.
  */
 
+import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { formatAge, formatDuration, logger } from "@oh-my-pi/pi-utils";
@@ -38,6 +39,7 @@ import {
 	type CoordinationDetails,
 	DEFAULT_HUB_LIST_LIMIT,
 	type HubListStatus,
+	type HubPeerInfo,
 	type HubRenderArgs,
 	type HubRosterCounts,
 	hubErrorResult,
@@ -58,6 +60,35 @@ export interface HubListParams {
 
 function isAddressablePeer(ref: { id: string; kind: string; status: string }, senderId: string): boolean {
 	return ref.id !== senderId && ref.kind !== "advisor" && ref.status !== "aborted";
+}
+/**
+ * Owning-process grouping for `executeList` (issue #14). Child transcripts
+ * live under `<root minus .jsonl>/<...>.jsonl` (see `sessionFileBelongsToRoot`
+ * in `registry/persisted-agents`), so the helper strips the leaf filename and
+ * climbs ancestor directories to the topmost `<dir>.jsonl` that exists on disk:
+ * that file is the owning root session. A root file owns itself; a ref without
+ * a session file groups under `in-memory`. When no root file exists (synthetic
+ * paths), it falls back to the leaf-parent-plus-suffix heuristic so grouping
+ * stays deterministic without inventing ownership.
+ */
+export async function inferOwningRootSessionFile(
+	sessionFile: string | null | undefined,
+): Promise<string | undefined> {
+	if (!sessionFile) return undefined;
+	const resolved = path.resolve(sessionFile);
+	try {
+		if (resolved.endsWith(".jsonl") && (await Bun.file(resolved).exists())) {
+			let current = resolved;
+			for (;;) {
+				const parentFile = `${path.dirname(current)}.jsonl`;
+				if (parentFile === current || !(await Bun.file(parentFile).exists())) return current;
+				current = parentFile;
+			}
+		}
+	} catch {
+		return undefined;
+	}
+	return `${path.dirname(resolved)}.jsonl`;
 }
 /**
  * Resolve a `send` recipient to its registry id. Exact ids (and "all") pass
@@ -186,7 +217,6 @@ export async function executeList(
 	const refs = registry
 		.list()
 		.filter(ref => isAddressablePeer(ref, senderId) && isCurrentSessionRosterRef(ref, rootSessionFile));
-
 	const selected = selectListRefs(registry, senderId, params.status, rootSessionFile);
 	selected.sort(
 		(a, b) =>
@@ -200,27 +230,43 @@ export async function executeList(
 		shown: shownRefs.length,
 		truncated,
 	};
-
 	const bus = IrcBus.global();
-	const peers = shownRefs.map(ref => ({
-		id: ref.id,
-		displayName: ref.displayName,
-		kind: ref.kind,
-		status: ref.status,
-		parentId: ref.parentId,
-		unread: bus.unreadCount(ref.id),
-		lastActivity: ref.lastActivity,
-		activity: ref.activity,
-	}));
+
+	const peers = await Promise.all(
+		shownRefs.map(async ref => ({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: ref.kind,
+			status: ref.status,
+			parentId: ref.parentId,
+			unread: bus.unreadCount(ref.id),
+			lastActivity: ref.lastActivity,
+			activity: ref.activity,
+			owner: await inferOwningRootSessionFile(ref.sessionFile),
+		})),
+	);
 	const lines = [formatRosterSummary(counts, params.status ? `${params.status} peers` : "actionable peers")];
+	// Cross-session peers nest under their owning root instead of rendering
+	// flat. Single-owner lists keep the legacy flat rendering untouched.
+	const owners = new Map<string, typeof peers>();
 	for (const peer of peers) {
-		const extras = [
-			peer.activity || undefined,
-			peer.unread > 0 ? `unread ${peer.unread}` : undefined,
-			peer.parentId ? `parent ${peer.parentId}` : undefined,
-			`active ${formatDuration(Date.now() - peer.lastActivity)} ago`,
-		].filter(Boolean);
-		lines.push(`- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}] — ${extras.join(", ")}`);
+		const key = peer.owner ?? "in-memory";
+		const group = owners.get(key);
+		if (group) group.push(peer);
+		else owners.set(key, [peer]);
+	}
+	const grouped = owners.size > 1;
+	for (const [owner, group] of owners) {
+		if (grouped) lines.push(owner === "in-memory" ? "owner in-memory:" : `owner ${path.basename(owner)} (${owner}):`);
+		for (const peer of group) {
+			const extras = [
+				peer.activity || undefined,
+				peer.unread > 0 ? `unread ${peer.unread}` : undefined,
+				peer.parentId ? `parent ${peer.parentId}` : undefined,
+				`active ${formatDuration(Date.now() - peer.lastActivity)} ago`,
+			].filter(Boolean);
+			lines.push(`${grouped ? "  " : ""}- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}] — ${extras.join(", ")}`);
+		}
 	}
 	let publishedPeers: PublishedPeer[] = [];
 	if (!params.status) {
@@ -868,23 +914,63 @@ function renderListResult(details: Partial<CoordinationDetails>, expanded: boole
 	const unreadTotal = peers.reduce((sum, peer) => sum + peer.unread, 0);
 	if (unreadTotal > 0) meta.push(theme.fg("warning", `${unreadTotal} unread`));
 	const header = renderStatusLine({ iconOverride: ircGlyph(theme), title: "IRC peers", meta }, theme);
-	const items = renderTreeList(
-		{
-			items: peers,
-			expanded,
-			maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
-			itemType: "peer",
-			renderItem: peer => {
-				const kindText = peer.parentId ? `${peer.kind}${theme.sep.dot}of ${peer.parentId}` : peer.kind;
-				const unread = peer.unread > 0 ? ` ${formatBadge(`${peer.unread} unread`, "warning", theme)}` : "";
-				const age = messageAge(peer.lastActivity);
-				const activity = peer.activity ? ` ${theme.fg("dim", replaceTabs(peer.activity))}` : "";
-				const name = theme.fg("dim", replaceTabs(peer.displayName));
-				return `${peerStatusBadge(peer.status, theme)} ${theme.bold(replaceTabs(peer.id))} ${name} ${theme.fg("dim", kindText)}${activity}${unread}${age ? ` ${theme.fg("dim", age)}` : ""}`;
-			},
-		},
-		theme,
-	);
+	const renderPeer = (peer: HubPeerInfo): string => {
+		const kindText = peer.parentId ? `${peer.kind}${theme.sep.dot}of ${peer.parentId}` : peer.kind;
+		const unread = peer.unread > 0 ? ` ${formatBadge(`${peer.unread} unread`, "warning", theme)}` : "";
+		const age = messageAge(peer.lastActivity);
+		const activity = peer.activity ? ` ${theme.fg("dim", replaceTabs(peer.activity))}` : "";
+		const name = theme.fg("dim", replaceTabs(peer.displayName));
+		return `${peerStatusBadge(peer.status, theme)} ${theme.bold(replaceTabs(peer.id))} ${name} ${theme.fg("dim", kindText)}${activity}${unread}${age ? ` ${theme.fg("dim", age)}` : ""}`;
+	};
+	// Cross-session peers nest under their owning root, the same grouped rule
+	// the text roster uses. A single owner keeps the legacy flat rendering.
+	const owners = new Map<string, HubPeerInfo[]>();
+	for (const peer of peers) {
+		const key = peer.owner ?? "in-memory";
+		const group = owners.get(key);
+		if (group) group.push(peer);
+		else owners.set(key, [peer]);
+	}
+	const grouped = owners.size > 1;
+	const items = grouped
+		? renderTreeList<[string, HubPeerInfo[]]>(
+				{
+					items: [...owners],
+					expanded,
+					maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
+					maxCollapsedLines: PREVIEW_LIMITS.COLLAPSED_ITEMS,
+					itemType: "owner",
+					// A collapsed group must fit the line budget on its own, so cap the
+					// peers it renders and fold the rest into a continuation line. The
+					// budget minus this header, the continuation line and the trailing
+					// summary leaves the shown-peer allowance.
+					renderItem: ([owner, group]) => {
+						const shown = expanded ? group : group.slice(0, Math.max(1, PREVIEW_LIMITS.COLLAPSED_ITEMS - 3));
+						const hidden = group.length - shown.length;
+						return [
+							theme.fg(
+								"muted",
+								owner === "in-memory" ? "owner in-memory:" : `owner ${path.basename(owner)} (${owner}):`,
+							),
+							...shown.map(peer => `  ${renderPeer(peer)}`),
+							...(hidden > 0
+								? [`  ${theme.fg("muted", `… ${hidden} more peer${hidden === 1 ? "" : "s"}`)}`]
+								: []),
+						];
+					},
+				},
+				theme,
+			)
+		: renderTreeList<HubPeerInfo>(
+				{
+					items: peers,
+					expanded,
+					maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
+					itemType: "peer",
+					renderItem: renderPeer,
+				},
+				theme,
+			);
 	return [header, ...items, ...remoteLines];
 }
 function buildResultLines(

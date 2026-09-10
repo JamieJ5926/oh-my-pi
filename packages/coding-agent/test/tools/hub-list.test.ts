@@ -6,6 +6,7 @@ import { AgentProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/ag
 import { HistoryProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/history-protocol";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, getAgentTombstonePath, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { ensurePersistedRoster, registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
@@ -18,8 +19,11 @@ import {
 	DEFAULT_HUB_LIST_LIMIT,
 	executeList,
 	executeSend,
+	inferOwningRootSessionFile,
 	MAX_HUB_LIST_LIMIT,
+	messagingRenderResult,
 } from "@oh-my-pi/pi-coding-agent/tools/hub/messaging";
+import { PREVIEW_LIMITS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 import { prompt, TempDir } from "@oh-my-pi/pi-utils";
 
 function sessionHeader(id: string): string {
@@ -326,6 +330,38 @@ describe("hub list", () => {
 		if (!result.details) throw new Error("Expected coordination details");
 		expect(result.details.peers?.map(peer => peer.id)).toEqual(["LiveWorker"]);
 		expect(result.details.counts?.idle).toBe(1);
+	});
+	it("lists the roster when a non-sender peer carries a malformed sessionFile", async () => {
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			status: "running",
+		});
+		registry.register({
+			id: "BadPeer",
+			displayName: "task",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+			sessionFile: "\0invalid.jsonl",
+			status: "idle",
+		});
+		registry.register({
+			id: "GoodPeer",
+			displayName: "task",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+			status: "idle",
+		});
+
+		const result = await executeList(registry, MAIN_AGENT_ID);
+		if (!result.details) throw new Error("Expected coordination details");
+		expect(result.details.peers?.map(peer => peer.id).sort()).toEqual(["BadPeer", "GoodPeer"]);
+		expect(await inferOwningRootSessionFile("\0invalid.jsonl")).toBeUndefined();
 	});
 
 	it("retries persisted roster scan after a transient readdir failure", async () => {
@@ -1791,5 +1827,209 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 		);
 		expect(unknown.isError).toBeTruthy();
 		expect(unknown.details?.receipts?.[0]?.outcome).toBe("failed");
+	});
+	it("groups depth-1 children under their owning root instead of one group per peer", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-owner-grouping-");
+		const dir = tempDir.path();
+		const rootA = path.join(dir, "a.jsonl");
+		const rootB = path.join(dir, "b.jsonl");
+		const childA = path.join(dir, "a", "Local.jsonl");
+		const childB = path.join(dir, "b", "Foreign.jsonl");
+		await Bun.write(rootA, `${sessionHeader("a")}\n`);
+		await Bun.write(rootB, `${sessionHeader("b")}\n`);
+		await writeParkedTranscript(childA, "local", "local work");
+		await writeParkedTranscript(childB, "foreign", "foreign work");
+
+		// Depth-1 children resolve to the owning root file, not the leaf path.
+		expect(await inferOwningRootSessionFile(childA)).toBe(rootA);
+		expect(await inferOwningRootSessionFile(childB)).toBe(rootB);
+		expect(await inferOwningRootSessionFile(rootA)).toBe(rootA);
+		expect(await inferOwningRootSessionFile(null)).toBeUndefined();
+
+		// Live peers keep the registry scan out of the picture (Main carries no
+		// session file, so no root restores), keeping the grouping assertion exact.
+		const registry = new AgentRegistry();
+		registry.register({ id: MAIN_AGENT_ID, displayName: MAIN_AGENT_ID, kind: "main", session: null, status: "running" });
+		registry.register({ id: "Local", displayName: "task", kind: "sub", session: null, status: "idle", sessionFile: childA });
+		registry.register({ id: "Foreign", displayName: "task", kind: "sub", session: null, status: "idle", sessionFile: childB });
+
+		const result = await executeList(registry, MAIN_AGENT_ID);
+		if (!result.details) throw new Error("Expected coordination details");
+		const owners = result.details.peers?.map(peer => [peer.id, peer.owner]).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+		expect(owners).toEqual([
+			["Foreign", rootB],
+			["Local", rootA],
+		]);
+		const text = listText(result);
+		expect(text).toContain(`owner a.jsonl (${rootA}):`);
+		expect(text).toContain(`owner b.jsonl (${rootB}):`);
+		expect(text).toContain("  - Local");
+		expect(text).toContain("  - Foreign");
+	});
+	it("keeps legacy flat rendering for a single owner instead of owner headers", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-owner-single-");
+		const dir = tempDir.path();
+		const rootA = path.join(dir, "a.jsonl");
+		const childA = path.join(dir, "a", "Local.jsonl");
+		await Bun.write(rootA, `${sessionHeader("a")}\n`);
+		await writeParkedTranscript(childA, "local", "local work");
+
+		expect(await inferOwningRootSessionFile(childA)).toBe(rootA);
+
+		const registry = new AgentRegistry();
+		registry.register({ id: MAIN_AGENT_ID, displayName: MAIN_AGENT_ID, kind: "main", session: null, status: "running" });
+		registry.register({ id: "Local", displayName: "task", kind: "sub", session: null, status: "idle", sessionFile: childA });
+
+		const result = await executeList(registry, MAIN_AGENT_ID);
+		if (!result.details) throw new Error("Expected coordination details");
+		expect(result.details.peers?.map(peer => [peer.id, peer.owner])).toEqual([["Local", rootA]]);
+		const text = listText(result);
+		expect(text).toContain("- Local");
+		expect(text).not.toContain("owner ");
+	});
+	it("nests terminal peer rows under their owning root when peers span roots", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-owner-render-");
+		const dir = tempDir.path();
+		const rootA = path.join(dir, "a.jsonl");
+		const rootB = path.join(dir, "b.jsonl");
+		const childA = path.join(dir, "a", "Local.jsonl");
+		const childB = path.join(dir, "b", "Foreign.jsonl");
+		await Bun.write(rootA, `${sessionHeader("a")}\n`);
+		await Bun.write(rootB, `${sessionHeader("b")}\n`);
+		await writeParkedTranscript(childA, "local", "local work");
+		await writeParkedTranscript(childB, "foreign", "foreign work");
+
+		const registry = new AgentRegistry();
+		registry.register({ id: MAIN_AGENT_ID, displayName: MAIN_AGENT_ID, kind: "main", session: null, status: "running" });
+		registry.register({ id: "Local", displayName: "task", kind: "sub", session: null, status: "idle", sessionFile: childA });
+		registry.register({ id: "Foreign", displayName: "task", kind: "sub", session: null, status: "idle", sessionFile: childB });
+
+		const listed = await executeList(registry, MAIN_AGENT_ID);
+		await initTheme(false);
+		const lines = messagingRenderResult(listed, { expanded: true, isPartial: false }, theme, { op: "list" }).render(500);
+		const headerA = lines.findIndex(line => line.includes(`owner a.jsonl (${rootA}):`));
+		const headerB = lines.findIndex(line => line.includes(`owner b.jsonl (${rootB}):`));
+		const local = lines.findIndex(line => line.includes("Local"));
+		const foreign = lines.findIndex(line => line.includes("Foreign"));
+		expect(headerA).toBeGreaterThanOrEqual(0);
+		expect(headerB).toBeGreaterThanOrEqual(0);
+		expect(headerA).toBeLessThan(local);
+		expect(local).toBeLessThan(headerB);
+		expect(headerB).toBeLessThan(foreign);
+	});
+	it("bounds the collapsed terminal render by lines when peers span multiple owners", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-owner-collapsed-budget-");
+		const dir = tempDir.path();
+		const rootA = path.join(dir, "a.jsonl");
+		const rootB = path.join(dir, "b.jsonl");
+		const rootC = path.join(dir, "c.jsonl");
+		await Bun.write(rootA, `${sessionHeader("a")}\n`);
+		await Bun.write(rootB, `${sessionHeader("b")}\n`);
+		await Bun.write(rootC, `${sessionHeader("c")}\n`);
+
+		const registry = new AgentRegistry();
+		registry.register({ id: MAIN_AGENT_ID, displayName: MAIN_AGENT_ID, kind: "main", session: null, status: "running" });
+		// The first owner holds more peers than a collapsed group may render, so
+		// this pins the case where an uncapped group starves the whole frame.
+		const peers: Array<[string, string]> = [
+			["AOne", rootA],
+			["ATwo", rootA],
+			["AThree", rootA],
+			["AFour", rootA],
+			["AFive", rootA],
+			["ASix", rootA],
+			["ASeven", rootA],
+			["BOne", rootB],
+			["BTwo", rootB],
+			["BThree", rootB],
+			["COne", rootC],
+			["CTwo", rootC],
+			["CThree", rootC],
+		];
+		// Pinned activity stamps make the render order deterministic: the first
+		// fixture entry is the newest, so rootA's oversized group leads the frame.
+		const baseActivity = Date.now();
+		for (const [index, [id, owner]] of peers.entries()) {
+			const child = path.join(dir, path.basename(owner, ".jsonl"), `${id}.jsonl`);
+			await writeParkedTranscript(child, id.toLowerCase(), `${id} work`);
+			registry.register({
+				id,
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				status: "idle",
+				sessionFile: child,
+				lastActivity: baseActivity + (peers.length - index),
+			});
+		}
+
+		const listed = await executeList(registry, MAIN_AGENT_ID);
+		if (!listed.details) throw new Error("Expected coordination details");
+		expect(listed.details.peers?.map(peer => peer.id).sort()).toEqual(peers.map(([id]) => id).sort());
+
+		await initTheme(false);
+		const collapsed = messagingRenderResult(listed, { expanded: false, isPartial: false }, theme, { op: "list" }).render(500);
+		const collapsedText = collapsed.join("\n");
+		// Collapsed is the default view: the frame must honour a total-line budget
+		// (item lines plus the trailing summary) rather than rendering every peer
+		// of every owner, which roughly quadruples the frame at the list limit.
+		expect(collapsed.length).toBeLessThanOrEqual(1 + PREVIEW_LIMITS.COLLAPSED_ITEMS);
+		expect(collapsed.filter(line => line.includes("owner ")).length).toBe(1);
+		expect(collapsedText).toContain("more owner");
+
+		// The oversized first group is capped rather than skipped, so its header
+		// and peer rows survive in the default collapsed frame; the peers beyond
+		// the cap are named on a continuation line.
+		expect(collapsedText).toContain(`owner ${path.basename(rootA)} (${rootA}):`);
+		expect(collapsedText).toContain("AOne");
+		expect(collapsedText).toContain("AThree");
+		expect(collapsedText).toContain("more peer");
+		expect(collapsedText).not.toContain("ASix");
+
+		// The hidden peers are folded, not lost: expanding reveals every owner
+		// group and every peer.
+		const expanded = messagingRenderResult(listed, { expanded: true, isPartial: false }, theme, { op: "list" }).render(500);
+		const expandedText = expanded.join("\n");
+		expect(expanded.length).toBeGreaterThan(collapsed.length);
+		for (const [id, owner] of peers) {
+			expect(expandedText).toContain(`owner ${path.basename(owner)} (${owner}):`);
+			expect(expandedText).toContain(id);
+		}
+	});
+	it("keeps terminal peer rows flat when every peer shares one owner", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-owner-render-single-");
+		const dir = tempDir.path();
+		const rootA = path.join(dir, "a.jsonl");
+		const childA = path.join(dir, "a", "Local.jsonl");
+		await Bun.write(rootA, `${sessionHeader("a")}\n`);
+		await writeParkedTranscript(childA, "local", "local work");
+
+		const registry = new AgentRegistry();
+		registry.register({ id: MAIN_AGENT_ID, displayName: MAIN_AGENT_ID, kind: "main", session: null, status: "running" });
+		registry.register({ id: "Local", displayName: "task", kind: "sub", session: null, status: "idle", sessionFile: childA });
+
+		const listed = await executeList(registry, MAIN_AGENT_ID);
+		expect(listed.details?.peers?.map(peer => peer.owner)).toEqual([rootA]);
+		await initTheme(false);
+		const rendered = messagingRenderResult(listed, { expanded: true, isPartial: false }, theme, { op: "list" })
+			.render(500)
+			.join("\n");
+		expect(rendered).toContain("Local");
+		expect(rendered).not.toContain("owner ");
+	});
+	it("climbs depth-2 grandchildren to the owning root instead of the nearest ancestor", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-owner-grandchild-");
+		const dir = tempDir.path();
+		const root = path.join(dir, "a.jsonl");
+		const child = path.join(dir, "a", "Local.jsonl");
+		const grandchild = path.join(dir, "a", "Local", "Deep.jsonl");
+		await Bun.write(root, `${sessionHeader("a")}\n`);
+		await writeParkedTranscript(child, "local", "local work");
+		await writeParkedTranscript(grandchild, "deep", "deep work");
+
+		// The intermediate parent file exists on disk, but ownership belongs to the root.
+		expect(await inferOwningRootSessionFile(grandchild)).toBe(root);
+		expect(await inferOwningRootSessionFile(child)).toBe(root);
+		expect(await inferOwningRootSessionFile(root)).toBe(root);
 	});
 });

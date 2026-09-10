@@ -39,6 +39,8 @@ export interface HubPeerInfo {
 	unread: number;
 	lastActivity: number;
 	activity?: string;
+	/** Owning root session file grouping cross-session peers (issue #14). */
+	owner?: string;
 }
 
 /** Status values `op:"list"` can filter on. Advisor is a kind, not a status. */
