@@ -393,4 +393,80 @@ describe("codex saved-reset trigger integration", () => {
 			{ accountId: "acct-2", email: "second@example.com" },
 		]);
 	});
+	it("waits for an in-flight salvage sweep before a blocked pass spends (issue #11470A)", async () => {
+		// The double-spend repro: a sweep is already redeeming when a live 429
+		// lands. The blocked pass must await the sweep so its plan observes
+		// post-sweep credit counts instead of racing on a stale snapshot.
+		const { session, coordinator, redeemTargets } = buildSession({
+			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 },
+			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 0.5, limitReached: false, credits: 2 }),
+			liveCredits: [liveCreditStatus(2)],
+			streamErrorFirst: true,
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		const sweepGate = Promise.withResolvers<void>();
+		coordinator.sweepInFlight = true;
+		coordinator.sweepPromise = sweepGate.promise;
+		try {
+			const promptPromise = session.prompt("trigger a codex usage limit");
+			// Pump the event loop without guessing a duration: the mock stream
+			// and retry pipeline need real macrotask turns (bare microtask
+			// yields never fire their timers). An unserialized blocked pass
+			// spends during this pump; a serialized one stays parked on the
+			// sweep gate.
+			for (let i = 0; i < 500 && redeemTargets.length === 0; i++) {
+				await new Promise(resolve => setTimeout(resolve, 0));
+			}
+			expect(redeemTargets).toHaveLength(0);
+			sweepGate.resolve();
+			coordinator.sweepInFlight = false;
+			await promptPromise;
+			await session.waitForIdle();
+			expect(redeemTargets).toEqual([{ accountId: ACCOUNT_ID, email: EMAIL }]);
+		} finally {
+			coordinator.sweepInFlight = false;
+		}
+	});
+	it("names the final-credit account in headless warnings when it is not first (issue #11470B)", async () => {
+		// The misleading-guidance repro: the batch opens with a non-final
+		// action and the final-credit action comes later. Headless users must
+		// be told which account actually needs the explicit redemption.
+		const { session, coordinator, redeemTargets } = buildSession({
+			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 12 },
+			report: codexReport({ primaryUsed: 1.0, weeklyUsed: 0.2, limitReached: false, credits: 2 }),
+			reports: [
+				codexReport({
+					primaryUsed: 1.0,
+					weeklyUsed: 0.2,
+					limitReached: false,
+					credits: 2,
+					creditExpiresInMs: 2 * HOUR,
+				}),
+				codexReport({
+					primaryUsed: 1.0,
+					weeklyUsed: 0.3,
+					limitReached: false,
+					credits: 2,
+					creditExpiresInMs: 3 * HOUR,
+					accountId: "acct-2",
+					email: "second@example.com",
+				}),
+			],
+			liveCredits: [liveCreditStatus(2, 2 * HOUR), liveCreditStatus(1, 3 * HOUR, "acct-2", "second@example.com")],
+		});
+		const warnings: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice" && event.level === "warning") warnings.push(event.message);
+		});
+
+		await session.fetchUsageReports();
+		expect(coordinator.sweepPromise).toBeDefined();
+		await coordinator.sweepPromise;
+
+		expect(redeemTargets).toHaveLength(0);
+		const finalWarning = warnings.find(message => message.includes("last saved Codex rate-limit reset"));
+		expect(finalWarning).toBeDefined();
+		expect(finalWarning).toContain("second@example.com");
+	});
 });

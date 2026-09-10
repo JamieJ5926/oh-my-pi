@@ -10234,19 +10234,24 @@ export class AgentSession {
 	): Promise<boolean> {
 		const first = actions[0];
 		if (!first) return false;
+		const finals = actions.filter(action => (action.availableCount ?? 1) <= 1);
 		const runner = this.#extensionRunner;
 		if (!runner?.hasUI()) {
-			if (!coordinator.notifiedKeys.has(first.attemptKey)) {
-				coordinator.notifiedKeys.add(first.attemptKey);
+			// Name the accounts that actually hold a final credit, not the
+			// batch head: a non-final action can sort before the final one.
+			const target = finals[0] ?? first;
+			if (!coordinator.notifiedKeys.has(target.attemptKey)) {
+				coordinator.notifiedKeys.add(target.attemptKey);
 				this.emitNotice(
 					"warning",
-					`This would spend your last saved Codex rate-limit reset for ${first.label}, but no prompt UI is available. Run \`/usage reset\` to redeem it explicitly.`,
+					finals.length > 1
+						? `This would spend the last saved Codex rate-limit resets for ${finals.map(action => action.label).join(", ")}, but no prompt UI is available. Run \`/usage reset\` to redeem them explicitly.`
+						: `This would spend your last saved Codex rate-limit reset for ${target.label}, but no prompt UI is available. Run \`/usage reset\` to redeem it explicitly.`,
 					"codex-auto-reset",
 				);
 			}
 			return false;
 		}
-		const finals = actions.filter(action => (action.availableCount ?? 1) <= 1);
 		const lines = actions.map(action =>
 			(action.availableCount ?? 1) <= 1
 				? `${action.label}: this would spend its last saved reset.`
@@ -10442,6 +10447,21 @@ export class AgentSession {
 		if (existing) return existing;
 
 		const run = (async (): Promise<boolean> => {
+			// Serialize against an in-flight salvage sweep: it planned on a
+			// live listing that predates this pass, and attempt keys differ
+			// per trigger (`salvage|…` vs `block|…`), so planning concurrently
+			// on the same snapshot could double-spend the final credit. The
+			// sweep already defers to blocked passes at schedule time; this
+			// covers the reverse order (sweep first, 429 second).
+			const sweep = coordinator.sweepInFlight ? coordinator.sweepPromise : undefined;
+			if (sweep) {
+				try {
+					await sweep;
+				} catch {
+					// Sweep failures are logged at the sweep site; proceed with
+					// a fresh plan below.
+				}
+			}
 			// Live data: the cached report predates the block that got us here.
 			await authStorage.invalidateUsageCache("openai-codex");
 			const reports = await this.fetchUsageReports();
