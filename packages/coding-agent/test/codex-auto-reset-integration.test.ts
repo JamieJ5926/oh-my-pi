@@ -428,7 +428,7 @@ describe("codex saved-reset trigger integration", () => {
 			// spends during this pump; a serialized one stays parked on the
 			// sweep gate.
 			for (let i = 0; i < 500 && redeemTargets.length === 0; i++) {
-				await new Promise(resolve => setTimeout(resolve, 0));
+				await Bun.sleep(0);
 			}
 			expect(redeemTargets).toHaveLength(0);
 			sweepGate.resolve();
