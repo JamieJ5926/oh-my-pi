@@ -94,6 +94,10 @@ function createMockSession(
 			return true;
 		},
 		waitForIdle: async () => {},
+		// The quiescence barrier's never-yield path polls this; the real
+		// AgentSession implements it (agent-session.ts), so this partial
+		// double must carry it too.
+		hasPendingAsyncWork: () => false,
 		getLastAssistantMessage: () => messages[messages.length - 1] as never,
 		sendUserMessage: async () => {},
 		setIrcWakeTurnObserver: observer => {
