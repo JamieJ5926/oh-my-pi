@@ -273,3 +273,5 @@ The following servers ship in `defaults.json` and are eligible for auto-detectio
 | `tlaplus`                     | TLA+                          | `tlapm_lsp`                       |
 
 Only one TypeScript server is kept per project: when the resolved `tsc` belongs to a TypeScript install without `lib/tsserver.js` (TypeScript 7+), `typescript-native` wins and `typescript-language-server` is dropped, since it cannot drive that install; otherwise `typescript-native` is dropped because older `tsc` rejects `--lsp`.
+
+The `ansible` server shares the `.yml`/`.yaml` extensions with `yamlls` but only claims Ansible files: playbooks and files under conventional Ansible paths (`roles/`, `tasks/`, `group_vars/`, and similar) or with Ansible content markers (`hosts:`, `tasks:`, `roles:`). Every other YAML file (Kubernetes manifests, workflows, Compose files) routes to `yamlls`.

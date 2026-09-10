@@ -5311,4 +5311,63 @@ describe("ansible lsp", () => {
 			tempDir.removeSync();
 		}
 	});
+	it("does not route Kubernetes manifests to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-k8s-");
+		try {
+			const filePath = path.join(tempDir.path(), "deployment.yml");
+			fs.writeFileSync(filePath, "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath).map(([name]) => name);
+			expect(names).not.toContain("ansible");
+			expect(getLspServerForFile(config, filePath)?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not route GitHub workflows or Compose files to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-nonplay-");
+		try {
+			const workflow = path.join(tempDir.path(), "ci.yml");
+			fs.writeFileSync(workflow, "on: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n");
+			const compose = path.join(tempDir.path(), "docker-compose.yml");
+			fs.writeFileSync(compose, "services:\n  web:\n    image: nginx\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			for (const filePath of [workflow, compose]) {
+				const names = getServersForFile(config, filePath).map(([name]) => name);
+				expect(names).not.toContain("ansible");
+				expect(getLspServerForFile(config, filePath)?.[0]).toBe("yamlls");
+			}
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("routes arbitrary-named playbooks with ansible content to ansible first", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-play-");
+		try {
+			const filePath = path.join(tempDir.path(), "deploy.yml");
+			fs.writeFileSync(filePath, "- hosts: all\n  tasks:\n    - name: ping\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath).map(([name]) => name);
+			expect(names.indexOf("ansible")).toBeLessThan(names.indexOf("yamlls"));
+			expect(getLspServerForFile(config, filePath)?.[0]).toBe("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("routes role task files to ansible by path", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-role-");
+		try {
+			const dir = path.join(tempDir.path(), "roles", "web", "tasks");
+			fs.mkdirSync(dir, { recursive: true });
+			const filePath = path.join(dir, "main.yml");
+			fs.writeFileSync(filePath, "- name: install nginx\n  ansible.builtin.apt:\n    name: nginx\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			expect(getLspServerForFile(config, filePath)?.[0]).toBe("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
 });

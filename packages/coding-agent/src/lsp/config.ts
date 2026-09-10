@@ -536,6 +536,86 @@ export function getConfig(cwd: string): LspConfig {
 // Server Selection
 // =============================================================================
 
+// =============================================================================
+// Per-server file gates
+// =============================================================================
+
+/** Directory segments that conventionally hold Ansible content. A YAML file under one of these is treated as Ansible without reading it. */
+const ANSIBLE_PATH_SEGMENTS: Record<string, true> = {
+	roles: true,
+	tasks: true,
+	handlers: true,
+	vars: true,
+	defaults: true,
+	meta: true,
+	inventories: true,
+	inventory: true,
+	playbooks: true,
+	playbook: true,
+	group_vars: true,
+	host_vars: true,
+	collections: true,
+	ansible: true,
+};
+
+/** Basenames that are Ansible entry points regardless of directory. */
+const ANSIBLE_BASENAMES: Record<string, true> = {
+	"playbook.yml": true,
+	"playbook.yaml": true,
+	"site.yml": true,
+	"site.yaml": true,
+};
+
+/** First bytes read when sniffing a YAML file for Ansible markers. */
+const ANSIBLE_SNIFF_BYTES = 8192;
+
+/** Top-level Ansible keys and module prefixes that identify play/task content. */
+const ANSIBLE_CONTENT_SIGNAL =
+	/(^|\n)\s*(-\s+)?(hosts|tasks|roles|handlers|pre_tasks|post_tasks|gather_facts)\s*:|become\s*:\s*(true|yes)|ansible\.builtin\./;
+
+const KUBERNETES_SIGNAL = /apiVersion\s*:\s*\S[\s\S]*?^\s*kind\s*:\s*\S/m;
+const WORKFLOW_SIGNAL = /^\s*on\s*:/m;
+const WORKFLOW_JOBS_SIGNAL = /^\s*jobs\s*:/m;
+
+function readFileHead(filePath: string): string | null {
+	let fd = -1;
+	try {
+		fd = fs.openSync(filePath, "r");
+		const buf = Buffer.alloc(ANSIBLE_SNIFF_BYTES);
+		const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+		return buf.subarray(0, bytesRead).toString("utf-8");
+	} catch {
+		return null;
+	} finally {
+		if (fd !== -1) {
+			try {
+				fs.closeSync(fd);
+			} catch {
+				// Ignore close errors; the read result (or null) stands.
+			}
+		}
+	}
+}
+
+/**
+ * True when a YAML file looks like Ansible content. ansible-language-server
+ * only understands playbooks, roles, and inventory; every other YAML file in
+ * an Ansible project (Kubernetes manifests, workflows, Compose files) must
+ * fall through to the generic YAML server instead of being claimed by
+ * extension alone. Unreadable files fall back to the path signal only.
+ */
+export function isAnsibleFile(filePath: string): boolean {
+	const lowered = filePath.toLowerCase();
+	if (ANSIBLE_BASENAMES[path.basename(lowered)]) return true;
+	const segments = path.dirname(lowered).split(path.sep);
+	if (segments.some(segment => ANSIBLE_PATH_SEGMENTS[segment])) return true;
+	const head = readFileHead(filePath);
+	if (head === null) return false;
+	if (KUBERNETES_SIGNAL.test(head)) return false;
+	if (WORKFLOW_SIGNAL.test(head) && WORKFLOW_JOBS_SIGNAL.test(head)) return false;
+	return ANSIBLE_CONTENT_SIGNAL.test(head);
+}
+
 /**
  * Find all servers that can handle a file based on extension.
  * Returns servers sorted with primary (non-linter) servers first.
@@ -561,7 +641,11 @@ export function getServersForFile(config: LspConfig, filePath: string): Array<[s
 			);
 		});
 
-		if (supportsFile) {
+		// The ansible server claims the shared .yml/.yaml extensions but only
+		// serves Ansible files. Without this gate every YAML file in an Ansible
+		// project (manifests, workflows, Compose) would take the ansible slot
+		// for single-server operations instead of the generic YAML server.
+		if (supportsFile && !(name === "ansible" && !isAnsibleFile(filePath))) {
 			matches.push([name, serverConfig]);
 		}
 	}
