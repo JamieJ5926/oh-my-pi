@@ -383,6 +383,10 @@ describe("bash shortcut command", () => {
 		await fs.mkdir(childDir);
 		try {
 			const { ctx, executeBash } = createCwdContext(sourceDir);
+			const rebuildChatFromMessages = vi.fn();
+			const showError = vi.fn();
+			ctx.rebuildChatFromMessages = rebuildChatFromMessages;
+			ctx.showError = showError;
 			executeBash.mockImplementationOnce(async () => ({
 				output: "",
 				exitCode: 0,
@@ -401,10 +405,10 @@ describe("bash shortcut command", () => {
 
 			await controller.handleBashCommand("cd child");
 
-			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("shell prompt boom"));
-			expect(ctx.rebuildChatFromMessages).toHaveBeenCalledTimes(1);
-			expect(ctx.rebuildChatFromMessages.mock.invocationCallOrder[0]).toBeLessThan(
-				ctx.showError.mock.invocationCallOrder[0],
+			expect(showError).toHaveBeenCalledWith(expect.stringContaining("shell prompt boom"));
+			expect(rebuildChatFromMessages).toHaveBeenCalledTimes(1);
+			expect(rebuildChatFromMessages.mock.invocationCallOrder[0]).toBeLessThan(
+				showError.mock.invocationCallOrder[0],
 			);
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });

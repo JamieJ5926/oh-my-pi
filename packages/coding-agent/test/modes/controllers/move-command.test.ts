@@ -205,6 +205,10 @@ describe("CommandController /move", () => {
 		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-refresh-target-"));
 		try {
 			const { ctx } = createMoveContext(sourceDir);
+			const rebuildChatFromMessages = vi.fn();
+			const showError = vi.fn();
+			ctx.rebuildChatFromMessages = rebuildChatFromMessages;
+			ctx.showError = showError;
 			ctx.session.refreshBaseSystemPrompt = vi.fn(async () => {
 				throw new Error("prompt boom");
 			});
@@ -212,10 +216,10 @@ describe("CommandController /move", () => {
 
 			await controller.handleMoveCommand(targetDir);
 
-			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("prompt boom"));
-			expect(ctx.rebuildChatFromMessages).toHaveBeenCalledTimes(1);
-			expect(ctx.rebuildChatFromMessages.mock.invocationCallOrder[0]).toBeLessThan(
-				ctx.showError.mock.invocationCallOrder[0],
+			expect(showError).toHaveBeenCalledWith(expect.stringContaining("prompt boom"));
+			expect(rebuildChatFromMessages).toHaveBeenCalledTimes(1);
+			expect(rebuildChatFromMessages.mock.invocationCallOrder[0]).toBeLessThan(
+				showError.mock.invocationCallOrder[0],
 			);
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });

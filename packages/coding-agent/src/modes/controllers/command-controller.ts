@@ -1303,17 +1303,17 @@ export class CommandController {
 		// /settings edits do, and rebuild cached transcript lines. The cwd move
 		// above already committed, so a refresh failure must not escape as a
 		// failed move: report it and continue with the rebuilt transcript.
-	try {
-		await this.ctx.session.refreshBaseSystemPrompt();
-		this.ctx.rebuildChatFromMessages();
-	} catch (error) {
-		// Rebuild first: showError mounts a transient Text child that the
-		// rebuild would clear before setImmediate renders it (#11360 P2).
-		this.ctx.rebuildChatFromMessages();
-		this.ctx.showError(
-			`Failed to refresh system prompt after move: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
+		try {
+			await this.ctx.session.refreshBaseSystemPrompt();
+			this.ctx.rebuildChatFromMessages();
+		} catch (error) {
+			// Rebuild first: showError mounts a transient Text child that the
+			// rebuild would clear before setImmediate renders it (#11360 P2).
+			this.ctx.rebuildChatFromMessages();
+			this.ctx.showError(
+				`Failed to refresh system prompt after move: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		this.ctx.ui.requestRender();
 		return true;
 	}
@@ -1435,17 +1435,17 @@ export class CommandController {
 		// transcript lines so the new project's Mermaid settings take effect.
 		// The cwd move above already committed, so a refresh failure must not
 		// escape as a failed cwd update: report it and continue.
-	try {
-		await this.ctx.session.refreshBaseSystemPrompt();
-		this.ctx.rebuildChatFromMessages();
-	} catch (error) {
-		// Rebuild first: showError mounts a transient Text child that the
-		// rebuild would clear before setImmediate renders it (#11360 P2).
-		this.ctx.rebuildChatFromMessages();
-		this.ctx.showError(
-			`Failed to refresh system prompt after directory change: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
+		try {
+			await this.ctx.session.refreshBaseSystemPrompt();
+			this.ctx.rebuildChatFromMessages();
+		} catch (error) {
+			// Rebuild first: showError mounts a transient Text child that the
+			// rebuild would clear before setImmediate renders it (#11360 P2).
+			this.ctx.rebuildChatFromMessages();
+			this.ctx.showError(
+				`Failed to refresh system prompt after directory change: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		this.ctx.ui.requestRender();
 	}
 
