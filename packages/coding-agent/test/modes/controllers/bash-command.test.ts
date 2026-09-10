@@ -39,6 +39,7 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 		session: {
 			isStreaming,
 			executeBash,
+			refreshBaseSystemPrompt: vi.fn(async () => {}),
 		},
 		sessionManager: {
 			getCwd: () => state.cwd,
@@ -64,6 +65,7 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 		}),
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
+		rebuildChatFromMessages: vi.fn(),
 	} as unknown as InteractiveModeContext;
 	return { ctx, executeBash, pendingMessagesContainer, present, state };
 }
@@ -344,4 +346,35 @@ describe("bash shortcut command", () => {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}
 	});
-});
+
+	it("rebuilds the transcript and refreshes the prompt after a shell-driven cwd change", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-cwd-rebuild-"));
+		const childDir = path.join(sourceDir, "child");
+		await fs.mkdir(childDir);
+		try {
+			const { ctx, executeBash, state } = createCwdContext(sourceDir);
+			executeBash.mockImplementationOnce(async () => ({
+				output: "",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				totalLines: 0,
+				totalBytes: 0,
+				outputLines: 0,
+				outputBytes: 0,
+				workingDir: childDir,
+			}));
+			const controller = new CommandController(ctx);
+
+			await controller.handleBashCommand("cd child");
+
+			expect(state.cwd).toBe(childDir);
+			expect(ctx.session.refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
+			expect(ctx.rebuildChatFromMessages).toHaveBeenCalledTimes(1);
+			expect(ctx.ui.requestRender).toHaveBeenCalled();
+			expect(ctx.showError).not.toHaveBeenCalled();
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+	});

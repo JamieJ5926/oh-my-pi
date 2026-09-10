@@ -28,8 +28,10 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		restoreState(snapshot);
 	});
 	const shutdown = vi.fn(async () => {});
+	const refreshBaseSystemPrompt = vi.fn(async () => {});
+	const rebuildChatFromMessages = vi.fn();
 	const ctx = {
-		session: { isStreaming: false, moveSession },
+		session: { isStreaming: false, moveSession, refreshBaseSystemPrompt },
 		sessionManager: {
 			getCwd: () => state.cwd,
 			captureState,
@@ -176,6 +178,23 @@ describe("CommandController /move", () => {
 			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
 			expect(state.movedTo).toBeUndefined();
 			expect(state.cwd).toBe(sourceDir);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
+
+	it("refreshes the base system prompt after relocating (renderMermaid can differ per project)", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-source-"));
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));
+		try {
+			const { ctx } = createMoveContext(sourceDir);
+			const controller = new CommandController(ctx);
+
+			await controller.handleMoveCommand(targetDir);
+
+			expect(ctx.session.refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
+			expect(ctx.rebuildChatFromMessages).toHaveBeenCalled();
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 			await fs.rm(targetDir, { recursive: true, force: true });

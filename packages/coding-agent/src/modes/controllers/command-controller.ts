@@ -1297,9 +1297,11 @@ export class CommandController {
 
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
-		// A project reload can change spacing-effective settings (e.g.
-		// tui.mermaidPaddingX/Y); visible transcript components cache their
-		// rendered lines, so rebuild them like direct /settings edits do.
+		// A project reload can change prompt-effective settings (e.g.
+		// tui.renderMermaid) as well as spacing-effective settings (e.g.
+		// tui.mermaidPaddingX/Y). Refresh the cached base prompt like direct
+		// /settings edits do, and rebuild cached transcript lines.
+		await this.ctx.session.refreshBaseSystemPrompt();
 		this.ctx.rebuildChatFromMessages();
 		this.ctx.ui.requestRender();
 		return true;
@@ -1417,6 +1419,12 @@ export class CommandController {
 
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
+		// Shell-driven cwd changes rescope settings via applyCwdChange like
+		// /move does; refresh the cached base prompt and rebuild cached
+		// transcript lines so the new project's Mermaid settings take effect.
+		await this.ctx.session.refreshBaseSystemPrompt();
+		this.ctx.rebuildChatFromMessages();
+		this.ctx.ui.requestRender();
 	}
 
 	async #applyBashResultCwd(result: BashResult): Promise<void> {
