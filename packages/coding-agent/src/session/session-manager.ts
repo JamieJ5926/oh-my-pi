@@ -64,6 +64,7 @@ import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo 
 import {
 	loadEntriesFromFile,
 	loadSessionFile,
+	parseSessionContent,
 	resolveBlobRefsInEntries,
 	type SessionLoadResult,
 	visitEntriesFromFile,
@@ -217,7 +218,7 @@ function isAssistantEntry(entry: SessionEntry): boolean {
 	return entry.type === "message" && entry.message.role === "assistant";
 }
 
-function isDraftOnlyMetadataEntry(entry: SessionEntry): boolean {
+function isDraftOnlyMetadataEntry(entry: FileEntry): boolean {
 	// Startup-recorded selector state that does not survive as user intent
 	// once the draft is cleared. `mode_change` covers the `plan.defaultOnStartup`
 	// path (interactive-mode.ts enters plan mode before draft restoration) and
@@ -986,6 +987,64 @@ export class SessionManager {
 			return;
 		}
 
+		// A manager that materialized a file only to hold a draft may still be
+		// racing another process's close-time draft GC (#11497) when its first
+		// durable entry lands. Serialize that one transition on the session-file
+		// lock: the GC then either observes this entry and keeps the file, or has
+		// already removed it and this append rebuilds the header.
+		if (this.#isDraftOnlyFirstDurableEntry(entry)) {
+			this.#appendFirstDurableEntryLocked(entry);
+			return;
+		}
+
+		this.#appendToCurrentSessionFile(entry);
+	}
+
+	/**
+	 * True while `entry` is the first durable entry written out of a draft-only
+	 * materialization. Every other in-memory entry is startup selector state, so
+	 * the on-disk file is still one another manager's close-time GC may drop.
+	 */
+	#isDraftOnlyFirstDurableEntry(entry: SessionEntry): boolean {
+		return (
+			this.#draftOnlySessionCleanupArmed &&
+			this.#storage.withSessionFileLockSync !== undefined &&
+			!isDraftOnlyMetadataEntry(entry) &&
+			this.#entries.every(candidate => candidate === entry || isDraftOnlyMetadataEntry(candidate))
+		);
+	}
+
+	/**
+	 * Write the transition entry under the session-file lock, after verifying
+	 * the file the GC inspects. A GC that won the lock removed the draft-only
+	 * file, so rebuild the whole body (header included) instead of appending to
+	 * a path that no longer carries a session header.
+	 */
+	#appendFirstDurableEntryLocked(entry: SessionEntry): void {
+		const sessionFile = this.#sessionFile;
+		const withSessionFileLockSync = this.#storage.withSessionFileLockSync;
+		if (!sessionFile || !withSessionFileLockSync) {
+			this.#appendToCurrentSessionFile(entry);
+			return;
+		}
+		try {
+			withSessionFileLockSync.call(this.#storage, sessionFile, () => {
+				if (!this.#storage.existsSync(sessionFile)) {
+					this.#fileIsCurrent = false;
+					this.#rewriteRequired = true;
+				}
+				this.#appendToCurrentSessionFile(entry);
+			});
+		} catch (err) {
+			// The lock could not be taken, so the append did not happen. Keep the
+			// entry in memory and let the next durable write republish it.
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#noteDiskFailure(err);
+		}
+	}
+
+	#appendToCurrentSessionFile(entry: SessionEntry): void {
 		// Atomic replacement / move window: do not open a fresh append writer that
 		// a Windows EPERM replace could detach from the current JSONL path.
 		// - moveTo: write a full body to the live relocation path (source pre-
@@ -1062,6 +1121,16 @@ export class SessionManager {
 			return;
 		}
 
+		// A rename right after a resumed draft is the first durable entry of a
+		// draft-only materialization, the same transition #appendToSessionFile
+		// serializes (#11497). Take the session-file lock here too: the append
+		// plus title-slot rewrite below would otherwise recreate a headerless
+		// file and overwrite its first bytes if the draft GC won the race.
+		if (this.#isDraftOnlyFirstDurableEntry(entry)) {
+			this.#persistDraftOnlyTitleChangeLocked();
+			return;
+		}
+
 		if (
 			!this.#fileIsCurrent ||
 			this.#rewriteRequired ||
@@ -1093,6 +1162,26 @@ export class SessionManager {
 			},
 			{ epoch },
 		);
+	}
+
+	/**
+	 * Persist a title change that is leaving a draft-only materialization, under
+	 * the session-file lock the draft GC takes. The write is a full-body rewrite
+	 * rather than an append: it recreates the session header and the title slot
+	 * in one step even when the GC already removed the file, where appending to
+	 * the missing path would produce a headerless file.
+	 */
+	#persistDraftOnlyTitleChangeLocked(): void {
+		const sessionFile = this.#sessionFile;
+		const withSessionFileLockSync = this.#storage.withSessionFileLockSync;
+		if (!sessionFile || !withSessionFileLockSync) return;
+		try {
+			withSessionFileLockSync.call(this.#storage, sessionFile, () => this.#rewriteSynchronously());
+		} catch (err) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#noteDiskFailure(err);
+		}
 	}
 
 	#notifyEntryAppended(entry: SessionEntry): void {
@@ -1853,8 +1942,31 @@ export class SessionManager {
 			this.#draftOnlySessionCleanupArmed = false;
 			return;
 		}
+		// This manager's in-memory view can be stale: another process may have
+		// consumed the draft and persisted a real conversation, or saved a fresh
+		// draft, since the last time this file was read (#11497). Only a backend
+		// that re-checks and deletes in one locked step may drop the file;
+		// otherwise leave it, because a delete that is not atomic would discard
+		// the other process's write.
+		const deleteSessionWithArtifactsIf = this.#storage.deleteSessionWithArtifactsIf;
+		if (!deleteSessionWithArtifactsIf) {
+			this.#draftOnlySessionCleanupArmed = false;
+			return;
+		}
 		try {
-			await this.#storage.deleteSessionWithArtifacts(sessionFile);
+			const deleted = await deleteSessionWithArtifactsIf.call(this.#storage, sessionFile, content => {
+				const onDisk = parseSessionContent(content);
+				if (onDisk.invalidHeader) return false;
+				if (!onDisk.entries.slice(1).every(isDraftOnlyMetadataEntry)) return false;
+				// The draft sidecar may have been saved after this manager read
+				// the directory; its parent session must survive with it.
+				return draftPath === null || !this.#storage.existsSync(draftPath);
+			});
+			if (!deleted) {
+				await this.#clearDraftOnlySessionMarker();
+				this.#draftOnlySessionCleanupArmed = false;
+				return;
+			}
 			this.#fileIsCurrent = false;
 			this.#forceFileCreation = false;
 			this.#hasTitleSlot = false;
@@ -2160,6 +2272,41 @@ export class SessionManager {
 			this.#entries.every(isDraftOnlyMetadataEntry);
 		// Force the header onto disk so resume can find the file this draft attaches to.
 		await this.ensureOnDisk();
+
+		// A draft-only session file is the close-time GC's target, and that GC
+		// removes this sidecar's whole artifacts directory with it (#11497).
+		// Serialize the save with it: under the lock this manager re-materializes
+		// the parent session when the GC already dropped it, so the draft never
+		// outlives the session `--resume` looks for.
+		if (
+			sessionFile !== undefined &&
+			(draftWillMaterializeMetadataOnlyFile || this.#draftOnlySessionCleanupArmed) &&
+			this.#storage.withSessionFileLockSync !== undefined
+		) {
+			const withSessionFileLockSync = this.#storage.withSessionFileLockSync;
+			try {
+				withSessionFileLockSync.call(this.#storage, sessionFile, () => {
+					if (!this.#storage.existsSync(sessionFile)) {
+						this.#forceFileCreation = true;
+						this.#rewriteSynchronously();
+					}
+					if (draftWillMaterializeMetadataOnlyFile) {
+						const markerPath = this.#draftOnlySessionMarkerPath();
+						if (markerPath) this.#storage.writeTextSync(markerPath, "");
+						this.#draftOnlySessionCleanupArmed = true;
+					}
+					this.#storage.writeTextSync(draftPath, text);
+				});
+				return;
+			} catch (err) {
+				logger.warn("Failed to persist the session draft under the session-file lock", {
+					sessionFile,
+					draftPath,
+					error: String(err),
+				});
+			}
+		}
+
 		if (draftWillMaterializeMetadataOnlyFile) {
 			await this.#writeDraftOnlySessionMarker();
 			this.#draftOnlySessionCleanupArmed = true;

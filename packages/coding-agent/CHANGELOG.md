@@ -19,6 +19,7 @@
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 - Streaming edit guard (`edit.streamingAbort`) no longer aborts on no-op preview results when replacement content produces no file changes, and carries the native patch diagnostic through the abort reason on genuine preview failures.
 - Repeated soft compaction now includes messages retained by the previous pass instead of silently dropping them from model context.
+- Closing a terminal whose draft was resumed and turned into a real conversation by another terminal no longer deletes that conversation: the close-time draft GC re-reads the session file, re-checks the draft sidecar, and deletes only under the session-file cross-process lock, which the first durable append, a draft save, and a rename now share ([#11497](https://github.com/can1357/oh-my-pi/issues/11497)).
 
 ## [18.1.16] - 2026-09-09
 

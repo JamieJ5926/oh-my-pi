@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { parseSessionContent } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { FileSessionStorage, type SessionStorageWriter } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { isEnoent, TempDir } from "@oh-my-pi/pi-utils";
 
 async function fileExists(p: string): Promise<boolean> {
@@ -10,6 +13,84 @@ async function fileExists(p: string): Promise<boolean> {
 	} catch (err) {
 		if (isEnoent(err)) return false;
 		throw err;
+	}
+}
+
+/** Announces the conditional delete so a spawned appender can take the lock. */
+class SignalingDeleteStorage extends FileSessionStorage {
+	readonly #attemptPath: string;
+
+	constructor(attemptPath: string) {
+		super();
+		this.#attemptPath = attemptPath;
+	}
+
+	override deleteSessionWithArtifactsIf(
+		sessionPath: string,
+		shouldDelete: (content: string) => boolean,
+	): Promise<boolean> {
+		fs.writeFileSync(this.#attemptPath, "");
+		return super.deleteSessionWithArtifactsIf(sessionPath, shouldDelete);
+	}
+}
+
+/** Saves a draft while another manager is inside its conditional delete. */
+class LateDraftStorage extends FileSessionStorage {
+	#draftPath: string | null = null;
+	#draftText = "";
+
+	armLateDraft(draftPath: string, draftText: string): void {
+		this.#draftPath = draftPath;
+		this.#draftText = draftText;
+	}
+
+	override deleteSessionWithArtifactsIf(
+		sessionPath: string,
+		shouldDelete: (content: string) => boolean,
+	): Promise<boolean> {
+		if (this.#draftPath && this.#draftText.length > 0) fs.writeFileSync(this.#draftPath, this.#draftText);
+		return super.deleteSessionWithArtifactsIf(sessionPath, shouldDelete);
+	}
+}
+
+/** Removes the session file (and its artifacts) after the first materialize. */
+class GcAfterMaterializeStorage extends FileSessionStorage {
+	#sessionFile: string | null = null;
+
+	armGc(sessionFile: string): void {
+		this.#sessionFile = sessionFile;
+	}
+
+	override async writeTextAtomic(
+		path: string,
+		content: string,
+		options?: { commitGuard?: () => boolean },
+	): Promise<void> {
+		await super.writeTextAtomic(path, content, options);
+		if (path !== this.#sessionFile) return;
+		this.#sessionFile = null;
+		fs.rmSync(path, { force: true });
+		fs.rmSync(path.slice(0, -6), { recursive: true, force: true });
+	}
+}
+
+/** Deletes the session file the instant a writer opens it for appending. */
+class GcBeforeAppendStorage extends FileSessionStorage {
+	#sessionFile: string | null = null;
+
+	armGc(sessionFile: string): void {
+		this.#sessionFile = sessionFile;
+	}
+
+	override openWriter(
+		path: string,
+		options?: { flags?: "a" | "w"; onError?: (err: Error) => void },
+	): SessionStorageWriter {
+		if (path === this.#sessionFile) {
+			this.#sessionFile = null;
+			fs.rmSync(path, { force: true });
+		}
+		return super.openWriter(path, options);
 	}
 }
 
@@ -174,5 +255,184 @@ describe("SessionManager close() drops empty metadata-only sessions", () => {
 		await session.close();
 
 		expect(await fileExists(sessionFile)).toBe(false);
+	});
+
+	// Issue #11497: terminal A materializes a draft-only file and arms the GC;
+	// terminal B resumes it, consumes the draft (removing the sidecar the GC
+	// keys off) and persists a real conversation. Terminal A then closes with a
+	// stale draft-only view, so its GC must re-read the file before deleting.
+	it("keeps the file when another manager consumed the draft and appended real messages", async () => {
+		using tempDir = TempDir.createSync("@pi-session-close-keep-cross-writer-");
+		const termA = SessionManager.create(tempDir.path(), tempDir.path());
+		termA.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		await termA.saveDraft("draft in terminal A");
+
+		const sessionFile = termA.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+
+		const termB = SessionManager.create(tempDir.path(), tempDir.path());
+		await termB.setSessionFile(sessionFile);
+		expect(await termB.consumeDraft()).toBe("draft in terminal A");
+		termB.appendMessage({ role: "user", content: "real question", timestamp: 1 });
+		await termB.close();
+
+		await termA.close();
+
+		expect(await fileExists(sessionFile)).toBe(true);
+		const loaded = parseSessionContent(await Bun.file(sessionFile).text());
+		expect(loaded.invalidHeader).toBe(false);
+		expect(JSON.stringify(loaded.entries)).toContain("real question");
+	});
+
+	// The GC's re-read and its unlink must be one locked step. A spawned appender
+	// holds the session-file lock across the GC's delete attempt, so the append
+	// lands inside the window an unlocked check/delete would have missed.
+	it("serializes the close-time GC against a cross-process append", async () => {
+		using tempDir = TempDir.createSync("@pi-session-close-lock-cross-writer-");
+		const deleteAttemptPath = path.join(tempDir.path(), "delete-attempted");
+		const termA = SessionManager.create(
+			tempDir.path(),
+			tempDir.path(),
+			new SignalingDeleteStorage(deleteAttemptPath),
+		);
+		termA.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		await termA.saveDraft("draft in terminal A");
+
+		const sessionFile = termA.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+
+		const termB = SessionManager.create(tempDir.path(), tempDir.path());
+		await termB.setSessionFile(sessionFile);
+		expect(await termB.consumeDraft()).toBe("draft in terminal A");
+
+		const appender = Bun.spawn(
+			[
+				process.execPath,
+				path.join(import.meta.dir, "fixtures/draft-gc-lock-appender.ts"),
+				sessionFile,
+				deleteAttemptPath,
+			],
+			{
+				cwd: path.resolve(import.meta.dir, "../../../.."),
+				env: { HOME: process.env.HOME ?? "", PATH: process.env.PATH ?? "" },
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "ignore",
+			},
+		);
+		try {
+			const reader = appender.stdout.getReader();
+			const ready = await reader.read();
+			reader.releaseLock();
+			expect(new TextDecoder().decode(ready.value)).toContain("ready");
+
+			// The child owns the session lock until A reaches its competing
+			// inspect-and-delete, then appends before releasing it.
+			await termA.close();
+			expect(await appender.exited).toBe(0);
+
+			expect(await fileExists(sessionFile)).toBe(true);
+			expect(await Bun.file(sessionFile).text()).toContain("real question from the other terminal");
+			await termB.close();
+		} finally {
+			if (appender.exitCode === null) {
+				appender.kill();
+				await appender.exited;
+			}
+		}
+	});
+
+	// A draft saved after the GC read the directory must keep its parent
+	// session: the sidecar check is part of the locked delete predicate.
+	it("keeps the file when a draft is saved while the GC is deciding", async () => {
+		using tempDir = TempDir.createSync("@pi-session-close-late-draft-");
+		const storage = new LateDraftStorage();
+		const termA = SessionManager.create(tempDir.path(), tempDir.path(), storage);
+		termA.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		await termA.saveDraft("draft in terminal A");
+
+		const sessionFile = termA.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+		const draftPath = path.join(termA.getArtifactsDir()!, "draft.txt");
+		await termA.saveDraft("");
+		storage.armLateDraft(draftPath, "late draft");
+
+		await termA.close();
+
+		expect(await fileExists(sessionFile)).toBe(true);
+		expect(await Bun.file(draftPath).text()).toBe("late draft");
+	});
+
+	// The GC can win the lock and delete the draft-only file while this manager
+	// is still writing its draft, so the draft write must re-materialize the
+	// parent session it attaches to.
+	it("re-materializes the session when the GC drops it during the draft save", async () => {
+		using tempDir = TempDir.createSync("@pi-session-draft-save-vs-gc-");
+		const storage = new GcAfterMaterializeStorage();
+		const session = SessionManager.create(tempDir.path(), tempDir.path(), storage);
+		session.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+		storage.armGc(sessionFile);
+
+		await session.saveDraft("typed while the other terminal closed");
+
+		expect(await fileExists(sessionFile)).toBe(true);
+		expect(parseSessionContent(await Bun.file(sessionFile).text()).invalidHeader).toBe(false);
+		expect(await Bun.file(path.join(session.getArtifactsDir()!, "draft.txt")).text()).toBe(
+			"typed while the other terminal closed",
+		);
+	});
+
+	// A GC that removed the draft-only file before the first durable append must
+	// not leave a headerless file carrying only that entry.
+	it("rebuilds the session when the GC already removed the file before the first append", async () => {
+		using tempDir = TempDir.createSync("@pi-session-append-after-gc-");
+		const termA = SessionManager.create(tempDir.path(), tempDir.path());
+		termA.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		await termA.saveDraft("draft in terminal A");
+
+		const sessionFile = termA.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+
+		const termB = SessionManager.create(tempDir.path(), tempDir.path());
+		await termB.setSessionFile(sessionFile);
+		expect(await termB.consumeDraft()).toBe("draft in terminal A");
+		fs.rmSync(sessionFile);
+
+		termB.appendMessage({ role: "user", content: "written after the GC", timestamp: 1 });
+		await termB.close();
+
+		expect(await fileExists(sessionFile)).toBe(true);
+		const loaded = parseSessionContent(await Bun.file(sessionFile).text());
+		expect(loaded.invalidHeader).toBe(false);
+		expect(JSON.stringify(loaded.entries)).toContain("written after the GC");
+	});
+
+	// `/rename` straight after resuming a draft is the same transition through
+	// the title path: the append plus title-slot rewrite would recreate a
+	// headerless file and overwrite its first bytes if the GC won the race.
+	it("rebuilds the session when the GC removes the file before a draft-only rename", async () => {
+		using tempDir = TempDir.createSync("@pi-session-rename-after-gc-");
+		const termA = SessionManager.create(tempDir.path(), tempDir.path());
+		termA.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		await termA.saveDraft("draft in terminal A");
+
+		const sessionFile = termA.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+
+		const storage = new GcBeforeAppendStorage();
+		storage.armGc(sessionFile);
+		const termB = SessionManager.create(tempDir.path(), tempDir.path(), storage);
+		await termB.setSessionFile(sessionFile);
+		expect(await termB.consumeDraft()).toBe("draft in terminal A");
+
+		await termB.setSessionName("renamed before the first message", "user");
+		await termA.close();
+
+		expect(await fileExists(sessionFile)).toBe(true);
+		const content = await Bun.file(sessionFile).text();
+		expect(parseSessionContent(content).invalidHeader).toBe(false);
+		expect(content).toContain("renamed before the first message");
 	});
 });
