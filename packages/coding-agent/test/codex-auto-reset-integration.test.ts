@@ -205,8 +205,11 @@ describe("codex saved-reset trigger integration", () => {
 		// and both windows still look healthy. Only the live 429 knows better.
 		const { session, coordinator, redeemTargets } = buildSession({
 			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 },
-			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 0.5, limitReached: false, credits: 1 }),
-			liveCredits: [liveCreditStatus(1)],
+			// Two credits: a non-final balance keeps the documented `yes` contract
+			// (spend without prompting). The final-credit consent gate (issue
+			// #11200) owns the one-credit case, covered below.
+			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 0.5, limitReached: false, credits: 2 }),
+			liveCredits: [liveCreditStatus(2)],
 			streamErrorFirst: true,
 		});
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
@@ -233,11 +236,14 @@ describe("codex saved-reset trigger integration", () => {
 
 	it("corrects a stale-zero usage count from the live credits route before deciding", async () => {
 		// /wham/usage says 0 credits (stale — never corrected upstream on zero),
-		// weekly exhausted and blocked; the dedicated credits route says 1.
+		// weekly exhausted and blocked; the dedicated credits route says 2.
 		const { session, redeemTargets } = buildSession({
 			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 },
 			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 1.0, limitReached: true, credits: 0 }),
-			liveCredits: [liveCreditStatus(1)],
+			// The live route corrects the stale zero to a non-final balance, so
+			// the `yes` contract spends without prompting (issue #11200 gates
+			// only the final credit).
+			liveCredits: [liveCreditStatus(2)],
 			streamErrorFirst: true,
 		});
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
@@ -251,16 +257,18 @@ describe("codex saved-reset trigger integration", () => {
 	it("salvages an expiring credit on a 5h-only exhausted account from the usage heartbeat, exactly once", async () => {
 		const { session, coordinator, redeemTargets } = buildSession({
 			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 12 },
-			// openai/codex#28525 shape: 5h exhausted, weekly mostly free.
+			// openai/codex#28525 shape: 5h exhausted, weekly mostly free. Two credits:
+			// a non-final balance keeps the `yes` silent-salvage contract (issue
+			// #11200 gates only the final credit).
 			report: codexReport({
 				primaryUsed: 1.0,
 				weeklyUsed: 0.2,
 				limitReached: false,
-				credits: 1,
+				credits: 2,
 				creditExpiresInMs: 2 * HOUR,
 			}),
-			liveCredits: [liveCreditStatus(1, 2 * HOUR)],
-		});
+			liveCredits: [liveCreditStatus(2, 2 * HOUR)],
+			});
 
 		// The status line's heartbeat is exactly this call; the sweep handle lets
 		// us await the fire-and-forget pass instead of polling wall-clock time.
@@ -297,5 +305,24 @@ describe("codex saved-reset trigger integration", () => {
 		// and the episode is NOT burned, so a UI session could still redeem it.
 		expect(redeemTargets).toHaveLength(0);
 		expect(coordinator.attemptedKeys.size).toBe(0);
+	});
+	it("requires explicit consent before spending the final saved reset in yes mode (issue #11200)", async () => {
+		// The consent-violation repro: a `yes`-mode session blocked on a live 429
+		// with exactly one credit left — e.g. after a background-job delivery
+		// continued the turn — must NOT spend it without a prompt. Headless (no
+		// prompt UI) means no spend, and the episode is NOT burned.
+		const { session, coordinator, redeemTargets } = buildSession({
+			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 },
+			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 0.5, limitReached: false, credits: 1 }),
+			liveCredits: [liveCreditStatus(1)],
+			streamErrorFirst: true,
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("trigger a codex usage limit");
+		await session.waitForIdle();
+
+		expect(redeemTargets).toHaveLength(0);
+		expect([...coordinator.attemptedKeys].some(key => key.startsWith("block|"))).toBe(false);
 	});
 });

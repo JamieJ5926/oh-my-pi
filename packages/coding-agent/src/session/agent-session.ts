@@ -280,6 +280,7 @@ import {
 	type CodexResetPlan,
 	type CodexResetTrigger,
 	defaultCodexAutoRedeemCoordinator,
+	isFinalCreditSpend,
 	isTerminalRedeemOutcome,
 	overlayLiveResetCredits,
 	planCodexResetRedemptions,
@@ -10216,6 +10217,40 @@ export class AgentSession {
 		}
 		return false;
 	}
+	/**
+	 * One-shot explicit consent before spending the final saved reset (issue
+	 * #11200). Unlike `#confirmCodexAutoRedeem` this never persists: `yes`
+	 * keeps meaning "spend without prompting" for non-final credits, while the
+	 * irreversible last-credit spend — including system-triggered continuations
+	 * such as background-job delivery — always asks. Headless hosts get a
+	 * warning notice and no spend, mirroring the unset-mode behavior.
+	 */
+	async #confirmFinalCodexReset(actions: CodexResetAction[]): Promise<boolean> {
+		const first = actions[0];
+		if (!first) return false;
+		const runner = this.#extensionRunner;
+		if (!runner?.hasUI()) {
+			this.emitNotice(
+				"warning",
+				`This would spend your last saved Codex rate-limit reset for ${first.label}, but no prompt UI is available. Run \`/usage reset\` to redeem it explicitly.`,
+				"codex-auto-reset",
+			);
+			return false;
+		}
+		try {
+			const choice = await runner.getUIContext().select(
+				`Spend your last saved Codex rate-limit reset for ${first.label}?`,
+				[
+					{ label: "Yes", description: "Redeem this one reset now. Your auto-redeem setting is unchanged." },
+					{ label: "No", description: "Keep your last saved reset." },
+				],
+			);
+			return choice === "Yes";
+		} catch (error) {
+			logger.warn("codex-auto-reset final-credit prompt failed", { error: String(error) });
+		}
+		return false;
+	}
 
 	/** Run the pure planner over a usage snapshot with this session's settings. */
 	#planCodexResets(
@@ -10415,6 +10450,13 @@ export class AgentSession {
 			) {
 				return false;
 			}
+			if (
+				!shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
+				isFinalCreditSpend(plan.actions) &&
+				!(await this.#confirmFinalCodexReset(plan.actions))
+			) {
+				return false;
+			}
 			return (await this.#executeCodexResetActions(plan.actions, coordinator)) > 0;
 		})()
 			.catch(error => {
@@ -10454,6 +10496,13 @@ export class AgentSession {
 			if (
 				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
 				!(await this.#confirmCodexAutoRedeem(plan.actions, coordinator))
+			) {
+				return;
+			}
+			if (
+				!shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
+				isFinalCreditSpend(plan.actions) &&
+				!(await this.#confirmFinalCodexReset(plan.actions))
 			) {
 				return;
 			}
