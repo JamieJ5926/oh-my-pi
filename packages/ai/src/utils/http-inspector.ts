@@ -1,3 +1,5 @@
+import type { Stats } from "node:fs";
+import { readdir, rm, stat as statFile } from "node:fs/promises";
 import * as path from "node:path";
 import { getLogsDir, isBunTestRuntime } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error/flags";
@@ -51,6 +53,162 @@ export function shouldDumpRejectedRequest(error: unknown): boolean {
 	return status === 400 || status === 413;
 }
 
+/**
+ * Byte ceiling for the rejected-request dump directory. Same policy as the
+ * document-conversion cache (`packages/coding-agent/src/utils/markit-cache.ts`):
+ * a coarse disk-footprint safety valve, evicted FIFO by mtime, oldest first.
+ * Content dedupe alone still lets genuinely distinct rejections accumulate
+ * forever, so the directory needs this bound as well.
+ */
+export const MAX_HTTP_400_DUMP_BYTES = 256 * 1024 * 1024;
+
+/** Content hashes on disk per dump directory. A retried request re-sends a
+ *  byte-identical payload, so without this the writer appends one dump per
+ *  attempt (observed: 11 files for one payload in 70 s, 157 files in an hour
+ *  carrying 16 distinct payloads). The *promise* is memoized before it is
+ *  awaited, so two concurrent first writes share one directory walk instead of
+ *  each building an index. Dedupe needs names only: no stat, because the stat
+ *  pass over the cold HDD-backed directory costs minutes. */
+const dumpHashIndexes = new Map<string, Promise<Map<string, string>>>();
+
+function indexDumpHashes(dir: string): Promise<Map<string, string>> {
+	const cached = dumpHashIndexes.get(dir);
+	if (cached) return cached;
+
+	const loading = (async () => {
+		const byHash = new Map<string, string>();
+		try {
+			for (const entry of await readdir(dir)) {
+				// File name is `<epoch-ms>-<base36-content-hash>.json`.
+				if (!entry.endsWith(".json")) continue;
+				const separator = entry.lastIndexOf("-");
+				if (separator <= 0) continue;
+				const hash = entry.slice(separator + 1, -".json".length);
+				if (!byHash.has(hash)) byHash.set(hash, entry);
+			}
+		} catch {
+			// No directory yet is the normal first-dump case.
+		}
+		return byHash;
+	})();
+	dumpHashIndexes.set(dir, loading);
+	return loading;
+}
+
+/** At most one sweep per directory, with a rerun flag for writes that landed
+ *  while it ran. Concurrent sweeps would race over the same entries and each
+ *  evict against a total the other had already changed. */
+const dumpPruneRuns = new Map<string, { running: Promise<void>; rerun: boolean }>();
+
+function scheduleDumpPrune(dir: string, maxBytes: number): Promise<void> {
+	const active = dumpPruneRuns.get(dir);
+	if (active) {
+		active.rerun = true;
+		return active.running;
+	}
+
+	const state = { running: Promise.resolve(), rerun: false };
+	state.running = (async () => {
+		try {
+			do {
+				state.rerun = false;
+				await pruneDumpDir(dir, maxBytes);
+			} while (state.rerun);
+			// Retire the entry in the same synchronous block as the exit check:
+			// a write that lands after the loop's last await either sets the flag
+			// and forces another pass, or finds no entry and starts a fresh sweep.
+			// Deleting it from an async continuation instead would leave a window
+			// where that write's flag is set on an entry about to disappear.
+			dumpPruneRuns.delete(dir);
+		} catch {
+			dumpPruneRuns.delete(dir);
+		}
+	})();
+	dumpPruneRuns.set(dir, state);
+	return state.running;
+}
+
+/**
+ * Retain the newest dumps under `maxBytes`, oldest evicted first by the write
+ * time recorded in the file name. Deliberately not awaited by the write path,
+ * the same fire-and-forget policy the conversion cache uses
+ * (`markit-cache.ts:163`): the stat pass costs minutes on a cold HDD-backed
+ * directory and must never delay an error message. At least the newest dump
+ * always survives, whatever the cap.
+ */
+async function pruneDumpDir(dir: string, maxBytes: number): Promise<void> {
+	let names: string[];
+	try {
+		names = await readdir(dir);
+	} catch {
+		return;
+	}
+
+	const entries: { path: string; size: number; writtenAt: number }[] = [];
+	let totalBytes = 0;
+	for (const name of names) {
+		if (!name.endsWith(".json")) continue;
+		const filePath = path.join(dir, name);
+		let stats: Stats;
+		try {
+			stats = await statFile(filePath);
+		} catch {
+			continue;
+		}
+		// Order by the write time the file name records (`<epoch-ms>-...`), not
+		// mtime: it is the writer's own record and does not depend on whether the
+		// directory survived a copy.
+		const writtenAt = Number.parseInt(name, 10);
+		entries.push({ path: filePath, size: stats.size, writtenAt: Number.isFinite(writtenAt) ? writtenAt : 0 });
+		totalBytes += stats.size;
+	}
+	if (totalBytes <= maxBytes) return;
+
+	entries.sort((a, b) => a.writtenAt - b.writtenAt);
+	for (let index = 0; index < entries.length - 1 && totalBytes > maxBytes; index++) {
+		const entry = entries[index];
+		try {
+			await rm(entry.path, { force: true });
+		} catch {
+			continue;
+		}
+		totalBytes -= entry.size;
+	}
+}
+
+/**
+ * Persist a rejected-request dump once per distinct payload, then schedule the
+ * byte-cap sweep. An identical payload returns the path of the dump already on
+ * disk instead of writing a duplicate, so the operator pointer stays valid
+ * while retries cannot multiply files and distinct payloads are bounded by
+ * eviction rather than growing forever.
+ */
+export async function writeRejectedRequestDump(
+	dir: string,
+	payload: unknown,
+	maxBytes: number = MAX_HTTP_400_DUMP_BYTES,
+): Promise<{ filePath: string; duplicate: boolean; prune: Promise<void> }> {
+	const byHash = await indexDumpHashes(dir);
+	const hash = Bun.hash(JSON.stringify(payload)).toString(36);
+	const existing = byHash.get(hash);
+	if (existing !== undefined) {
+		const existingPath = path.join(dir, existing);
+		// A sweep may have evicted it since the index was built; write a fresh copy then.
+		if (await Bun.file(existingPath).exists()) {
+			return { filePath: existingPath, duplicate: true, prune: dumpPruneRuns.get(dir)?.running ?? Promise.resolve() };
+		}
+		byHash.delete(hash);
+	}
+
+	const fileName = `${Date.now()}-${hash}.json`;
+	const filePath = path.join(dir, fileName);
+	// Reserve before the write so concurrent retries in this process dedupe too.
+	byHash.set(hash, fileName);
+	await Bun.write(filePath, `${JSON.stringify(payload, null, 2)}\n`);
+
+	return { filePath, duplicate: false, prune: scheduleDumpPrune(dir, maxBytes) };
+}
+
 export async function appendRawHttpRequestDumpFor400(
 	message: string,
 	error: unknown,
@@ -62,11 +220,9 @@ export async function appendRawHttpRequestDumpFor400(
 	}
 
 	const payload = buildHttp400DumpPayload(dump, error, message);
-	const fileName = `${Date.now()}-${Bun.hash(JSON.stringify(payload)).toString(36)}.json`;
-	const filePath = path.join(getLogsDir(), "http-400-requests", fileName);
 
 	try {
-		await Bun.write(filePath, `${JSON.stringify(payload, null, 2)}\n`);
+		const { filePath } = await writeRejectedRequestDump(path.join(getLogsDir(), "http-400-requests"), payload);
 		return `${message}\nraw-http-request=${filePath}`;
 	} catch (writeError) {
 		const writeMessage = writeError instanceof Error ? writeError.message : String(writeError);

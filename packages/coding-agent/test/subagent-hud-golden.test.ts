@@ -42,16 +42,18 @@ const ancestry = sessions
 	.filter(s => s.id.includes("."))
 	.map(s => ({ id: s.id, parentId: s.id.slice(0, s.id.lastIndexOf(".")) }));
 
-const GOLDEN_COMPLETED = ["● SkillsTrack -> ● ScriptsTrack"];
+// Authorizing ask for this snapshot change: JamieJ5926/omp-owned#20 —
+// "Collapse completed rows to a one-line count in exactly one place."
+const GOLDEN_COMPLETED = ["… 2 completed"];
 const GOLDEN_SUBAGENTS = [
 	"",
-	"Subagents",
-	" └─ ● RulesTrack ⟦poteto-agent⟧: Nested rules synthesis · 43.2k tok",
-	"    ├─ ● RulesInner ⟦poteto-agent⟧ · 42.6k tok",
-	"    │  └─ ● RulesSynth ⟦synthesizer⟧ · 38.5k tok",
-	"    │     └─ ● explorer x3 · 1 done · 2 running · 0 failed · 0 cancelled · 1.2k tok",
-	"    │        └─ ● RuleA  ● RuleB  ● RuleC",
-	"    └─ ● Owner ⟦owner⟧: Writes the merged file · 2m tok",
+	"Subagents                                                     9 agents · 2.20M",
+	"",
+	"▾ L● RulesTrack [?]       Nested rules synthesis            ●●         Σ 2.13M",
+	"  ├─▾ L● RulesInner [?]                                     ●            Σ 82k",
+	"  │ └─▾ S● RulesSynth [?]                                   ●●●          Σ 40k",
+	"  │   ├─ R● explorer … [?]● RuleA  ● RuleB  ● RuleC                         1k",
+	"  └─ O● Owner [?]         Writes the merged file            —            2.00M",
 ];
 
 describe("subagent HUD golden render", () => {
@@ -63,18 +65,27 @@ describe("subagent HUD golden render", () => {
 		expect(out.subagents.map(line => Bun.stripANSI(line).trimEnd())).toEqual(GOLDEN_SUBAGENTS);
 	});
 
-	it("wraps completed tracks at 60 columns without losing content", () => {
+	it("collapses six completed tracks to one count line at 60 columns", () => {
 		const completed = ["SkillsTrack", "ScriptsTrack", "RulesTrack", "ModelsTrack", "工具Track", "ReviewTrack"]
 			.map(id => session(id, "poteto-agent", "completed", 0));
 		const out = renderSubagentHudLines(completed, 60);
-		const lines = out.completed.map(Bun.stripANSI);
-		expect(lines.length).toBeGreaterThan(1);
+		// Issue #20: six clean completed roots fold into the single count line.
+		expect(out.completed.map(Bun.stripANSI)).toEqual(["… 6 completed"]);
 		for (const line of out.completed) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(60);
-		expect(lines).toEqual([
-			"● SkillsTrack -> ● ScriptsTrack -> ● RulesTrack",
-			"-> ● ModelsTrack -> ● 工具Track -> ● ReviewTrack",
+	});
+
+	it("wraps failed roots across lines without a count line", () => {
+		const failed = ["SkillsTrack", "工具Track", "ModelsTrack", "ReviewTrack"].map(id =>
+			session(id, "poteto-agent", "failed", 0),
+		);
+		const out = renderSubagentHudLines(failed, 60);
+		// Failed roots keep full per-root entries (issue #20): no count line,
+		// and the joined row wraps — this covers the wide-char wrap path.
+		expect(out.completed.map(Bun.stripANSI)).toEqual([
+			"✗ SkillsTrack -> ✗ 工具Track -> ✗ ModelsTrack",
+			"-> ✗ ReviewTrack",
 		]);
-		expect(lines.join(" ")).toBe(completed.map(item => `● ${item.id}`).join(" -> "));
+		for (const line of out.completed) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(60);
 	});
 
 	it("never renders task prompt text on any row", () => {

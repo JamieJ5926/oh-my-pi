@@ -1,9 +1,13 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import {
 	buildHttp400DumpPayload,
 	type RawHttpRequestDump,
 	rewriteClinePassError,
 	shouldDumpRejectedRequest,
+	writeRejectedRequestDump,
 } from "@oh-my-pi/pi-ai/utils/http-inspector";
 
 class HttpError extends Error {
@@ -120,5 +124,146 @@ describe("rewriteClinePassError", () => {
 
 	it("leaves unrelated cline-pass errors untouched", () => {
 		expect(rewriteClinePassError("500 internal server error", "cline-pass")).toBe("500 internal server error");
+	});
+});
+
+describe("writeRejectedRequestDump", () => {
+	it("writes one file per distinct rejected payload and reuses it across retries", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
+		try {
+			const payload = buildHttp400DumpPayload(dump, new HttpError(400, "400 Provider returned error"), "400 Provider returned error");
+
+			const first = await writeRejectedRequestDump(dir, payload);
+			const retry = await writeRejectedRequestDump(dir, payload);
+
+			expect(first.duplicate).toBe(false);
+			expect(retry.duplicate).toBe(true);
+			expect(retry.filePath).toBe(first.filePath);
+			expect(await readdir(dir)).toEqual([path.basename(first.filePath)]);
+
+			const other = await writeRejectedRequestDump(
+				dir,
+				buildHttp400DumpPayload({ ...dump, body: { messages: [] } }, new HttpError(400, "400 other"), "400 other"),
+			);
+
+			expect(other.duplicate).toBe(false);
+			expect((await readdir(dir)).length).toBe(2);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("recognises a payload dumped by an earlier process instead of appending a second copy", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
+		try {
+			const payload = buildHttp400DumpPayload(dump, new HttpError(413, "413 payload too large"), "413 payload too large");
+			const hash = Bun.hash(JSON.stringify(payload)).toString(36);
+			const earlier = path.join(dir, `1789000000000-${hash}.json`);
+			await Bun.write(earlier, "{}\n");
+
+			const result = await writeRejectedRequestDump(dir, payload);
+
+			expect(result.duplicate).toBe(true);
+			expect(result.filePath).toBe(earlier);
+			expect(await readdir(dir)).toEqual([path.basename(earlier)]);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("stores every concurrent distinct payload exactly once", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
+		try {
+			const results = await Promise.all(
+				Array.from({ length: 12 }, (_, index) =>
+					writeRejectedRequestDump(
+						dir,
+						buildHttp400DumpPayload(
+							{ ...dump, body: { messages: [{ role: "user", content: `concurrent-${index}` }] } },
+							new HttpError(400, `400 concurrent ${index}`),
+							`400 concurrent ${index}`,
+						),
+						Number.POSITIVE_INFINITY,
+					),
+				),
+			);
+
+			expect(results.filter(result => result.duplicate)).toHaveLength(0);
+			expect(await readdir(dir)).toHaveLength(12);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("grows with every distinct payload when no byte cap is applied", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
+		try {
+			for (let index = 0; index < 40; index++) {
+				await writeRejectedRequestDump(
+					dir,
+					buildHttp400DumpPayload(
+						{ ...dump, body: { messages: [{ role: "user", content: `distinct-${index}` }] } },
+						new HttpError(400, `400 distinct ${index}`),
+						`400 distinct ${index}`,
+					),
+					Number.POSITIVE_INFINITY,
+				);
+			}
+
+			expect(await readdir(dir)).toHaveLength(40);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("holds diverse distinct payloads under the byte cap and keeps the newest", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
+		try {
+			const cap = 4000;
+			let newestWrittenAt = 0;
+			let prune = Promise.resolve();
+			for (let index = 0; index < 40; index++) {
+				const written = await writeRejectedRequestDump(
+					dir,
+					buildHttp400DumpPayload(
+						{ ...dump, body: { messages: [{ role: "user", content: `distinct-${index}-${"x".repeat(200)}` }] } },
+						new HttpError(400, `400 distinct ${index}`),
+						`400 distinct ${index}`,
+					),
+					cap,
+				);
+				newestWrittenAt = Math.max(newestWrittenAt, Number.parseInt(path.basename(written.filePath), 10));
+				prune = written.prune;
+			}
+			await prune;
+
+			const files = await readdir(dir);
+			const sizes = await Promise.all(files.map(async name => (await stat(path.join(dir, name))).size));
+			const total = sizes.reduce((sum, size) => sum + size, 0);
+
+			expect(files.length).toBeLessThan(40);
+			expect(total).toBeLessThanOrEqual(cap);
+			// The newest generation of dumps always survives the eviction.
+			expect(files.some(name => Number.parseInt(name, 10) === newestWrittenAt)).toBe(true);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("writes a fresh copy when the dump the index points at is gone", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "http400-dump-"));
+		try {
+			const payload = buildHttp400DumpPayload(dump, new HttpError(400, "400 swept"), "400 swept");
+			const first = await writeRejectedRequestDump(dir, payload);
+			await rm(first.filePath, { force: true });
+
+			const again = await writeRejectedRequestDump(dir, payload);
+
+			expect(again.duplicate).toBe(false);
+			expect(await Bun.file(again.filePath).exists()).toBe(true);
+			expect(await readdir(dir)).toEqual([path.basename(again.filePath)]);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
 	});
 });
