@@ -444,10 +444,40 @@ export class FileSessionStorage implements SessionStorage {
 	/**
 	 * Delete a session file and its artifacts directory.
 	 * Artifacts are stored in a sibling directory with the same name minus .jsonl extension.
+	 * Stale `<basename>.jsonl.<snowflake>.bak` rewrite backups are removed too, so a
+	 * later listing scan cannot promote one back to the primary path and silently
+	 * resurrect the deleted session.
 	 */
 	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
 		// Delete the session file itself
 		await this.unlink(sessionPath);
+
+		// Remove stale rewrite backups beside the primary. Leftovers happen when the
+		// EPERM-rewrite cleanup unlink fails or a crash lands between the two renames.
+		// Best-effort and warn-only: the session itself is already deleted.
+		try {
+			const dir = path.dirname(sessionPath);
+			const prefix = `${path.basename(sessionPath)}.`;
+			for (const backup of this.listFilesSync(dir, "*.bak")) {
+				if (!path.basename(backup).startsWith(prefix)) continue;
+				try {
+					await this.unlink(backup);
+				} catch (err) {
+					if (!isEnoent(err)) {
+						logger.warn("Failed to remove stale session backup", {
+							sessionFile: sessionPath,
+							backupPath: backup,
+							error: toError(err).message,
+						});
+					}
+				}
+			}
+		} catch (err) {
+			logger.warn("Failed to scan for stale session backups", {
+				sessionFile: sessionPath,
+				error: toError(err).message,
+			});
+		}
 
 		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
 		const artifactsDir = sessionPath.slice(0, -6);

@@ -8,6 +8,7 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
+import { listSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
@@ -203,6 +204,23 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		await expect(storage.deleteSessionWithArtifacts(sessionPath)).resolves.toBeUndefined();
 		expect(fs.existsSync(sessionPath)).toBe(false);
 		expect(fs.existsSync(artifactsDir)).toBe(false);
+	});
+
+	it("removes stale backup siblings so a rescan cannot resurrect the session", async () => {
+		const sessionPath = await createSessionFile("stale-backup");
+		// A crash between the two renames of the EPERM-rewrite path leaves a
+		// rollback copy beside the primary: "<primary>.<snowflake>.bak".
+		const staleBackup = `${sessionPath}.1234567890.bak`;
+		await fsp.copyFile(sessionPath, staleBackup);
+		expect(fs.existsSync(staleBackup)).toBe(true);
+
+		await expect(storage.deleteSessionWithArtifacts(sessionPath)).resolves.toBeUndefined();
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(staleBackup)).toBe(false);
+		// recoverOrphanedBackups promotes any surviving backup back to the primary
+		// path during a scan, so a leftover here would list the deleted session.
+		await expect(listSessions(tempDir, storage)).resolves.toEqual([]);
 	});
 
 	it("throws when artifact cleanup fails after the session file is deleted", async () => {
