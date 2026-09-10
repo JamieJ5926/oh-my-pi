@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Extension widgets gained a `belowStatusline` placement rendering beneath the native status line via `ctx.ui.setWidget(key, content, { placement: "belowStatusline" })`. ([#11469](https://github.com/can1357/oh-my-pi/pull/11469))
+
 ## [18.1.16] - 2026-09-09
 
 ### Added

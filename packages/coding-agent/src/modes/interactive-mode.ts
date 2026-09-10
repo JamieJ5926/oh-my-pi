@@ -1288,6 +1288,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		]);
 		this.composer.setStatusTrailer([this.hookWidgetContainerBelowStatusline]);
 		this.ui.setFocus(this.editor);
+		this.syncComposerShape();
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();

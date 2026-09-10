@@ -258,6 +258,7 @@ export class Composer implements TerminalFrameProvider {
 			this.#retiredHeaderStart = this.#resizeRetiredHeaderStart;
 			this.#resizeRetiredHeaderStart = undefined;
 		}
+		this.#lastNormalRows = rows;
 		const roots = this.#runtimeMounted
 			? [...this.#runtimeChildren, this.#statusHost, ...this.#statusTrailer]
 			: [this.#header, this.#bootstrapInputGap, this.editor, this.#statusHost, ...this.#statusTrailer];
