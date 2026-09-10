@@ -45,13 +45,13 @@ const ancestry = sessions
 const GOLDEN_COMPLETED = ["● SkillsTrack -> ● ScriptsTrack"];
 const GOLDEN_SUBAGENTS = [
 	"",
-	"Subagents                                                     9 agents · 2.20M",
-	"",
-	"▾ L● RulesTrack [?]       Nested rules synthesis            ●●         Σ 2.13M",
-	"  ├─▾ L● RulesInner [?]                                     ●            Σ 82k",
-	"  │ └─▾ S● RulesSynth [?]                                   ●●●          Σ 40k",
-	"  │   ├─ R● explorer … [?]● RuleA  ● RuleB  ● RuleC                         1k",
-	"  └─ O● Owner [?]         Writes the merged file            —            2.00M",
+	"Subagents",
+	" └─ ● RulesTrack ⟦poteto-agent⟧: Nested rules synthesis  · 43.2k tok",
+	"    ├─ ● RulesInner ⟦poteto-agent⟧  · 42.6k tok",
+	"    │  └─ ● RulesSynth ⟦synthesizer⟧  · 38.5k tok",
+	"    │     └─ ● explorer x3 · 1 done · 2 running · 0 failed · 0 cancelled · 1.2k tok",
+	"    │        └─ ● RuleA  ● RuleB  ● RuleC",
+	"    └─ ● Owner ⟦owner⟧: Writes the merged file  · 2m tok",
 ];
 
 describe("subagent HUD golden render", () => {
