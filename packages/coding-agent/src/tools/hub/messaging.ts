@@ -59,19 +59,61 @@ export interface HubListParams {
 function isAddressablePeer(ref: { id: string; kind: string; status: string }, senderId: string): boolean {
 	return ref.id !== senderId && ref.kind !== "advisor" && ref.status !== "aborted";
 }
+export type HubSendRecipientResolution =
+	| { kind: "resolved"; id: string }
+	| { kind: "ambiguous"; candidates: string[] }
+	| { kind: "passthrough"; input: string };
+
+/** Minimum `to` length for session-uuid prefix matching (step 4). */
+export const HUB_SEND_UUID_PREFIX_MIN = 8;
+
 /**
- * Resolve a `send` recipient to its registry id. Exact ids (and "all") pass
- * through untouched. Otherwise a displayName shown by `irc list` resolves
- * only to a single live (running | idle) non-advisor peer: zero or multiple
- * matches fall back to the raw input so the caller keeps the existing
- * Unknown-agent failure instead of risking a misdelivery.
+ * Resolve a `send` recipient to its registry id. Matching order: (1) exact id
+ * via `registry.get` ("all" passes through as resolved); (2) unique live
+ * (running | idle) non-advisor displayName exact match; (3) live non-advisor
+ * tree-prefix — the id starts with `to + "."`, so the bare lead name addresses
+ * its subtree; (4) remote published sessions via
+ * `registry.listPublishedSessions()`: full-address exact, session-uuid exact,
+ * then session-uuid prefix (minimum 8 chars of `to`). Zero matches pass
+ * through untouched so the caller keeps the existing Unknown-agent failure;
+ * multiple matches at step 3 or 4 resolve ambiguous. A repeated displayName at
+ * step 2 keeps the existing passthrough (no misdelivery).
  */
-function resolveHubSendRecipient(registry: AgentRegistry, to: string): string {
-	if (to === "all" || registry.get(to)) return to;
-	const matches = registry
+export async function resolveHubSendRecipientAsync(
+	registry: AgentRegistry,
+	to: string,
+): Promise<HubSendRecipientResolution> {
+	if (to === "all" || registry.get(to)) return { kind: "resolved", id: to };
+	const live = registry
 		.list()
-		.filter(ref => ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle") && ref.displayName === to);
-	return matches.length === 1 ? matches[0].id : to;
+		.filter(ref => ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle"));
+	const named = live.filter(ref => ref.displayName === to);
+	if (named.length === 1) return { kind: "resolved", id: named[0].id };
+	if (named.length > 1) return { kind: "passthrough", input: to };
+	const prefixed = live.filter(ref => ref.id.startsWith(`${to}.`));
+	if (prefixed.length === 1) return { kind: "resolved", id: prefixed[0].id };
+	if (prefixed.length > 1) return { kind: "ambiguous", candidates: prefixed.map(ref => ref.id) };
+	let published: ClaimResult[];
+	try {
+		published = await registry.listPublishedSessions();
+	} catch {
+		return { kind: "passthrough", input: to };
+	}
+	const byAddress = published.filter(record => formatSessionAddress(record.address) === to);
+	if (byAddress.length === 1) return { kind: "resolved", id: formatSessionAddress(byAddress[0].address) };
+	if (byAddress.length > 1)
+		return { kind: "ambiguous", candidates: byAddress.map(record => formatSessionAddress(record.address)) };
+	const byUuid = published.filter(record => record.address.session === to);
+	if (byUuid.length === 1) return { kind: "resolved", id: formatSessionAddress(byUuid[0].address) };
+	if (byUuid.length > 1)
+		return { kind: "ambiguous", candidates: byUuid.map(record => formatSessionAddress(record.address)) };
+	if (to.length >= HUB_SEND_UUID_PREFIX_MIN) {
+		const byPrefix = published.filter(record => record.address.session.startsWith(to));
+		if (byPrefix.length === 1) return { kind: "resolved", id: formatSessionAddress(byPrefix[0].address) };
+		if (byPrefix.length > 1)
+			return { kind: "ambiguous", candidates: byPrefix.map(record => formatSessionAddress(record.address)) };
+	}
+	return { kind: "passthrough", input: to };
 }
 
 function resolveHubListLimit(limit: number | undefined): number {
@@ -276,10 +318,18 @@ export async function executeSend(
 	if (to === senderId) {
 		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	}
-	// `irc list` shows each peer as `id [displayName · …]`; resolve a unique
-	// live displayName to its id so a name copied from the roster reaches the
-	// peer instead of failing Unknown-agent. Exact ids pass through unchanged.
-	const resolvedTo = resolveHubSendRecipient(registry, to);
+	// `irc list` shows each peer as `id [displayName · …]`; resolve a roster
+	// name, tree prefix, or remote session to its id so a name copied from the
+	// roster reaches the peer instead of failing Unknown-agent. Unmatched input
+	// passes through unchanged and keeps the existing Unknown-agent failure.
+	const resolution = await resolveHubSendRecipientAsync(registry, to);
+	if (resolution.kind === "ambiguous") {
+		return hubErrorResult(
+			`Ambiguous hub send recipient "${to}"; candidates: ${resolution.candidates.join(", ")}`,
+			{ op: "send", from: senderId, to },
+		);
+	}
+	const resolvedTo = resolution.kind === "resolved" ? resolution.id : resolution.input;
 	if (resolvedTo === senderId) {
 		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	}
