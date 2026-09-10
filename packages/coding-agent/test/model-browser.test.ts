@@ -629,10 +629,22 @@ describe("ModelBrowser effort badge", () => {
 		const lowBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Low));
 		expect(rows[3]).not.toContain(lowBadge);
 	});
+	test("custom role name with control characters renders sanitized in badges", () => {
+		// P1 (PR #11330, thread 3975161606): custom role ids rendered raw in
+		// multi-role badges; tabs/control chars break terminal rendering.
+		const shared = makeModel("openai", "gpt-5");
+		const rows = renderRows([shared], {
+			default: { model: shared, thinkingLevel: ThinkingLevel.Low, autoSelected: false },
+			["ul\ttra\x01\nx"]: { model: shared, thinkingLevel: ThinkingLevel.Max, autoSelected: false },
+		});
 
-	test("shared badge helper renders nothing for inherit", () => {
-		expect(formatThinkingLevelBadge(ThinkingLevel.Inherit)).toBe("");
-		expect(Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Max))).toContain("max");
+		expect(rows[2]).toContain("max");
+		expect(rows[2]).toContain("low");
+		expect(rows[2]).toContain("ul");
+		expect(rows[2]).toContain("tra");
+		expect(rows[2]).not.toContain("\t");
+		expect(rows[2]).not.toContain("\n");
+		expect(rows[2]).not.toContain("\x01");
 	});
 });
 

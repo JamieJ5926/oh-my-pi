@@ -1032,7 +1032,10 @@ export class ModelBrowser implements Component {
 		const parts = [...levels].map(([level, role]) => {
 			const glyph = thinkingLevelGlyph(level);
 			const label = getConfiguredThinkingLevelMetadata(level).label;
-			return glyph ? `${role} ${glyph} ${label}` : `${role} ${label}`;
+			// Custom role ids render raw here; sanitize like every other TUI
+			// surface per AGENTS.md (tabs break columns, newlines break rows).
+			const safeRole = replaceTabs(sanitizeText(role)).replace(/[\r\n]+/g, " ");
+			return glyph ? `${safeRole} ${glyph} ${label}` : `${safeRole} ${label}`;
 		});
 		return ` ${theme.fg("dim", parts.join(" · "))}`;
 	}
