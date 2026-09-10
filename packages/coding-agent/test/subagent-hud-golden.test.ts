@@ -49,8 +49,7 @@ const GOLDEN_SUBAGENTS = [
 	"▾ ● RulesTrack        Nested rules synthesis                                             ●●           Σ 2.1m  · ?",
 	"  ├─▾ ● RulesInner                                                                       ●           Σ 82.3k  · ?",
 	"  │ └─▾ ● RulesSynth                                                                     ●●●         Σ 39.7k  · ?",
-	"  │   └─ ● explorer x3 · 1 done · 2 running · 0 failed · 0 cancelled · 1.2k tok",
-	"  │     └─ ● RuleA  ● RuleB  ● RuleC",
+	"  │   └─ ● explorer ×3  ● RuleA  ● RuleB  ● RuleC                                        ●●●            1.2k  · ?",
 	"  └─ ● Owner          Writes the merged file                                             —                2m  · ?",
 ];
 
