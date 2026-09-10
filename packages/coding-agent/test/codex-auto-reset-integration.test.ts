@@ -151,12 +151,20 @@ describe("codex saved-reset trigger integration", () => {
 		liveCredits: ResetCreditAccountStatus[];
 		streamErrorFirst?: boolean;
 		uiSelect?: (question: string) => string | undefined;
+		redeemImpl?: (options: { target: ResetCreditTarget }) => Promise<{
+			ok: boolean;
+			code: "reset" | "final_consent_required";
+			accountId?: string;
+			email?: string;
+			creditId?: string;
+		}>;
 	}
 
 	interface Harness {
 		session: AgentSession;
 		coordinator: CodexAutoRedeemCoordinator;
 		redeemTargets: ResetCreditTarget[];
+		redeemOptions: { target: ResetCreditTarget }[];
 		questions: string[];
 	}
 
@@ -168,8 +176,11 @@ describe("codex saved-reset trigger integration", () => {
 		vi.spyOn(authStorage, "fetchUsageReports").mockImplementation(async () => opts.reports ?? [opts.report]);
 		vi.spyOn(authStorage, "listResetCredits").mockImplementation(async () => opts.liveCredits);
 		const redeemTargets: ResetCreditTarget[] = [];
+		const redeemOptions: { target: ResetCreditTarget }[] = [];
 		vi.spyOn(authStorage, "redeemResetCredit").mockImplementation(async options => {
 			redeemTargets.push(options.target);
+			redeemOptions.push(options);
+			if (opts.redeemImpl) return opts.redeemImpl(options);
 			return { ok: true, code: "reset", accountId: ACCOUNT_ID, email: EMAIL, creditId: "credit-1" };
 		});
 
@@ -207,6 +218,7 @@ describe("codex saved-reset trigger integration", () => {
 				? undefined
 				: ({
 						hasUI: () => true,
+						emitBeforeAgentStart: async () => {},
 						getUIContext: () => ({
 							select: async (question: string) => {
 								questions.push(question);
@@ -223,7 +235,7 @@ describe("codex saved-reset trigger integration", () => {
 			extensionRunner,
 		});
 		sessions.push(session);
-		return { session, coordinator, redeemTargets, questions };
+		return { session, coordinator, redeemTargets, redeemOptions, questions };
 	}
 
 	it("spends a saved reset on a live 429 even when the report is a pre-block snapshot, then retries", async () => {
@@ -468,5 +480,126 @@ describe("codex saved-reset trigger integration", () => {
 		const finalWarning = warnings.find(message => message.includes("last saved Codex rate-limit reset"));
 		expect(finalWarning).toBeDefined();
 		expect(finalWarning).toContain("second@example.com");
+	});
+	it("re-prompts at redemption time when a planned non-final credit went final (issue #11470C sweep)", async () => {
+		// The redemption-time race: planning saw two credits (no prompt in
+		// `yes` mode), but another client spent one before execution. The
+		// redeem seam reports `final_consent_required`; the sweep must prompt
+		// and, on "Yes", retry the spend exactly once.
+		const codes: string[] = [];
+		const { session, coordinator, redeemTargets, redeemOptions, questions } = buildSession({
+			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 12 },
+			report: codexReport({
+				primaryUsed: 1.0,
+				weeklyUsed: 0.2,
+				limitReached: false,
+				credits: 2,
+				creditExpiresInMs: 2 * HOUR,
+			}),
+			liveCredits: [liveCreditStatus(2, 2 * HOUR)],
+			uiSelect: () => "Yes",
+			redeemImpl: async () => {
+				codes.push(codes.length === 0 ? "final_consent_required" : "reset");
+				if (codes.length === 1) return { ok: false, code: "final_consent_required" as const };
+				return { ok: true, code: "reset" as const, accountId: ACCOUNT_ID, email: EMAIL, creditId: "credit-1" };
+			},
+		});
+
+		await session.fetchUsageReports();
+		expect(coordinator.sweepPromise).toBeDefined();
+		await coordinator.sweepPromise;
+
+		expect(codes).toEqual(["final_consent_required", "reset"]);
+		expect(redeemTargets).toHaveLength(2);
+		expect(questions).toHaveLength(1);
+		expect(questions[0]).toContain("last saved");
+		expect(redeemOptions[0]).toHaveProperty("requireFinalCreditConsent", true);
+		expect(redeemOptions[1]).not.toHaveProperty("requireFinalCreditConsent", true);
+	});
+	it("aborts a salvage sweep headless when redemption reports a newly-final credit (issue #11470C sweep)", async () => {
+		// Same race through the sweep site with no prompt UI: the sweep must
+		// warn once and spend nothing, without burning the episode.
+		const { session, coordinator, redeemTargets } = buildSession({
+			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 12 },
+			report: codexReport({
+				primaryUsed: 1.0,
+				weeklyUsed: 0.2,
+				limitReached: false,
+				credits: 2,
+				creditExpiresInMs: 2 * HOUR,
+			}),
+			liveCredits: [liveCreditStatus(2, 2 * HOUR)],
+			redeemImpl: async () => ({ ok: false, code: "final_consent_required" as const }),
+		});
+		const warnings: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice" && event.level === "warning") warnings.push(event.message);
+		});
+
+		await session.fetchUsageReports();
+		expect(coordinator.sweepPromise).toBeDefined();
+		await coordinator.sweepPromise;
+
+		expect(redeemTargets).toHaveLength(1);
+		expect(warnings.some(message => message.includes("last saved Codex rate-limit reset"))).toBe(true);
+		expect([...coordinator.attemptedKeys].some(key => key.startsWith("salvage|"))).toBe(false);
+	});
+	it("aborts a blocked pass headless when redemption reports a newly-final credit (issue #11470C blocked)", async () => {
+		// Same race through the blocked-pass site with no prompt UI: the
+		// redeem is refused, the pass warns, and the episode is not burned.
+		const { session, coordinator, redeemTargets } = buildSession({
+			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 },
+			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 0.5, limitReached: false, credits: 2 }),
+			liveCredits: [liveCreditStatus(2)],
+			streamErrorFirst: true,
+			redeemImpl: async () => ({ ok: false, code: "final_consent_required" as const }),
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const warnings: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice" && event.level === "warning") warnings.push(event.message);
+		});
+
+		await session.prompt("trigger a codex usage limit");
+		await session.waitForIdle();
+
+		expect(redeemTargets).toHaveLength(1);
+		expect(warnings.some(message => message.includes("last saved Codex rate-limit reset"))).toBe(true);
+		expect([...coordinator.attemptedKeys].some(key => key.startsWith("block|"))).toBe(false);
+	});
+	it("records one notified key per final action in headless warnings (issue #11470 P3)", async () => {
+		// Two final-credit actions headless: the dedup set must hold a key per
+		// final action, not just the first, so a later single-final pass for
+		// the second account still warns instead of staying silent.
+		const { session, coordinator, redeemTargets } = buildSession({
+			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 12 },
+			report: codexReport({ primaryUsed: 1.0, weeklyUsed: 0.2, limitReached: false, credits: 2 }),
+			reports: [
+				codexReport({
+					primaryUsed: 1.0,
+					weeklyUsed: 0.2,
+					limitReached: false,
+					credits: 1,
+					creditExpiresInMs: 2 * HOUR,
+				}),
+				codexReport({
+					primaryUsed: 1.0,
+					weeklyUsed: 0.3,
+					limitReached: false,
+					credits: 1,
+					creditExpiresInMs: 3 * HOUR,
+					accountId: "acct-2",
+					email: "second@example.com",
+				}),
+			],
+			liveCredits: [liveCreditStatus(1, 2 * HOUR), liveCreditStatus(1, 3 * HOUR, "acct-2", "second@example.com")],
+		});
+
+		await session.fetchUsageReports();
+		expect(coordinator.sweepPromise).toBeDefined();
+		await coordinator.sweepPromise;
+
+		expect(redeemTargets).toHaveLength(0);
+		expect(coordinator.notifiedKeys.size).toBe(2);
 	});
 });

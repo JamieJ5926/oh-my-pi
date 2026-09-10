@@ -10240,8 +10240,13 @@ export class AgentSession {
 			// Name the accounts that actually hold a final credit, not the
 			// batch head: a non-final action can sort before the final one.
 			const target = finals[0] ?? first;
-			if (!coordinator.notifiedKeys.has(target.attemptKey)) {
-				coordinator.notifiedKeys.add(target.attemptKey);
+			// Record a key per final action, not just the first: the warning is
+			// once per episode, but each final account needs its own dedup entry
+			// so a later single-final pass for another account still warns.
+			const pending = finals.length > 0 ? finals : [first];
+			const fresh = pending.some(action => !coordinator.notifiedKeys.has(action.attemptKey));
+			for (const action of pending) coordinator.notifiedKeys.add(action.attemptKey);
+			if (fresh) {
 				this.emitNotice(
 					"warning",
 					finals.length > 1
@@ -10317,20 +10322,23 @@ export class AgentSession {
 		coordinator: CodexAutoRedeemCoordinator,
 	): Promise<number> {
 		const authStorage = this.#modelRegistry.authStorage;
-		let redeemed = 0;
-		for (const action of actions) {
-			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
-			// Commit the attempt BEFORE acting so this episode can never re-enter.
-			coordinator.attemptedKeys.add(action.attemptKey);
-			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
-			let outcome: ResetCreditRedeemOutcome;
+		// `yes` mode spends planned non-final credits without prompting, so an
+		// action can go final between planning and execution (another CLI or
+		// client redeeming concurrently). Those actions carry the consent gate
+		// into redemption; the live pre-POST listing enforces it.
+		const revalidateFinalCredit = !shouldPromptCodexAutoRedeem(this.settings.getGroup("codexResets").autoRedeem);
+		const redeem = async (
+			action: CodexResetAction,
+			requireFinalCreditConsent: boolean,
+		): Promise<ResetCreditRedeemOutcome | undefined> => {
 			try {
-				outcome = await authStorage.redeemResetCredit({
+				return await authStorage.redeemResetCredit({
 					target: action.target,
 					baseUrlResolver: provider => this.#modelRegistry.getProviderBaseUrl?.(provider),
 					// Not tied to the retry abort controller: aborting a consume
 					// mid-flight leaves credit state unknown.
 					signal: AbortSignal.timeout(15_000),
+					...(requireFinalCreditConsent ? { requireFinalCreditConsent: true as const } : {}),
 				});
 			} catch (error) {
 				// Thrown transport failure (network error, 15s timeout): same policy
@@ -10344,7 +10352,32 @@ export class AgentSession {
 					account: action.accountKey,
 					error: String(error),
 				});
-				continue;
+				return undefined;
+			}
+		};
+		let redeemed = 0;
+		for (let index = 0; index < actions.length; index++) {
+			const action = actions[index];
+			if (!action) continue;
+			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
+			// Commit the attempt BEFORE acting so this episode can never re-enter.
+			coordinator.attemptedKeys.add(action.attemptKey);
+			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
+			let outcome = await redeem(action, revalidateFinalCredit && (action.availableCount ?? 1) > 1);
+			if (!outcome) continue;
+			if (outcome.code === "final_consent_required") {
+				// The live listing reports one credit left: this is now a
+				// final-credit spend, which always needs explicit consent.
+				// Release the episode (nothing was spent) and prompt over this
+				// action plus the rest of the batch; a "Yes" retries with the
+				// gate cleared, anything else aborts the batch.
+				coordinator.attemptedKeys.delete(action.attemptKey);
+				action.availableCount = 1;
+				if (!(await this.#confirmFinalCodexReset(actions.slice(index), coordinator))) return redeemed;
+				coordinator.attemptedKeys.add(action.attemptKey);
+				coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
+				outcome = await redeem(action, false);
+				if (!outcome) continue;
 			}
 			if (!isTerminalRedeemOutcome(outcome.code)) {
 				// `nothing_to_reset` (limits not constrained enough yet) or a
