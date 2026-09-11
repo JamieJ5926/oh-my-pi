@@ -281,6 +281,18 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		}
 	});
 
+	it("preserves ENOENT when the session directory is gone", async () => {
+		// SessionManager.dropSession treats ENOENT as idempotent success; the
+		// enumeration wrapper must not convert it into a codeless Error.
+		const sessionPath = path.join(tempDir, "gone", "ghost.jsonl");
+
+		const result = await storage.deleteSessionWithArtifacts(sessionPath).then(
+			() => "resolved",
+			(e: unknown) => e,
+		);
+		expect((result as NodeJS.ErrnoException).code).toBe("ENOENT");
+	});
+
 	it("leaves backups of a different primary alone", async () => {
 		const sessionPath = await createSessionFile("foo");
 		// A distinct primary whose name extends this session's basename.

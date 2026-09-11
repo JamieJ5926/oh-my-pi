@@ -464,6 +464,8 @@ export class FileSessionStorage implements SessionStorage {
 		try {
 			backups = Array.from(new Bun.Glob("*.bak").scanSync(dir)).map(name => path.join(dir, name));
 		} catch (err) {
+			// Preserve ENOENT (absent directory): callers treat it as idempotent success.
+			if (isEnoent(err)) throw err;
 			const error = toError(err);
 			throw new Error(`Session file not deleted: failed to enumerate stale backups in ${dir}: ${error.message}`, {
 				cause: error,
