@@ -481,6 +481,9 @@ export class FileSessionStorage implements SessionStorage {
 			const dotIdx = trimmed.lastIndexOf(".");
 			if (dotIdx <= 0) continue;
 			if (trimmed.slice(0, dotIdx) !== sessionBase) continue;
+			// Only real rewrite backups carry a Snowflake suffix — the sole producer uses
+			// Snowflake.next() — so a manual/unrelated ".bak" beside the primary survives.
+			if (!Snowflake.valid(trimmed.slice(dotIdx + 1))) continue;
 			try {
 				await this.unlink(backup);
 			} catch (err) {

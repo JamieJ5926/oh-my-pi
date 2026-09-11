@@ -210,7 +210,7 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		const sessionPath = await createSessionFile("stale-backup");
 		// A crash between the two renames of the EPERM-rewrite path leaves a
 		// rollback copy beside the primary: "<primary>.<snowflake>.bak".
-		const staleBackup = `${sessionPath}.1234567890.bak`;
+		const staleBackup = `${sessionPath}.abcdef1234567890.bak`;
 		await fsp.copyFile(sessionPath, staleBackup);
 		expect(fs.existsSync(staleBackup)).toBe(true);
 
@@ -224,7 +224,7 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 	});
 	it("removes stale backups before the primary so a concurrent scan cannot resurrect the session", async () => {
 		const sessionPath = await createSessionFile("backup-first");
-		const staleBackup = `${sessionPath}.1234567890.bak`;
+		const staleBackup = `${sessionPath}.abcdef1234567890.bak`;
 		await fsp.copyFile(sessionPath, staleBackup);
 
 		const order: string[] = [];
@@ -242,7 +242,7 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 
 	it("fails closed when a stale backup cannot be removed", async () => {
 		const sessionPath = await createSessionFile("backup-cleanup-failure");
-		const staleBackup = `${sessionPath}.1234567890.bak`;
+		const staleBackup = `${sessionPath}.abcdef1234567890.bak`;
 		await fsp.copyFile(sessionPath, staleBackup);
 
 		const backupError = Object.assign(new Error("permission denied"), { code: "EACCES" });
@@ -260,7 +260,12 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		expect(fs.existsSync(staleBackup)).toBe(true);
 	});
 
-	it("fails closed when backup enumeration fails", async () => {
+	// chmod(0o333) does not remove directory-read access for root or on Windows,
+	// where the scan would succeed and the test would fail environmentally.
+	const cannotRestrictEnumeration =
+		process.platform === "win32" || (typeof process.getuid === "function" && process.getuid() === 0);
+
+	it.skipIf(cannotRestrictEnumeration)("fails closed when backup enumeration fails", async () => {
 		const sessionPath = await createSessionFile("backup-enumeration-failure");
 		// A directory that permits unlinking but not enumeration (POSIX write+execute
 		// without read): the sweep must abort instead of deleting the primary blind,
@@ -288,6 +293,19 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		expect(fs.existsSync(sessionPath)).toBe(false);
 		expect(fs.existsSync(siblingPath)).toBe(true);
 		expect(fs.existsSync(siblingBackup)).toBe(true);
+	});
+
+	it("leaves a non-snowflake manual backup alone", async () => {
+		const sessionPath = await createSessionFile("manual");
+		// Not produced by the EPERM-rewrite path (sole producer uses Snowflake.next()):
+		// a user-kept copy the sweep must not destroy.
+		const manualBackup = `${sessionPath}.manual.bak`;
+		await fsp.copyFile(sessionPath, manualBackup);
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(manualBackup)).toBe(true);
 	});
 
 	it("throws when artifact cleanup fails after the session file is deleted", async () => {
