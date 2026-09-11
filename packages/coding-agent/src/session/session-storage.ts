@@ -456,11 +456,23 @@ export class FileSessionStorage implements SessionStorage {
 		// surviving backup back to the primary path and silently undo the deletion.
 		// Non-ENOENT cleanup failures propagate (fail-closed) like the artifact
 		// cleanup below, so callers never report success while recoverable data remains.
-		// Note listFilesSync returns [] when the directory scan itself fails, so a
-		// scan failure cannot enforce this contract — same as recoverOrphanedBackups.
+		// Enumerate with a throwing scan: listFilesSync swallows scan errors into [],
+		// which would skip this loop and unlink the primary while backups survive.
 		const dir = path.dirname(sessionPath);
 		const sessionBase = path.basename(sessionPath);
-		for (const backup of this.listFilesSync(dir, "*.bak")) {
+		let backups: string[];
+		try {
+			backups = Array.from(new Bun.Glob("*.bak").scanSync(dir)).map(name => path.join(dir, name));
+		} catch (err) {
+			const error = toError(err);
+			throw new Error(
+				`Session file not deleted: failed to enumerate stale backups in ${dir}: ${error.message}`,
+				{
+					cause: error,
+				},
+			);
+		}
+		for (const backup of backups) {
 			// Match only "<primary>.<snowflake>.bak" for THIS primary: parse the final
 			// suffix the same way recoverOrphanedBackups() does and require the derived
 			// primary basename to equal this session's. A plain startsWith would also

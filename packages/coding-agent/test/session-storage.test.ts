@@ -260,6 +260,22 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		expect(fs.existsSync(staleBackup)).toBe(true);
 	});
 
+	it("fails closed when backup enumeration fails", async () => {
+		const sessionPath = await createSessionFile("backup-enumeration-failure");
+		// A directory that permits unlinking but not enumeration (POSIX write+execute
+		// without read): the sweep must abort instead of deleting the primary blind,
+		// leaving a backup for a later scan to resurrect.
+		await fsp.chmod(tempDir, 0o333);
+		try {
+			await expect(storage.deleteSessionWithArtifacts(sessionPath)).rejects.toThrow(
+				`Session file not deleted: failed to enumerate stale backups in ${tempDir}:`,
+			);
+			expect(fs.existsSync(sessionPath)).toBe(true);
+		} finally {
+			await fsp.chmod(tempDir, 0o755);
+		}
+	});
+
 	it("leaves backups of a different primary alone", async () => {
 		const sessionPath = await createSessionFile("foo");
 		// A distinct primary whose name extends this session's basename.
