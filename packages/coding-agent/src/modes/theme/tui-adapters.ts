@@ -8,6 +8,7 @@ import {
 import type { EditorTheme, MarkdownTheme, SelectListTheme, SettingsListTheme, SymbolTheme } from "@oh-my-pi/pi-tui";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import { getDefault } from "../../config/settings-schema";
 import { resolveMermaidAscii } from "./mermaid-cache";
 import type { SlashCommandIconName } from "./symbols";
 import { theme } from "./theme";
@@ -170,13 +171,35 @@ export interface MarkdownMermaidSpacing {
 	boxBorderPadding: number;
 }
 
-const MERMAID_SPACING_DEFAULTS = { paddingX: 5, paddingY: 5, boxBorderPadding: 1 } as const;
-
 // Upper bound so a configuration typo (e.g. paddingX 100000) cannot make the
 // flowchart grid pipeline build an enormous canvas and freeze the TUI.
 const MERMAID_SPACING_MAX = 32;
 
-let markdownMermaidSpacing: MarkdownMermaidSpacing = { ...MERMAID_SPACING_DEFAULTS };
+// Invalid configured values fall back to the live schema defaults, read lazily
+// so this module never evaluates settings-schema state at import time.
+const MERMAID_SPACING_DEFAULTS = {
+	get paddingX(): number {
+		return getDefault("tui.mermaidPaddingX");
+	},
+	get paddingY(): number {
+		return getDefault("tui.mermaidPaddingY");
+	},
+	get boxBorderPadding(): number {
+		return getDefault("tui.mermaidBoxBorderPadding");
+	},
+};
+
+let markdownMermaidSpacing: MarkdownMermaidSpacing | undefined;
+function readMermaidSpacing(): MarkdownMermaidSpacing {
+	if (markdownMermaidSpacing === undefined) {
+		markdownMermaidSpacing = {
+			paddingX: MERMAID_SPACING_DEFAULTS.paddingX,
+			paddingY: MERMAID_SPACING_DEFAULTS.paddingY,
+			boxBorderPadding: MERMAID_SPACING_DEFAULTS.boxBorderPadding,
+		};
+	}
+	return markdownMermaidSpacing;
+}
 
 function sanitizeMermaidSpacing(value: number, fallback: number): number {
 	if (
@@ -195,10 +218,11 @@ export function setMarkdownMermaidSpacing(spacing: MarkdownMermaidSpacing): void
 		paddingY: sanitizeMermaidSpacing(spacing.paddingY, MERMAID_SPACING_DEFAULTS.paddingY),
 		boxBorderPadding: sanitizeMermaidSpacing(spacing.boxBorderPadding, MERMAID_SPACING_DEFAULTS.boxBorderPadding),
 	};
+	const current = readMermaidSpacing();
 	if (
-		next.paddingX === markdownMermaidSpacing.paddingX &&
-		next.paddingY === markdownMermaidSpacing.paddingY &&
-		next.boxBorderPadding === markdownMermaidSpacing.boxBorderPadding
+		next.paddingX === current.paddingX &&
+		next.paddingY === current.paddingY &&
+		next.boxBorderPadding === current.boxBorderPadding
 	)
 		return;
 	markdownMermaidSpacing = next;
@@ -253,15 +277,17 @@ export function getMarkdownTheme(): MarkdownTheme {
 		strikethrough: (text: string) => chalk.strikethrough(text),
 		symbols: getSymbolTheme(),
 		resolveMermaidAscii: mermaid
-			? (source, maxWidth) =>
-					resolveMermaidAscii(source, {
+			? (source, maxWidth) => {
+					const spacing = readMermaidSpacing();
+					return resolveMermaidAscii(source, {
 						maxWidth,
 						theme: mermaid.mermaidTheme,
 						colorMode: mermaid.mermaidColorMode,
-						paddingX: markdownMermaidSpacing.paddingX,
-						paddingY: markdownMermaidSpacing.paddingY,
-						boxBorderPadding: markdownMermaidSpacing.boxBorderPadding,
-					})
+						paddingX: spacing.paddingX,
+						paddingY: spacing.paddingY,
+						boxBorderPadding: spacing.boxBorderPadding,
+					});
+				}
 			: undefined,
 		highlightCode: (code: string, lang?: string): string[] => {
 			const validLang = lang && nativeSupportsLanguage(lang) ? lang : undefined;

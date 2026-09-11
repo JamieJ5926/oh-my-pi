@@ -1,5 +1,9 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Markdown } from "@oh-my-pi/pi-tui";
+import { getDefault } from "../../../src/config/settings-schema";
 import { Settings, settings } from "../../../src/config/settings";
 import { createTheme, getBuiltinThemes } from "../../../src/modes/theme/loader";
 import {
@@ -10,6 +14,7 @@ import {
 	setThemeInstance,
 } from "../../../src/modes/theme/theme";
 import { buildSystemPrompt } from "../../../src/system-prompt";
+import { beginSettingsTest, restoreSettingsTestState } from "../../helpers/settings-test-state";
 
 const workspaceTree = {
 	rootPath: "/tmp/project",
@@ -138,5 +143,71 @@ describe("Mermaid rendering setting", () => {
 		const baseline = renderMermaidAscii(source);
 		setMarkdownMermaidSpacing({ paddingX: 0, paddingY: 0, boxBorderPadding: 0 });
 		expect(renderMermaidAscii(source)).toBe(baseline);
+	});
+
+	it("applies load-time spacing to rendered diagrams without an interactive session", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-init-spacing-global-"));
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-init-spacing-project-"));
+		const settingsState = beginSettingsTest();
+		try {
+			await fs.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await fs.writeFile(
+				path.join(projectDir, ".claude", "settings.json"),
+				JSON.stringify({ tui: { mermaidPaddingX: 0, mermaidPaddingY: 0, mermaidBoxBorderPadding: 0 } }),
+			);
+			const source = "flowchart TD\n  A[alpha] --> B[beta]";
+			setMarkdownMermaidSpacing({ paddingX: 5, paddingY: 5, boxBorderPadding: 1 });
+			const baseline = renderMermaidAscii(source);
+
+			await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("tui.mermaidPaddingX")).toBe(0);
+			const tight = renderMermaidAscii(source);
+			expect(tight).not.toBe(baseline);
+			expect(tight.length).toBeLessThan(baseline.length);
+		} finally {
+			setMarkdownMermaidSpacing({ paddingX: 5, paddingY: 5, boxBorderPadding: 1 });
+			setMarkdownMermaidRendering(true);
+			restoreSettingsTestState(settingsState);
+			await Settings.init({ inMemory: true });
+			await fs.rm(projectDir, { recursive: true, force: true });
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("disables the renderer from load-time config without an interactive session", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-init-render-global-"));
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-init-render-project-"));
+		const settingsState = beginSettingsTest();
+		try {
+			await fs.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await fs.writeFile(
+				path.join(projectDir, ".claude", "settings.json"),
+				JSON.stringify({ tui: { renderMermaid: false } }),
+			);
+
+			await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("tui.renderMermaid")).toBe(false);
+			expect(getMarkdownTheme().resolveMermaidAscii).toBeUndefined();
+		} finally {
+			setMarkdownMermaidRendering(true);
+			restoreSettingsTestState(settingsState);
+			await Settings.init({ inMemory: true });
+			await fs.rm(projectDir, { recursive: true, force: true });
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("falls back to the live schema defaults for invalid spacing values", () => {
+		const source = "flowchart TD\n  A[alpha] --> B[beta]";
+		setMarkdownMermaidSpacing({
+			paddingX: getDefault("tui.mermaidPaddingX"),
+			paddingY: getDefault("tui.mermaidPaddingY"),
+			boxBorderPadding: getDefault("tui.mermaidBoxBorderPadding"),
+		});
+		const expected = renderMermaidAscii(source);
+		setMarkdownMermaidSpacing({ paddingX: NaN, paddingY: -3, boxBorderPadding: 1.9 });
+		expect(renderMermaidAscii(source)).toBe(expected);
 	});
 });

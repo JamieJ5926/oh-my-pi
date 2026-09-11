@@ -581,6 +581,13 @@ export class Settings {
 				globalInstance = instance;
 				clearBoundSettingsMethods();
 				globalInstancePromise = Promise.resolve(instance);
+				// Hooks fired during #load ran before the singleton was published,
+				// so active-instance reads (tui.renderMermaid/spacing) were no-ops
+				// and standalone renderers kept process defaults. Re-fire once now
+				// that global reads resolve. Every hook tolerates same-value
+				// re-fire: reloadForCwd() re-fires unconditionally, and the
+				// renderer setters early-return on identical values.
+				instance.#fireAllHooks();
 				return instance;
 			},
 			error => {
