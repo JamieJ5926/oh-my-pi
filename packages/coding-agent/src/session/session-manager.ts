@@ -1127,7 +1127,7 @@ export class SessionManager {
 		// plus title-slot rewrite below would otherwise recreate a headerless
 		// file and overwrite its first bytes if the draft GC won the race.
 		if (this.#isDraftOnlyFirstDurableEntry(entry)) {
-			this.#persistDraftOnlyTitleChangeLocked();
+			this.#persistDraftOnlyTitleChangeLocked(entry, update);
 			return;
 		}
 
@@ -1166,22 +1166,75 @@ export class SessionManager {
 
 	/**
 	 * Persist a title change that is leaving a draft-only materialization, under
-	 * the session-file lock the draft GC takes. The write is a full-body rewrite
-	 * rather than an append: it recreates the session header and the title slot
-	 * in one step even when the GC already removed the file, where appending to
-	 * the missing path would produce a headerless file.
+	 * the session-file lock the draft GC takes. When the GC already removed the
+	 * file the write is a full-body rewrite, because appending to the missing
+	 * path would produce a headerless file. When the file survives, the title
+	 * change is appended and the title slot rewritten in place: a full-body
+	 * rewrite from this manager's entry list would republish a stale view and
+	 * delete an entry a concurrent manager appended after this one read it.
 	 */
-	#persistDraftOnlyTitleChangeLocked(): void {
+	#persistDraftOnlyTitleChangeLocked(entry: TitleChangeEntry, update: SessionTitleUpdate): void {
 		const sessionFile = this.#sessionFile;
 		const withSessionFileLockSync = this.#storage.withSessionFileLockSync;
 		if (!sessionFile || !withSessionFileLockSync) return;
 		try {
-			withSessionFileLockSync.call(this.#storage, sessionFile, () => this.#rewriteSynchronously());
+			withSessionFileLockSync.call(this.#storage, sessionFile, () =>
+				this.#appendTitleChangeUnderSessionFileLock(entry, update, sessionFile),
+			);
 		} catch (err) {
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
 			this.#noteDiskFailure(err);
 		}
+	}
+
+	/**
+	 * Append a title-change entry to an existing session body and rewrite its
+	 * fixed-width title slot in place. Runs inside the session-file lock, where
+	 * only synchronous writes are available; the append leaves entries another
+	 * manager persisted after this one read the file untouched.
+	 */
+	#appendTitleChangeUnderSessionFileLock(
+		entry: TitleChangeEntry,
+		update: SessionTitleUpdate,
+		sessionFile: string,
+	): void {
+		if (!this.#storage.existsSync(sessionFile)) {
+			this.#rewriteSynchronously();
+			return;
+		}
+		const writer = this.#appendWriter();
+		if (!this.#storage.existsSync(sessionFile) || this.#storage.statSync(sessionFile).size === 0) {
+			// The GC removed the file while the writer opened, so the writer's
+			// append-mode open recreated it empty. Appending there would leave a
+			// headerless session `--resume` cannot load; rebuild the body instead.
+			this.#rewriteSynchronously();
+			return;
+		}
+		const line = this.#lineFor(entry);
+		if (writer.appendSync) {
+			writer.appendSync(line);
+		} else {
+			void writer.append(line).catch(err => {
+				this.#fileIsCurrent = false;
+				this.#rewriteRequired = true;
+				this.#noteDiskFailure(err);
+			});
+		}
+		const updateSessionTitleSync = this.#storage.updateSessionTitleSync;
+		if (updateSessionTitleSync) {
+			updateSessionTitleSync.call(this.#storage, sessionFile, update);
+		} else {
+			void this.#storage.updateSessionTitle(sessionFile, update).catch(err => {
+				this.#fileIsCurrent = false;
+				this.#rewriteRequired = true;
+				this.#noteDiskFailure(err);
+			});
+		}
+		this.#clearDiskError();
+		this.#fileIsCurrent = true;
+		this.#rewriteRequired = false;
+		this.#hasTitleSlot = true;
 	}
 
 	#notifyEntryAppended(entry: SessionEntry): void {
@@ -1846,7 +1899,7 @@ export class SessionManager {
 			} finally {
 				batch.collecting = false;
 			}
-			await this.#rewriteAtomically();
+			await this.#publishAtomicEntryBatch(batch);
 			if (!this.#fileIsCurrent || this.#rewriteRequired) {
 				throw new Error("Atomic session batch was superseded before commit.");
 			}
@@ -1872,6 +1925,47 @@ export class SessionManager {
 			this.#atomicEntryBatch = undefined;
 			this.#notifyDurableEntries(retainedNotifications);
 			throw error;
+		}
+	}
+
+	/**
+	 * Publish a committed batch. The first durable entry it creates out of a
+	 * draft-only materialization must be serialized on the session-file lock the
+	 * close-time GC takes, exactly like a single first durable append; every
+	 * other batch keeps the fenced asynchronous atomic rewrite.
+	 */
+	async #publishAtomicEntryBatch(batch: AtomicEntryBatch): Promise<void> {
+		if (this.#batchPublishesDraftOnlyFirstDurable(batch)) {
+			this.#publishBatchUnderSessionFileLock();
+			return;
+		}
+		await this.#rewriteAtomically();
+	}
+
+	/**
+	 * True when the batch carries the first durable entry out of a draft-only
+	 * materialization: the batch has a non-metadata entry and every in-memory
+	 * entry is either part of the batch or startup selector state.
+	 */
+	#batchPublishesDraftOnlyFirstDurable(batch: AtomicEntryBatch): boolean {
+		return (
+			this.#draftOnlySessionCleanupArmed &&
+			this.#storage.withSessionFileLockSync !== undefined &&
+			this.#entries.some(entry => batch.entryIds.has(entry.id) && !isDraftOnlyMetadataEntry(entry)) &&
+			this.#entries.every(entry => batch.entryIds.has(entry.id) || isDraftOnlyMetadataEntry(entry))
+		);
+	}
+
+	#publishBatchUnderSessionFileLock(): void {
+		const sessionFile = this.#sessionFile;
+		const withSessionFileLockSync = this.#storage.withSessionFileLockSync;
+		if (!sessionFile || !withSessionFileLockSync) return;
+		try {
+			withSessionFileLockSync.call(this.#storage, sessionFile, () => this.#rewriteSynchronously());
+		} catch (err) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#noteDiskFailure(err);
 		}
 	}
 
@@ -1954,16 +2048,24 @@ export class SessionManager {
 			return;
 		}
 		try {
+			// A veto from a late draft leaves the session a draft-only GC target,
+			// so its marker must survive for `consumeDraft` to re-arm cleanup
+			// later. Only durable or invalid content retires the marker.
+			let vetoedByDraft = false;
 			const deleted = await deleteSessionWithArtifactsIf.call(this.#storage, sessionFile, content => {
 				const onDisk = parseSessionContent(content);
 				if (onDisk.invalidHeader) return false;
 				if (!onDisk.entries.slice(1).every(isDraftOnlyMetadataEntry)) return false;
 				// The draft sidecar may have been saved after this manager read
 				// the directory; its parent session must survive with it.
-				return draftPath === null || !this.#storage.existsSync(draftPath);
+				if (draftPath !== null && this.#storage.existsSync(draftPath)) {
+					vetoedByDraft = true;
+					return false;
+				}
+				return true;
 			});
 			if (!deleted) {
-				await this.#clearDraftOnlySessionMarker();
+				if (!vetoedByDraft) await this.#clearDraftOnlySessionMarker();
 				this.#draftOnlySessionCleanupArmed = false;
 				return;
 			}
@@ -2273,6 +2375,11 @@ export class SessionManager {
 		// Force the header onto disk so resume can find the file this draft attaches to.
 		await this.ensureOnDisk();
 
+		// A resumed draft-only session stays a GC target even after
+		// `#setSessionFile` cleared the in-memory arm flag: `.draft-only-session`
+		// survives while the draft sidecar does, so the save still takes the lock.
+		const markerBackedResume = this.#hasDraftOnlySessionMarker();
+
 		// A draft-only session file is the close-time GC's target, and that GC
 		// removes this sidecar's whole artifacts directory with it (#11497).
 		// Serialize the save with it: under the lock this manager re-materializes
@@ -2280,7 +2387,7 @@ export class SessionManager {
 		// outlives the session `--resume` looks for.
 		if (
 			sessionFile !== undefined &&
-			(draftWillMaterializeMetadataOnlyFile || this.#draftOnlySessionCleanupArmed) &&
+			(draftWillMaterializeMetadataOnlyFile || this.#draftOnlySessionCleanupArmed || markerBackedResume) &&
 			this.#storage.withSessionFileLockSync !== undefined
 		) {
 			const withSessionFileLockSync = this.#storage.withSessionFileLockSync;
@@ -2290,7 +2397,7 @@ export class SessionManager {
 						this.#forceFileCreation = true;
 						this.#rewriteSynchronously();
 					}
-					if (draftWillMaterializeMetadataOnlyFile) {
+					if (draftWillMaterializeMetadataOnlyFile || markerBackedResume) {
 						const markerPath = this.#draftOnlySessionMarkerPath();
 						if (markerPath) this.#storage.writeTextSync(markerPath, "");
 						this.#draftOnlySessionCleanupArmed = true;
@@ -2299,11 +2406,15 @@ export class SessionManager {
 				});
 				return;
 			} catch (err) {
+				// Fail closed: a save that cannot take the lock must not write the
+				// sidecar unlocked, because a close-time GC holding the lock can
+				// still delete it after the caller was told the save landed.
 				logger.warn("Failed to persist the session draft under the session-file lock", {
 					sessionFile,
 					draftPath,
 					error: String(err),
 				});
+				throw err;
 			}
 		}
 

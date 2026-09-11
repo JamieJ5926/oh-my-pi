@@ -67,6 +67,13 @@ export interface SessionStorage {
 	 * reading.
 	 */
 	updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void>;
+	/**
+	 * Synchronous title-slot rewrite for callers already inside
+	 * {@link withSessionFileLockSync}, which cannot await. Backends that cannot
+	 * rewrite the slot in place omit this and the caller falls back to the
+	 * asynchronous method.
+	 */
+	updateSessionTitleSync?(path: string, update: SessionTitleUpdate): void;
 	statSync(path: string): SessionStorageStat;
 	listFilesSync(dir: string, pattern: string): string[];
 
@@ -257,7 +264,7 @@ export class FileSessionStorage implements SessionStorage {
 		}
 	}
 
-	async updateSessionTitle(fpath: string, update: SessionTitleUpdate): Promise<void> {
+	updateSessionTitleSync(fpath: string, update: SessionTitleUpdate): void {
 		const fd = fs.openSync(fpath, "r+");
 		try {
 			const buf = Buffer.from(serializeTitleSlot(update), "utf-8");
@@ -274,6 +281,10 @@ export class FileSessionStorage implements SessionStorage {
 		} finally {
 			fs.closeSync(fd);
 		}
+	}
+
+	async updateSessionTitle(fpath: string, update: SessionTitleUpdate): Promise<void> {
+		this.updateSessionTitleSync(fpath, update);
 	}
 
 	statSync(path: string): SessionStorageStat {
@@ -747,12 +758,16 @@ export class MemorySessionStorage implements SessionStorage {
 		this.#files.set(path, createMemoryFileEntry(content, Date.now()));
 	}
 
-	async updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void> {
+	updateSessionTitleSync(path: string, update: SessionTitleUpdate): void {
 		const entry = this.#requireEntry(path);
 		this.#files.set(
 			path,
 			createMemoryFileEntry(overlayTitleSlotContent(materializeMemoryEntry(entry), update), Date.now()),
 		);
+	}
+
+	async updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void> {
+		this.updateSessionTitleSync(path, update);
 	}
 
 	/**
