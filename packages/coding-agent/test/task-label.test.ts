@@ -63,10 +63,12 @@ describe("task label generation", () => {
 		controller.abort();
 
 		expect(requestSignal).toBe(controller.signal);
-		expect(await label).toBeNull();
+		// The aborted request yields no model label, so the deterministic local
+		// fallback derives one from the assignment instead of returning blank.
+		expect(await label).toBe("Investigate shutdown");
 	});
 
-	it("rejects a generated label that only echoes the spawn handle", async () => {
+	it("replaces a generated label that only echoes the spawn handle with the assignment text", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
 		vi.spyOn(ai, "completeSimple").mockResolvedValue({
 			stopReason: "stop",
@@ -79,7 +81,7 @@ describe("task label generation", () => {
 			createSettings(model),
 			"AuthLoader",
 		);
-		expect(echoed).toBeNull();
+		expect(echoed).toBe("Sleep forty seconds then reply done");
 
 		vi.spyOn(ai, "completeSimple").mockResolvedValue({
 			stopReason: "stop",
@@ -99,5 +101,72 @@ describe("task label generation", () => {
 		expect(labelEchoesHandle("AuthLoader-3", "AuthLoader")).toBe(true);
 		expect(labelEchoesHandle("AuthLoader", "authloader")).toBe(true);
 		expect(labelEchoesHandle("AuthLoader-3", "Migrate users")).toBe(false);
+	});
+});
+
+describe("task label local fallback", () => {
+	it("derives a label from a role-marked assignment that opens with a section header", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "402 Insufficient Balance",
+			content: [],
+		} as never);
+
+		const label = await generateTaskLabel(
+			"ROLE_MARK:poteto-agent # Target You are a strict reviewer that audits shipped code.",
+			createRegistry(model),
+			createSettings(model),
+		);
+		expect(label).toBe("You are a strict reviewer that audits shipped code.");
+	});
+
+	it("derives a label from a plain sentence assignment", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "402 Insufficient Balance",
+			content: [],
+		} as never);
+
+		const label = await generateTaskLabel(
+			"Refactor the auth loader to drop the dead branch",
+			createRegistry(model),
+			createSettings(model),
+		);
+		expect(label).toBe("Refactor the auth loader to drop the dead branch");
+	});
+
+	it("returns null when the assignment carries nothing but scaffolding", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "402 Insufficient Balance",
+			content: [],
+		} as never);
+
+		const label = await generateTaskLabel(
+			"ROLE_MARK:owner # Target",
+			createRegistry(model),
+			createSettings(model),
+		);
+		expect(label).toBeNull();
+	});
+
+	it("returns null when the derived label would only echo the spawn handle", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "402 Insufficient Balance",
+			content: [],
+		} as never);
+
+		const label = await generateTaskLabel(
+			"ROLE_MARK:owner # Target AuthLoader",
+			createRegistry(model),
+			createSettings(model),
+			"AuthLoader",
+		);
+		expect(label).toBeNull();
 	});
 });
