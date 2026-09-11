@@ -277,14 +277,21 @@ export class TranscriptContainer extends Container {
 		this.#startReplay();
 	}
 	/**
-	 * Drop a not-yet-offered replay so a shutdown flush emits only un-retired
+	 * Drop a not-yet-started replay so a shutdown flush emits only un-retired
 	 * rows. The terminal already holds the committed ledger; re-streaming it at
-	 * quit is pure write volume. An already offered replay batch stays valid.
+	 * quit is pure write volume. An already offered replay batch stays valid. A
+	 * mid-drain cancel is a no-op: the ED3 frame already erased the scrolled
+	 * history the drain was rewriting, so the shutdown flush must finish the
+	 * drain it started instead of stranding the ledger past the cursor.
 	 */
 	cancelReplay(): void {
+		const offered = this.#offered;
+		const midDrain = this.#replayIndex !== 0 || (offered?.kind === "replay" && offered.start !== 0);
+		if (midDrain) return;
 		this.#replayPending = false;
 		this.#replayRequested = false;
 		this.#replayIndex = 0;
+		if (offered?.kind === "replay") offered.complete = true;
 	}
 
 	/** Total rows the live, un-emitted tail occupies at `width`. */
@@ -432,7 +439,7 @@ export class TranscriptContainer extends Container {
 			const after = this.#renderStablePrefix(entry, offered.emittedEnd, width);
 			rows = after.slice(before.length);
 		} else if (offered.kind === "commit") {
-			rows = this.#renderRange(this.#frontier, offered.end, width, true);
+			rows = this.#renderRange(this.#frontier, offered.end, width, true).rows;
 		} else {
 			rows = this.#renderReplayRange(width, offered.start, offered.end, offered.headPrefix);
 		}
@@ -521,7 +528,7 @@ export class TranscriptContainer extends Container {
 		this.#pinnedFrontier = undefined;
 		const batch: HistoryBatch = {
 			id: this.#nextBatchId++,
-			rows: this.#renderRange(this.#frontier, end, width, true),
+			rows: this.#renderRange(this.#frontier, end, width, true).rows,
 			kind: "append",
 		};
 		this.#offered = { batch, end, kind: "commit" };
@@ -670,8 +677,25 @@ export class TranscriptContainer extends Container {
 		});
 	}
 
-	#renderRange(start: number, end: number, width: number, trailingBlank: boolean): readonly string[] {
+	/**
+	 * Render `[start, end)` as joined blocks with `""` separators. With a finite
+	 * `maxRows` budget, accumulation stops at the first entry boundary past the
+	 * budget (past `start` when one block alone exceeds it) and `end` reports
+	 * the entry index it stopped at, so a chunked replay drains the ledger in
+	 * one ranged call per chunk. Only the range head is sliced by its emitted
+	 * stable prefix; every committed entry carries `emitted === 0`, so rows are
+	 * identical to one call per entry while the append-only verification pass
+	 * runs once per chunk instead of once per block.
+	 */
+	#renderRange(
+		start: number,
+		end: number,
+		width: number,
+		trailingBlank: boolean,
+		maxRows = Number.MAX_SAFE_INTEGER,
+	): { rows: readonly string[]; end: number } {
 		const rows: string[] = [];
+		let stop = start;
 		for (let index = start; index < end; index++) {
 			const entry = this.#entries[index]!;
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
@@ -683,12 +707,14 @@ export class TranscriptContainer extends Container {
 				index === start ? this.#renderEntry(entry, width) : trimBlankEdges(entry.component.render(width));
 			const emittedRows = index === start ? this.#renderStablePrefix(entry, entry.emitted, width).length : 0;
 			const block = rendered.slice(emittedRows);
+			stop = index + 1;
 			if (block.length === 0) continue;
 			if (rows.length > 0) rows.push("");
 			rows.push(...block);
+			if (rows.length >= maxRows) break;
 		}
 		if (trailingBlank && rows.length > 0) rows.push("");
-		return rows;
+		return { rows, end: stop };
 	}
 
 	/**
@@ -702,44 +728,47 @@ export class TranscriptContainer extends Container {
 		maxRows: number,
 	): { rows: readonly string[]; start: number; end: number; complete: boolean; headPrefix: boolean } {
 		const start = Math.min(this.#replayIndex, this.#frontier);
-		let end = start;
-		const rows: string[] = [];
-		while (end < this.#frontier) {
-			const block = this.#renderRange(end, end + 1, width, false);
-			end++;
-			if (block.length === 0) continue;
-			if (rows.length > 0) rows.push("");
-			rows.push(...block);
-			if (rows.length >= maxRows) break;
-		}
+		// One ranged call for the whole chunk: only the chunk head goes through
+		// #renderEntry, so the append-only verification pass runs once per chunk
+		// instead of once per block. Committed entries carry emitted === 0, so
+		// rows are unchanged.
+		const range = this.#renderRange(start, this.#frontier, width, false, Math.max(1, Math.trunc(maxRows)));
+		const rows = Array.from(range.rows);
+		const end = range.end;
 		const complete = end >= this.#frontier;
 		const headPrefix = complete;
+		let headPushed = false;
 		if (headPrefix) {
 			const head = this.#entries[this.#frontier];
 			if (head?.mode === "appendOnly" && head.emitted > 0) {
 				this.#setAllocation(head.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 				this.#renderEntry(head, width);
 				if (rows.length > 0) rows.push("");
+				const before = rows.length;
 				rows.push(...this.#renderStablePrefix(head, head.emitted, width));
+				if (rows.length > before) headPushed = true;
 			}
 		}
-		if (rows.length > 0) rows.push("");
+		if (rows.length > 0 && !headPushed) rows.push("");
 		return { rows, start, end, complete, headPrefix };
 	}
 
 	/** Re-render one offered replay chunk (same entry range, new width). */
 	#renderReplayRange(width: number, start: number, end: number, headPrefix: boolean): readonly string[] {
-		const rows = Array.from(this.#renderRange(start, end, width, false));
+		const rows = Array.from(this.#renderRange(start, end, width, false).rows);
+		let headPushed = false;
 		if (headPrefix) {
 			const head = this.#entries[this.#frontier];
 			if (head?.mode === "appendOnly" && head.emitted > 0) {
 				this.#setAllocation(head.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 				this.#renderEntry(head, width);
 				if (rows.length > 0) rows.push("");
+				const before = rows.length;
 				rows.push(...this.#renderStablePrefix(head, head.emitted, width));
+				if (rows.length > before) headPushed = true;
 			}
 		}
-		if (rows.length > 0) rows.push("");
+		if (rows.length > 0 && !headPushed) rows.push("");
 		return rows;
 	}
 

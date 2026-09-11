@@ -512,4 +512,53 @@ describe("TranscriptContainer", () => {
 		transcript.cancelReplay();
 		expect(transcript.peekFlushBatch(80)?.rows).toEqual(["tail", ""]);
 	});
+	it("does not re-arm a cancelled replay when its in-flight chunk is acked", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["one"], true));
+		transcript.addChild(new Block(["two"], true));
+		transcript.addChild(new Block(["three"], true));
+		const committed = transcript.peekFinalizedBatch(80, 0)!;
+		transcript.acknowledgeFinalizedBatch(committed.id);
+
+		// Drain one partial chunk, then cancel mid-drain like beginHistoryFlush.
+		transcript.beginReplay();
+		const outstanding = transcript.peekReplayBatch(80, 1)!;
+		expect(outstanding.rows).toEqual(["one", ""]);
+		transcript.cancelReplay();
+		// The already-offered batch stays valid and its ack takes the reset
+		// branch instead of re-arming the replay.
+		transcript.acknowledgeFinalizedBatch(outstanding.id);
+		expect(transcript.peekReplayBatch(80)).toBeUndefined();
+		expect(transcript.hasPendingReplay()).toBe(false);
+	});
+	it("lets a shutdown flush finish a mid-drain replay instead of stranding the ledger", () => {
+		// Case A: cancel before any chunk is offered or acked still skips pure
+		// write volume at quit.
+		const fresh = new TranscriptContainer();
+		fresh.addChild(new Block(["committed"], true));
+		const committed = fresh.peekFinalizedBatch(80, 0)!;
+		fresh.acknowledgeFinalizedBatch(committed.id);
+		fresh.addChild(new Block(["tail"], true));
+		fresh.beginReplay();
+		fresh.cancelReplay();
+		expect(fresh.peekReplayBatch(80)).toBeUndefined();
+		expect(fresh.hasPendingReplay()).toBe(false);
+		expect(fresh.peekFlushBatch(80)?.rows).toEqual(["tail", ""]);
+		// Case B: one partial chunk drained, then quit. The ED3 frame already
+		// erased scrollback, so cancel must not strand the ledger past the
+		// cursor; the flush loop continues the drain instead.
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["one"], true));
+		transcript.addChild(new Block(["two"], true));
+		transcript.addChild(new Block(["three"], true));
+		const retired = transcript.peekFinalizedBatch(80, 0)!;
+		transcript.acknowledgeFinalizedBatch(retired.id);
+		transcript.beginReplay();
+		const first = transcript.peekReplayBatch(80, 1)!;
+		expect(first.rows).toEqual(["one", ""]);
+		transcript.acknowledgeFinalizedBatch(first.id);
+		transcript.cancelReplay();
+		expect(transcript.hasPendingReplay()).toBe(true);
+		expect(transcript.peekFlushBatch(80)?.rows).toEqual(["two", "", "three", ""]);
+	});
 });
