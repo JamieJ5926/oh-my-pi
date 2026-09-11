@@ -465,12 +465,9 @@ export class FileSessionStorage implements SessionStorage {
 			backups = Array.from(new Bun.Glob("*.bak").scanSync(dir)).map(name => path.join(dir, name));
 		} catch (err) {
 			const error = toError(err);
-			throw new Error(
-				`Session file not deleted: failed to enumerate stale backups in ${dir}: ${error.message}`,
-				{
-					cause: error,
-				},
-			);
+			throw new Error(`Session file not deleted: failed to enumerate stale backups in ${dir}: ${error.message}`, {
+				cause: error,
+			});
 		}
 		for (const backup of backups) {
 			// Match only "<primary>.<snowflake>.bak" for THIS primary: parse the final
@@ -489,12 +486,9 @@ export class FileSessionStorage implements SessionStorage {
 			} catch (err) {
 				if (isEnoent(err)) continue;
 				const error = toError(err);
-				throw new Error(
-					`Session file not deleted: failed to remove stale backup ${backup}: ${error.message}`,
-					{
-						cause: error,
-					},
-				);
+				throw new Error(`Session file not deleted: failed to remove stale backup ${backup}: ${error.message}`, {
+					cause: error,
+				});
 			}
 		}
 
