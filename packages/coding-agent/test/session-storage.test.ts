@@ -312,11 +312,37 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		await expect(listSessions(tempDir, storage)).resolves.toEqual([]);
 	});
 
+	it("removes the primary again when a scan revives it between the unlink and the sweep", async () => {
+		const sessionPath = await createSessionFile("revive-race");
+		const content = await fsp.readFile(sessionPath, "utf8");
+		let revived = false;
+		vi.spyOn(storage, "unlink").mockImplementation(async (target: string) => {
+			await fs.promises.unlink(target);
+			if (target === sessionPath && !revived) {
+				revived = true;
+				// A concurrent rewrite lands a fresh backup after the sweep, then a
+				// picker scan's recoverOrphanedBackups() promotes it back onto the
+				// freed primary path, so the follow-up sweep sees no *.bak at all.
+				const backup = `${sessionPath}.abcdef1234567890.bak`;
+				await Bun.write(backup, content);
+				await fs.promises.rename(backup, sessionPath);
+			}
+		});
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		await expect(listSessions(tempDir, storage)).resolves.toEqual([]);
+	});
+
 	it("leaves backups of a different primary alone", async () => {
 		const sessionPath = await createSessionFile("foo");
 		// A distinct primary whose name extends this session's basename.
 		const siblingPath = await createSessionFile("foo.jsonl.copy");
-		const siblingBackup = `${siblingPath}.1234567890.bak`;
+		// A valid 16-char Snowflake suffix: a short one would be rejected by
+		// Snowflake.valid() and the fixture would never reach the primary-basename
+		// comparison, so a permissive prefix match would still pass this test.
+		const siblingBackup = `${siblingPath}.abcdef1234567890.bak`;
 		await fsp.copyFile(siblingPath, siblingBackup);
 
 		await storage.deleteSessionWithArtifacts(sessionPath);
