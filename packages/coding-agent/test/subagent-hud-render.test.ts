@@ -328,7 +328,9 @@ describe("subagent HUD lines", () => {
 			const frame = renderSubagentHudLines([parent, ...selected], 160, ancestry).subagents.join("\n");
 			const out = Bun.stripANSI(frame);
 			expect(out).toContain(`explorer ×${count}`);
-			expect(out).toContain("•".repeat(count));
+			expect(out).toMatch(
+				new RegExp(`explorer ×${count}✗?\\s+Child0(?:  Child\\d)*\\s+${"●".repeat(count)}\\s+\\d+`),
+			);
 			expect(out).toContain(count === 1 ? "Σ 7" : count === 3 ? "Σ 10" : "Σ 22");
 			for (const member of selected) expect(out).toContain(member.id.split(".").pop());
 			for (const member of selected) {
@@ -341,7 +343,7 @@ describe("subagent HUD lines", () => {
 								? "muted"
 								: "success";
 				const name = member.id.split(".").pop() ?? member.id;
-				expect(frame).toContain(theme.fg(color, "•"));
+				expect(frame).toContain(theme.fg(color, "●"));
 				expect(out).not.toMatch(new RegExp(`[●✗⊘] ${name}`));
 				expect(out).not.toMatch(new RegExp(`${name}[●✗⊘]`));
 			}
@@ -357,7 +359,7 @@ describe("subagent HUD lines", () => {
 		const out = Bun.stripANSI(renderSubagentHudLines([parent, ...members], 160, ancestry).subagents.join("\n"));
 		expect(out).toContain("Σ 22");
 		expect(out).toContain("explorer ×6");
-		expect(out).toContain("•".repeat(6));
+		expect(out).toMatch(/explorer ×6✗?\s+Child0  Child1  Child2  Child3  Child4  Child5\s+●●●●●●\s+15/);
 		const narrow = renderSubagentHudLines([parent, ...members, makeSession({ id: "DeepWork" })], 42, [
 			...ancestry,
 			{ id: "DeepWork", parentId: members[0].id },
@@ -407,9 +409,9 @@ describe("subagent HUD lines", () => {
 		const parent = makeSession({ id: "Lead" });
 		const kids = Array.from({ length: 12 }, (_, index) => makeSession({ id: `Lead.Kid${index}`, agent: "explorer" }));
 		for (const [count, strip] of [
-			[9, "•••••••••"],
-			[10, "•••••••+3"],
-			[12, "•••••••+5"],
+			[9, "●●●●●●●●●"],
+			[10, "●●●●●●●+3"],
+			[12, "●●●●●●●+5"],
 		] as const) {
 			const selected = kids.slice(0, count);
 			const ancestry = selected.map(kid => ({ id: kid.id, parentId: parent.id }));
@@ -435,9 +437,9 @@ describe("subagent HUD lines", () => {
 		const ancestry = sessions.slice(1).map(child => ({ id: child.id, parentId: "Lead" }));
 		const out = Bun.stripANSI(renderSubagentHudLines(sessions, 160, ancestry).subagents.join("\n"));
 		const lead = out.split("\n").find(line => line.includes("Lead")) ?? "";
-		expect(lead).toMatch(/Lead\s+••\s+Σ/);
+		expect(lead).toMatch(/Lead\s+●●\s+Σ/);
 		expect(out).toContain("explorer ×3");
-		expect(out).toMatch(/explorer ×3\s+M0  M1  M2\s+•••\s+0/);
+		expect(out).toMatch(/explorer ×3\s+M0  M1  M2\s+●●●\s+0/);
 	});
 
 	it("keeps nested Poteto parents full and explicit worker thresholds intact", () => {
