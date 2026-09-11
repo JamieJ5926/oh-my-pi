@@ -444,18 +444,47 @@ export class FileSessionStorage implements SessionStorage {
 	/**
 	 * Delete a session file and its artifacts directory.
 	 * Artifacts are stored in a sibling directory with the same name minus .jsonl extension.
-	 * Stale `<basename>.jsonl.<snowflake>.bak` rewrite backups are removed too, so a
-	 * later listing scan cannot promote one back to the primary path and silently
-	 * resurrect the deleted session.
+	 * Stale `<basename>.jsonl.<snowflake>.bak` rewrite backups are removed before and
+	 * after the primary unlink, so a later listing scan cannot promote one back to the
+	 * primary path and silently resurrect the deleted session.
 	 */
 	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
-		// Remove stale rewrite backups BEFORE the primary. Leftovers happen when the
-		// EPERM-rewrite cleanup unlink fails or a crash lands between the two renames.
-		// Sweeping first closes the resurrection window: a listing scan running
-		// recoverOrphanedBackups() after the primary unlink would otherwise promote a
-		// surviving backup back to the primary path and silently undo the deletion.
-		// Non-ENOENT cleanup failures propagate (fail-closed) like the artifact
-		// cleanup below, so callers never report success while recoverable data remains.
+		// Sweep before the primary: leftovers happen when the EPERM-rewrite cleanup
+		// unlink fails or a crash lands between the two renames. Sweeping first closes
+		// the resurrection window for a listing scan running recoverOrphanedBackups().
+		await this.#sweepStaleBackups(sessionPath, "Session file not deleted");
+
+		// Delete the session file itself
+		await this.unlink(sessionPath);
+
+		// Sweep once more: a rewrite racing deletion can land a fresh backup between
+		// the first sweep and the unlink, and the next scan would promote it back.
+		await this.#sweepStaleBackups(sessionPath, "Session file deleted");
+
+		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
+		const artifactsDir = sessionPath.slice(0, -6);
+
+		// Delete artifacts directory if it exists. Missing directories are fine, but
+		// surface real cleanup failures because the session file is already gone.
+		try {
+			await fsp.rm(artifactsDir, { recursive: true, force: true });
+		} catch (err) {
+			const error = toError(err);
+			throw new Error(
+				`Session file deleted but failed to remove artifacts directory ${artifactsDir}: ${error.message}`,
+				{
+					cause: error,
+				},
+			);
+		}
+	}
+
+	/**
+	 * Remove stale `<basename>.jsonl.<snowflake>.bak` rewrite backups for one primary.
+	 * Fail-closed: non-ENOENT failures reject so callers never report success while
+	 * recoverable data remains. ENOENT passes through for idempotent deletion.
+	 */
+	async #sweepStaleBackups(sessionPath: string, outcome: string): Promise<void> {
 		// Enumerate with a throwing scan: listFilesSync swallows scan errors into [],
 		// which would skip this loop and unlink the primary while backups survive.
 		const dir = path.dirname(sessionPath);
@@ -467,7 +496,7 @@ export class FileSessionStorage implements SessionStorage {
 			// Preserve ENOENT (absent directory): callers treat it as idempotent success.
 			if (isEnoent(err)) throw err;
 			const error = toError(err);
-			throw new Error(`Session file not deleted: failed to enumerate stale backups in ${dir}: ${error.message}`, {
+			throw new Error(`${outcome}: failed to enumerate stale backups in ${dir}: ${error.message}`, {
 				cause: error,
 			});
 		}
@@ -491,30 +520,10 @@ export class FileSessionStorage implements SessionStorage {
 			} catch (err) {
 				if (isEnoent(err)) continue;
 				const error = toError(err);
-				throw new Error(`Session file not deleted: failed to remove stale backup ${backup}: ${error.message}`, {
+				throw new Error(`${outcome}: failed to remove stale backup ${backup}: ${error.message}`, {
 					cause: error,
 				});
 			}
-		}
-
-		// Delete the session file itself
-		await this.unlink(sessionPath);
-
-		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
-		const artifactsDir = sessionPath.slice(0, -6);
-
-		// Delete artifacts directory if it exists. Missing directories are fine, but
-		// surface real cleanup failures because the session file is already gone.
-		try {
-			await fsp.rm(artifactsDir, { recursive: true, force: true });
-		} catch (err) {
-			const error = toError(err);
-			throw new Error(
-				`Session file deleted but failed to remove artifacts directory ${artifactsDir}: ${error.message}`,
-				{
-					cause: error,
-				},
-			);
 		}
 	}
 }

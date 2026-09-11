@@ -293,6 +293,25 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		expect((result as NodeJS.ErrnoException).code).toBe("ENOENT");
 	});
 
+	it("sweeps again after the primary so a racing rewrite cannot resurrect the session", async () => {
+		const sessionPath = await createSessionFile("race");
+		const content = await fsp.readFile(sessionPath, "utf8");
+		const racedBackup = `${sessionPath}.abcdef1234567890.bak`;
+		vi.spyOn(storage, "unlink").mockImplementation(async (target: string) => {
+			await fs.promises.unlink(target);
+			if (target === sessionPath) {
+				// A concurrent rewrite landing a fresh backup between sweep and unlink.
+				await Bun.write(racedBackup, content);
+			}
+		});
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(racedBackup)).toBe(false);
+		await expect(listSessions(tempDir, storage)).resolves.toEqual([]);
+	});
+
 	it("leaves backups of a different primary alone", async () => {
 		const sessionPath = await createSessionFile("foo");
 		// A distinct primary whose name extends this session's basename.
