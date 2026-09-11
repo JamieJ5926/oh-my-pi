@@ -50,10 +50,10 @@ const GOLDEN_COMPLETED = ["● SkillsTrack -> ● ScriptsTrack"];
 const GOLDEN_SUBAGENTS = [
 	"",
 	"Subagents",
-	"▾ ● RulesTrack        Nested rules synthesis                                             ••           Σ 2.1m  · ?",
-	"  ├─▾ ● RulesInner                                                                       •           Σ 82.3k  · ?",
-	"  │ └─▾ ● RulesSynth                                                                     •           Σ 39.7k  · ?",
-	"  │   └─ ● explorer ×3  RuleA  RuleB  RuleC                                              •••            1.2k  · ?",
+	"▾ ● RulesTrack        Nested rules synthesis                                             ●●           Σ 2.1m  · ?",
+	"  ├─▾ ● RulesInner                                                                       ●           Σ 82.3k  · ?",
+	"  │ └─▾ ● RulesSynth                                                                     ●           Σ 39.7k  · ?",
+	"  │   └─ ● explorer ×3  RuleA  RuleB  RuleC                                              ●●●            1.2k  · ?",
 	"  └─ ● Owner          Writes the merged file                                                              2m  · ?",
 ];
 

@@ -591,7 +591,7 @@ export function renderSubagentHudLines(
 	const kidsOf = (session: ObservableSession) => children.get(session.id) ?? [];
 	const subtreeTokens = (session: ObservableSession): number =>
 		tokens(session) + kidsOf(session).reduce((sum, kid) => sum + subtreeTokens(kid), 0);
-	/** Small `•` per owned child, coloured by that child's state; past nine, a dim `+N` tail keeps the cell at nine columns. */
+	/** Medium `●` per owned child, coloured by that child's state; past nine, a dim `+N` tail keeps the cell at nine columns. */
 	const stripOf = (states: ReadonlyArray<ObservableSession["status"]>): string => {
 		if (states.length === 0) return "";
 		const rank: Record<ObservableSession["status"], number> = { completed: 0, active: 1, failed: 2, aborted: 3 };
@@ -600,7 +600,7 @@ export function renderSubagentHudLines(
 		if (shown > SUBAGENT_HUD_STRIP_COLS) {
 			while (shown > 0 && shown + `+${sorted.length - shown}`.length > SUBAGENT_HUD_STRIP_COLS) shown--;
 		}
-		const glyphs = sorted.slice(0, shown).map(status => theme.fg(stateColours[status], "•"));
+		const glyphs = sorted.slice(0, shown).map(status => theme.fg(stateColours[status], "●"));
 		if (shown < sorted.length) glyphs.push(theme.fg("dim", `+${sorted.length - shown}`));
 		return glyphs.join("");
 	};
