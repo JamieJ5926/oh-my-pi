@@ -6371,6 +6371,18 @@ export class AuthStorage {
 					email: match.email,
 				};
 			}
+			if (list.availableCount <= 0) {
+				// Another client already consumed every credit: there is nothing
+				// to spend, so report `no_credit` before the final-credit consent
+				// gate below — prompting to approve a nonexistent "last" reset
+				// would mislead UI sessions and warn headless ones pointlessly.
+				return {
+					ok: false,
+					code: "no_credit",
+					accountId: match.accountId,
+					email: match.email,
+				};
+			}
 			if (options.requireFinalCreditConsent && list.availableCount <= 1) {
 				// The bank drained between planning and execution (another CLI or
 				// client redeemed concurrently): spending now would silently
