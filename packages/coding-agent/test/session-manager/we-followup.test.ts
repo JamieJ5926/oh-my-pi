@@ -4,7 +4,6 @@ import type { SessionStorageBackend } from "@oh-my-pi/pi-coding-agent/session/in
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { parseSessionContent } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import type { SessionTitleUpdate } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /** Fails the first session-file lock acquisition, then lets the rest through. */
@@ -140,19 +139,13 @@ describe("PRDeep.Own11574 WE follow-ups (review threads WE-e + WE-j)", () => {
 		storage.writeTextSync(durablePath, "header\n");
 		await storage.drain();
 
-		expect(
-			await conditionalDelete!.call(storage, metaPath, () => true),
-		).toBe(true);
+		expect(await conditionalDelete!.call(storage, metaPath, () => true)).toBe(true);
 		expect(backend.files.has(metaPath)).toBe(false);
 
-		expect(
-			await conditionalDelete!.call(storage, durablePath, () => false),
-		).toBe(false);
+		expect(await conditionalDelete!.call(storage, durablePath, () => false)).toBe(false);
 		expect(backend.files.has(durablePath)).toBe(true);
 
-		expect(
-			await conditionalDelete!.call(storage, "/sessions/missing.jsonl", () => true),
-		).toBe(false);
+		expect(await conditionalDelete!.call(storage, "/sessions/missing.jsonl", () => true)).toBe(false);
 	});
 
 	// WE-j end to end: a draft-only session on an indexed backend is dropped
