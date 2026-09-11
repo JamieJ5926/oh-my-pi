@@ -328,7 +328,7 @@ describe("subagent HUD lines", () => {
 			const frame = renderSubagentHudLines([parent, ...selected], 160, ancestry).subagents.join("\n");
 			const out = Bun.stripANSI(frame);
 			expect(out).toContain(`explorer ×${count}`);
-			expect(out).toContain(count === 6 ? "●●●●✗○" : "●".repeat(count));
+			expect(out).toContain("•".repeat(count));
 			expect(out).toContain(count === 1 ? "Σ 7" : count === 3 ? "Σ 10" : "Σ 22");
 			for (const member of selected) expect(out).toContain(member.id.split(".").pop());
 			for (const member of selected) {
@@ -340,20 +340,24 @@ describe("subagent HUD lines", () => {
 							: member.status === "aborted"
 								? "muted"
 								: "success";
-				const glyph =
-					member.status === "failed"
-						? theme.fg("error", "✗")
-						: member.status === "aborted"
-							? theme.styledSymbol("status.shadowed", "muted")
-							: theme.styledSymbol("status.enabled", color);
-				expect(frame).toContain(`${glyph} ${member.id.split(".").pop()}`);
+				const name = member.id.split(".").pop() ?? member.id;
+				expect(frame).toContain(theme.fg(color, "•"));
+				expect(out).not.toMatch(new RegExp(`[●✗⊘] ${name}`));
+				expect(out).not.toMatch(new RegExp(`${name}[●✗⊘]`));
+			}
+			if (count === 6) {
+				expect(frame).toContain(
+					`${theme.styledSymbol("status.enabled", "error")} ${theme.bold("explorer ×6")}${theme.fg("error", "✗")}`,
+				);
+			} else {
+				expect(out).not.toContain(`explorer ×${count}✗`);
 			}
 		}
 		parent.status = "completed";
 		const out = Bun.stripANSI(renderSubagentHudLines([parent, ...members], 160, ancestry).subagents.join("\n"));
 		expect(out).toContain("Σ 22");
 		expect(out).toContain("explorer ×6");
-		expect(out).toContain("●●●●✗○");
+		expect(out).toContain("•".repeat(6));
 		const narrow = renderSubagentHudLines([parent, ...members, makeSession({ id: "DeepWork" })], 42, [
 			...ancestry,
 			{ id: "DeepWork", parentId: members[0].id },
@@ -363,6 +367,79 @@ describe("subagent HUD lines", () => {
 		for (let index = 1; index < 6; index++) expect(Bun.stripANSI(narrow.join("\n"))).not.toContain(`Child${index}`);
 		expect(Bun.stripANSI(narrow.join("\n"))).toContain("DeepWork");
 	});
+	it("marks a failed lane with a red ✗ and an aborted lane with a dim ⊘ after the name", () => {
+		const parent = makeSession({ id: "Lead", description: "parent" });
+		const children = [
+			makeSession({ id: "Lead.Live", agent: "explorer", description: "live work" }),
+			makeSession({ id: "Lead.Broken", agent: "implementer", status: "failed", description: "gave up" }),
+			makeSession({ id: "Lead.Stopped", agent: "researcher", status: "aborted", description: "cancelled" }),
+			makeSession({ id: "Lead.Finished", agent: "reviewer", status: "completed", description: "idle row" }),
+		];
+		const ancestry = children.map(child => ({ id: child.id, parentId: parent.id }));
+		const frame = renderSubagentHudLines([parent, ...children], 200, ancestry, children.length).subagents.join("\n");
+		const out = Bun.stripANSI(frame);
+		expect(frame).toContain(`${theme.styledSymbol("status.enabled", "warning")} ${theme.bold("Live")}`);
+		expect(frame).toContain(
+			`${theme.styledSymbol("status.enabled", "error")} ${theme.bold("Broken")}${theme.fg("error", "✗")}`,
+		);
+		expect(frame).toContain(
+			`${theme.styledSymbol("status.enabled", "muted")} ${theme.bold("Stopped")}${theme.fg("dim", "⊘")}`,
+		);
+		expect(frame).toContain(`${theme.styledSymbol("status.enabled", "success")} ${theme.fg("dim", "Finished")}`);
+		expect(out).toContain("Broken✗");
+		expect(out).toContain("Stopped⊘");
+		expect(out).toMatch(/Finished\s+idle row/);
+	});
+
+	it("leaves the strip cell blank on a leaf row", () => {
+		const parent = makeSession({ id: "Lead" });
+		const leaf = makeSession({ id: "Lead.Leaf", agent: "explorer", description: "no children" });
+		const frame = renderSubagentHudLines([parent, leaf], 160, [{ id: leaf.id, parentId: parent.id }], 4)
+			.subagents.join("\n");
+		const leafLine = frame.split("\n").find(line => Bun.stripANSI(line).includes("Leaf"));
+		if (!leafLine) throw new Error("Expected a leaf row");
+		expect(Bun.stripANSI(leafLine)).toMatch(/Leaf\s+no children\s+0\s+· \?/);
+		expect(leafLine).not.toContain("•");
+		expect(Bun.stripANSI(frame)).not.toContain("—");
+	});
+
+	it("keeps the strip cell at nine columns with a legible +N tail and lists member names without state dots", () => {
+		const parent = makeSession({ id: "Lead" });
+		const kids = Array.from({ length: 12 }, (_, index) => makeSession({ id: `Lead.Kid${index}`, agent: "explorer" }));
+		for (const [count, strip] of [
+			[9, "•••••••••"],
+			[10, "•••••••+3"],
+			[12, "•••••••+5"],
+		] as const) {
+			const selected = kids.slice(0, count);
+			const ancestry = selected.map(kid => ({ id: kid.id, parentId: parent.id }));
+			const frame = renderSubagentHudLines([parent, ...selected], 200, ancestry).subagents.join("\n");
+			const out = Bun.stripANSI(frame);
+			expect(out).toContain(`explorer ×${count}`);
+			expect(out).toContain(strip);
+			expect(out).not.toContain("…");
+			for (const kid of selected) {
+				const name = kid.id.split(".").pop() ?? kid.id;
+				expect(out).not.toContain(`• ${name}`);
+				expect(out).not.toMatch(new RegExp(`${name}[●✗⊘]`));
+			}
+			if (count > 9) expect(frame).toContain(theme.fg("dim", strip.slice(-2)));
+		}
+	});
+
+	it("counts one strip dot per rendered child row, not per raw child", () => {
+		const parent = makeSession({ id: "Lead" });
+		const members = Array.from({ length: 3 }, (_, index) => makeSession({ id: `Lead.M${index}`, agent: "explorer" }));
+		const owner = makeSession({ id: "Lead.Owner", agent: "owner" });
+		const sessions = [parent, owner, ...members];
+		const ancestry = sessions.slice(1).map(child => ({ id: child.id, parentId: "Lead" }));
+		const out = Bun.stripANSI(renderSubagentHudLines(sessions, 160, ancestry).subagents.join("\n"));
+		const lead = out.split("\n").find(line => line.includes("Lead")) ?? "";
+		expect(lead).toMatch(/Lead\s+••\s+Σ/);
+		expect(out).toContain("explorer ×3");
+		expect(out).toMatch(/explorer ×3\s+M0  M1  M2\s+•••\s+0/);
+	});
+
 	it("keeps nested Poteto parents full and explicit worker thresholds intact", () => {
 		for (const role of ["poteto-agent", "poteto-agent-deep"]) {
 			const sessions = [
@@ -378,10 +455,11 @@ describe("subagent HUD lines", () => {
 			expect(out).toMatch(/Lead.*Parent detail/);
 			expect(out).not.toContain(`${role} x1`);
 			expect(out).toContain("explorer ×1");
-			expect(out).toContain("● Worker");
+			expect(out).toMatch(/explorer ×1\s+Worker/);
 			const expanded = Bun.stripANSI(renderSubagentHudLines(sessions, 160, ancestry, 4).subagents.join("\n"));
 			expect(expanded).not.toContain("explorer x1");
-			expect(expanded).toMatch(/Worker\s+—/);
+			expect(expanded).toMatch(/Worker\s+0\s+· \?/);
+			expect(expanded).not.toContain("—");
 		}
 	});
 	it("draws branches and continuing guides through nested rows to the next parent", () => {
@@ -391,7 +469,7 @@ describe("subagent HUD lines", () => {
 		);
 		expect(out).toContain("▾ ● Lead");
 		expect(out).toContain("│ └─ ● task ×1");
-		expect(out).toContain("● Child");
+		expect(out).toMatch(/task ×1\s+Child/);
 		expect(out).toContain("● Peer");
 		const children = Array.from({ length: 6 }, (_, index) =>
 			makeSession({ id: `Lead.Child${index}`, agent: "explorer" }),
@@ -404,7 +482,8 @@ describe("subagent HUD lines", () => {
 			).subagents.join("\n"),
 		);
 		expect(frame).toContain("│ └─ ● explorer ×6");
-		expect(frame).toContain("● Child0");
+		expect(frame).toMatch(/explorer ×6\s+Child0/);
+		expect(frame).not.toContain("● Child0");
 		if (process.env.SUBAGENT_HUD_FRAME) console.log(frame);
 	});
 	it("accounts cycle-broken roots independently for outcomes and active descendants", () => {
@@ -495,7 +574,7 @@ describe("subagent HUD lines", () => {
 			expect(text).toContain("Middle");
 			expect(text).toContain("1 active below");
 			expect(reopened.subagents.join("\n")).toContain(
-				`${theme.styledSymbol("status.enabled", "success")} ${theme.bold("Lead")}`,
+				`${theme.styledSymbol("status.enabled", "success")} ${theme.fg("dim", "Lead")}`,
 			);
 			if (!detached) expect(text).not.toContain("Child");
 		}
@@ -556,7 +635,8 @@ describe("subagent HUD lines", () => {
 		const sections = renderSubagentHudLines(sessions, 120, ancestry);
 		expect(sections.completed).toEqual([]);
 		const text = Bun.stripANSI(sections.subagents.join("\n"));
-		expect(text).toMatch(/Worker\s+—/);
+		expect(text).toMatch(/Worker\s+0\s+· \?/);
+		expect(text).not.toContain("—");
 		expect(text).not.toContain("explorer x1");
 		expect(text).toContain("1 active below");
 		expect(text).not.toContain("Deep");
@@ -662,7 +742,8 @@ describe("subagent HUD lines", () => {
 		expect(text).toMatch(/Owner.*Before child/);
 		expect(text.match(/Owner/g)).toHaveLength(1);
 		expect(text).toContain("explorer ×3");
-		expect(text).toContain("● ExA  ● ExB  ● ExC");
+		expect(text).toContain("ExA  ExB  ExC");
+		expect(text).not.toContain("● ExA");
 		expect(text).not.toContain("ExA ⟦");
 	});
 

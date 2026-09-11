@@ -220,7 +220,7 @@ import { sanitizeStatusText } from "./shared";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
 import { clearMermaidCache } from "./theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerText } from "./theme/shimmer";
-import type { Theme } from "./theme/theme";
+import type { Theme, ThemeColor } from "./theme/theme";
 import {
 	getEditorTheme,
 	getMarkdownTheme,
@@ -578,32 +578,30 @@ export function renderSubagentHudLines(
 	const isSubtreeActive = (session: ObservableSession) =>
 		session.status === "active" || (activeBelow.get(session.id) ?? 0) > 0;
 	const roleOf = (session: ObservableSession) => session.agent ?? session.progress?.agent ?? "task";
-	const dot = (status: ObservableSession["status"]) =>
-		theme.styledSymbol(
-			"status.enabled",
-			status === "active" ? "warning" : status === "completed" ? "success" : status === "failed" ? "error" : "muted",
-		);
+	/** Own-state colour per lane status: yellow running, green done, red failed, dim aborted. */
+	const stateColours: Record<ObservableSession["status"], ThemeColor> = {
+		active: "warning",
+		completed: "success",
+		failed: "error",
+		aborted: "muted",
+	};
+	const dot = (status: ObservableSession["status"]) => theme.styledSymbol("status.enabled", stateColours[status]);
 	const localName = (session: ObservableSession) => session.id.split(".").pop() ?? session.id;
 	const tokens = (session: ObservableSession) => session.progress?.tokens ?? 0;
-	const stateGlyph = (status: ObservableSession["status"]): string =>
-		status === "failed"
-			? theme.fg("error", "✗")
-			: status === "aborted"
-				? theme.styledSymbol("status.shadowed", "muted")
-				: theme.styledSymbol("status.enabled", status === "active" ? "warning" : "success");
 	const kidsOf = (session: ObservableSession) => children.get(session.id) ?? [];
 	const subtreeTokens = (session: ObservableSession): number =>
 		tokens(session) + kidsOf(session).reduce((sum, kid) => sum + subtreeTokens(kid), 0);
-	const stripFor = (session: ObservableSession): string => {
-		const kids = kidsOf(session);
-		if (kids.length === 0) return "—";
+	/** Small `•` per owned child, coloured by that child's state; past nine, a dim `+N` tail keeps the cell at nine columns. */
+	const stripOf = (states: ReadonlyArray<ObservableSession["status"]>): string => {
+		if (states.length === 0) return "";
 		const rank: Record<ObservableSession["status"], number> = { completed: 0, active: 1, failed: 2, aborted: 3 };
-		const sorted = [...kids].sort((a, b) => rank[a.status] - rank[b.status]);
-		const glyphs = sorted.slice(0, SUBAGENT_HUD_STRIP_COLS).map(kid => stateGlyph(kid.status));
-		if (sorted.length > SUBAGENT_HUD_STRIP_COLS) {
-			glyphs.length = SUBAGENT_HUD_STRIP_COLS - 1;
-			glyphs.push(`+${sorted.length - glyphs.length}`);
+		const sorted = [...states].sort((a, b) => rank[a] - rank[b]);
+		let shown = sorted.length;
+		if (shown > SUBAGENT_HUD_STRIP_COLS) {
+			while (shown > 0 && shown + `+${sorted.length - shown}`.length > SUBAGENT_HUD_STRIP_COLS) shown--;
 		}
+		const glyphs = sorted.slice(0, shown).map(status => theme.fg(stateColours[status], "•"));
+		if (shown < sorted.length) glyphs.push(theme.fg("dim", `+${sorted.length - shown}`));
 		return glyphs.join("");
 	};
 	const markerFor = (session: ObservableSession): string => {
@@ -637,7 +635,10 @@ export function renderSubagentHudLines(
 		model: string;
 	}): string => {
 		const marker = row.marker ? `${row.marker} ` : " ";
-		const left = `${marker}${stateGlyph(row.state)} ${theme.bold(row.name)}`;
+		const name = row.state === "completed" ? theme.fg("dim", row.name) : theme.bold(row.name);
+		const outcome =
+			row.state === "failed" ? theme.fg("error", "✗") : row.state === "aborted" ? theme.fg("dim", "⊘") : "";
+		const left = `${marker}${dot(row.state)} ${name}${outcome}`;
 		const prefixCols = row.depth === 0 ? 0 : row.depth * 2 + 2;
 		const descStart = Math.max(SUBAGENT_HUD_DESC_COL, prefixCols + visibleWidth(left) + SUBAGENT_HUD_GUTTER);
 		const descCols = Math.max(
@@ -658,7 +659,12 @@ export function renderSubagentHudLines(
 	const delegatingRoles: Record<string, true> = { "poteto-agent": true, "poteto-agent-deep": true, owner: true };
 	const ownRow = (session: ObservableSession): boolean =>
 		delegatingRoles[roleOf(session)] === true || delegators.has(session.id);
-	const renderChildren = (parent: string | undefined, depth: number): void => {
+	type ChildRow = { group: readonly ObservableSession[] | undefined; session: ObservableSession };
+	/**
+	 * The child rows `parent` draws, in emission order: a collapsed same-role group is one entry.
+	 * The top-level settled-row promotion stays with the caller, which owns the completed list.
+	 */
+	const childRowsOf = (parent: string | undefined): ChildRow[] => {
 		const siblings = children.get(parent) ?? [];
 		const groups = new Map<string, ObservableSession[]>();
 		if (parent !== undefined)
@@ -669,6 +675,7 @@ export function renderSubagentHudLines(
 				if (group) group.push(session);
 				else groups.set(role, [session]);
 			}
+		const rows: ChildRow[] = [];
 		const emitted = new Set<string>();
 		for (const session of siblings) {
 			const role = roleOf(session);
@@ -676,20 +683,25 @@ export function renderSubagentHudLines(
 			if (group && group.length > siblingCollapseThreshold) {
 				if (emitted.has(role)) continue;
 				emitted.add(role);
-				if (!group.some(isSubtreeActive)) continue;
-				const counts = { active: 0, completed: 0, failed: 0, aborted: 0 };
-				let sum = 0;
-				for (const member of group) {
-					counts[member.status]++;
-					sum += tokens(member);
-				}
-				const state = counts.failed
-					? "failed"
-					: counts.active
-						? "active"
-						: counts.aborted
-							? "aborted"
-							: "completed";
+				if (group.some(isSubtreeActive)) rows.push({ group, session });
+				continue;
+			}
+			rows.push({ group: undefined, session });
+		}
+		return rows;
+	};
+	const aggregateState = (group: readonly ObservableSession[]): ObservableSession["status"] => {
+		const counts: Record<ObservableSession["status"], number> = { active: 0, completed: 0, failed: 0, aborted: 0 };
+		for (const member of group) counts[member.status]++;
+		return counts.failed ? "failed" : counts.active ? "active" : counts.aborted ? "aborted" : "completed";
+	};
+	/** One `•` per child row this session owns: a collapsed group contributes one dot in its aggregate state. */
+	const stripFor = (session: ObservableSession): string =>
+		stripOf(childRowsOf(session.id).map(row => (row.group ? aggregateState(row.group) : row.session.status)));
+	const renderChildren = (parent: string | undefined, depth: number): void => {
+		for (const { group, session } of childRowsOf(parent)) {
+			if (group) {
+				const role = roleOf(group[0]!);
 				const groupModel = modelCell(group[0]!);
 				activeRows.depths.push(depth);
 				activeRows.lines.push(
@@ -697,11 +709,11 @@ export function renderSubagentHudLines(
 						renderRow({
 							depth,
 							marker: "",
-							state,
+							state: aggregateState(group),
 							name: `${role} ×${group.length}`,
-							description: group.map(member => `${stateGlyph(member.status)} ${localName(member)}`).join("  "),
-							strip: group.map(member => stateGlyph(member.status)).join(""),
-							token: formatHudTokenCount(sum),
+							description: group.map(member => localName(member)).join("  "),
+							strip: stripOf(group.map(member => member.status)),
+							token: formatHudTokenCount(group.reduce((sum, member) => sum + tokens(member), 0)),
 							model: group.every(member => modelCell(member) === groupModel) ? groupModel : "···",
 						}),
 						Math.max(0, columns),

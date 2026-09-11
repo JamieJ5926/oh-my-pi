@@ -7,6 +7,10 @@ import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task";
 // Golden render accepted by Jamie on 2026-09-08 ("no its right", pane w2B:pDQ, build cf46fb59).
 // Changing this snapshot requires a brief that quotes the ask changing the HUD.
 // Standing order 14, reviews/orchestrate/2026-09-08-autonomous-repairs/preferences.md.
+// Ask changing this snapshot, Jamie's FINAL subagents-HUD row spec of 2026-09-11, verbatim: "Row = [▾/▸ only if
+// children] ● (BIG own-state dot: yellow running, green done, red failed) Name  description(flex, truncate last)
+// strip  tokens  model-emoji" — the strip counts the child rows a lane draws (a collapsed same-role group is one)
+// and the members a group row folds in; member names carry no dots, leaves blank.
 
 function session(id: string, agent: string, status: ObservableSession["status"], tokens: number, description?: string): ObservableSession {
 	const progress: AgentProgress = {
@@ -46,11 +50,11 @@ const GOLDEN_COMPLETED = ["● SkillsTrack -> ● ScriptsTrack"];
 const GOLDEN_SUBAGENTS = [
 	"",
 	"Subagents",
-	"▾ ● RulesTrack        Nested rules synthesis                                             ●●           Σ 2.1m  · ?",
-	"  ├─▾ ● RulesInner                                                                       ●           Σ 82.3k  · ?",
-	"  │ └─▾ ● RulesSynth                                                                     ●●●         Σ 39.7k  · ?",
-	"  │   └─ ● explorer ×3  ● RuleA  ● RuleB  ● RuleC                                        ●●●            1.2k  · ?",
-	"  └─ ● Owner          Writes the merged file                                             —                2m  · ?",
+	"▾ ● RulesTrack        Nested rules synthesis                                             ••           Σ 2.1m  · ?",
+	"  ├─▾ ● RulesInner                                                                       •           Σ 82.3k  · ?",
+	"  │ └─▾ ● RulesSynth                                                                     •           Σ 39.7k  · ?",
+	"  │   └─ ● explorer ×3  RuleA  RuleB  RuleC                                              •••            1.2k  · ?",
+	"  └─ ● Owner          Writes the merged file                                                              2m  · ?",
 ];
 
 describe("subagent HUD golden render", () => {
