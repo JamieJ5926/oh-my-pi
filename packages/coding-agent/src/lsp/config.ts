@@ -576,14 +576,16 @@ const TASKFILE_BASENAMES: Record<string, true> = {
 /** First bytes read when sniffing a YAML file for Ansible markers. */
 const ANSIBLE_SNIFF_BYTES = 8192;
 
-/** Top-level Ansible keys and module prefixes that identify play/task content. */
+/** Top-level Ansible keys and module prefixes that identify play/task content. `import_playbook` covers aggregator playbooks whose only entry imports another play. */
 const ANSIBLE_CONTENT_SIGNAL =
-	/(^|\n)\s*(-\s+)?(hosts|tasks|roles|handlers|pre_tasks|post_tasks|gather_facts)\s*:|become\s*:\s*(true|yes)|ansible\.builtin\./;
+	/(^|\n)\s*(-\s+)?(hosts|tasks|roles|handlers|pre_tasks|post_tasks|gather_facts|import_playbook)\s*:|become\s*:\s*(true|yes)|ansible\.builtin\./;
 
 /** Top-level Kubernetes manifest keys. Anchored to column 0 so playbooks that embed an inline manifest under `definition:` (indented keys) are not mistaken for manifests. */
 const KUBERNETES_SIGNAL = /^apiVersion\s*:\s*\S[\s\S]*?^kind\s*:\s*\S/m;
 const WORKFLOW_SIGNAL = /^\s*on\s*:/m;
 const WORKFLOW_JOBS_SIGNAL = /^\s*jobs\s*:/m;
+/** Top-level Compose key, anchored to column 0 so nested `services:` keys inside playbooks cannot veto them. */
+const COMPOSE_SIGNAL = /^services\s*:/m;
 
 /**
  * Optional classifier inputs for Ansible file detection.
@@ -637,13 +639,15 @@ function readFileHead(filePath: string): string | null {
 /**
  * True when a YAML file looks like Ansible content. ansible-language-server
  * only understands playbooks, roles, and inventory; every other YAML file in
- * an Ansible project (Kubernetes manifests, workflows, Compose files) must
- * fall through to the generic YAML server instead of being claimed by
- * extension alone. Unreadable files fall back to the path signal only.
+ * an Ansible project (Kubernetes manifests, workflows, Compose files,
+ * Taskfiles) must fall through to the generic YAML server instead of being
+ * claimed by extension alone. Unreadable files fall back to the path signal
+ * only.
  *
- * Ansible content wins over the manifest/workflow vetoes so playbooks that
- * embed inline manifests stay Ansible; manifests only veto files without
- * Ansible content, and the veto applies to path-matched files too.
+ * Definite non-Ansible document markers (Kubernetes manifests, workflows,
+ * Compose files) win over the content signal so nested Ansible-looking keys
+ * inside those documents cannot claim them; the vetoes only fire on
+ * top-level markers, so playbooks embedding inline manifests stay Ansible.
  */
 export function isAnsibleFile(filePath: string, options?: AnsibleFileOptions): boolean {
 	const lowered = filePath.toLowerCase();
@@ -652,9 +656,10 @@ export function isAnsibleFile(filePath: string, options?: AnsibleFileOptions): b
 	if (TASKFILE_BASENAMES[base]) return false;
 	const head = options?.content ?? readFileHead(filePath);
 	if (head === null) return hasAnsiblePathSignal(lowered, options?.projectRoot);
-	if (ANSIBLE_CONTENT_SIGNAL.test(head)) return true;
 	if (KUBERNETES_SIGNAL.test(head)) return false;
 	if (WORKFLOW_SIGNAL.test(head) && WORKFLOW_JOBS_SIGNAL.test(head)) return false;
+	if (COMPOSE_SIGNAL.test(head)) return false;
+	if (ANSIBLE_CONTENT_SIGNAL.test(head)) return true;
 	return hasAnsiblePathSignal(lowered, options?.projectRoot);
 }
 

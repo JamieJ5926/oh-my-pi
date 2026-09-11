@@ -5445,4 +5445,51 @@ describe("ansible lsp", () => {
 			tempDir.removeSync();
 		}
 	});
+
+	it("routes import-only aggregator playbooks to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-aggregator-");
+		try {
+			const filePath = path.join(tempDir.path(), "deploy.yml");
+			fs.writeFileSync(filePath, "- import_playbook: web.yml\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+			expect(names.indexOf("ansible")).toBeLessThan(names.indexOf("yamlls"));
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not let nested custom-resource fields bypass the manifest veto", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-cr-");
+		try {
+			const filePath = path.join(tempDir.path(), "cr.yml");
+			fs.writeFileSync(
+				filePath,
+				"apiVersion: example.com/v1\nkind: WebSite\nmetadata:\n  name: web\nspec:\n  roles:\n    - frontend\n  tasks:\n    - deploy\n",
+			);
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+			expect(names).not.toContain("ansible");
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not route Compose files under ansible paths to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-composepath-");
+		try {
+			const dir = path.join(tempDir.path(), "roles", "web", "files");
+			fs.mkdirSync(dir, { recursive: true });
+			const filePath = path.join(dir, "docker-compose.yml");
+			fs.writeFileSync(filePath, "services:\n  web:\n    image: nginx\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+			expect(names).not.toContain("ansible");
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
 });
