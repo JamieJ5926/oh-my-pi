@@ -5492,4 +5492,35 @@ describe("ansible lsp", () => {
 			tempDir.removeSync();
 		}
 	});
+
+	it("does not route unrelated YAML with deeply nested ansible keys to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-nested-");
+		try {
+			const filePath = path.join(tempDir.path(), "application.yml");
+			fs.writeFileSync(filePath, "security:\n  user:\n    roles:\n      - admin\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+			expect(names).not.toContain("ansible");
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("vetoes manifests with kind before apiVersion", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-kindfirst-");
+		try {
+			const filePath = path.join(tempDir.path(), "cr.yml");
+			fs.writeFileSync(
+				filePath,
+				"kind: WebSite\napiVersion: example.com/v1\nmetadata:\n  name: web\nspec:\n  tasks:\n    - deploy\n",
+			);
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+			expect(names).not.toContain("ansible");
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
 });

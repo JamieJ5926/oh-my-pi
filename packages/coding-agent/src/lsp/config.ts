@@ -576,12 +576,13 @@ const TASKFILE_BASENAMES: Record<string, true> = {
 /** First bytes read when sniffing a YAML file for Ansible markers. */
 const ANSIBLE_SNIFF_BYTES = 8192;
 
-/** Top-level Ansible keys and module prefixes that identify play/task content. `import_playbook` covers aggregator playbooks whose only entry imports another play. */
+/** Ansible play/task keys. Indentation is capped at two spaces so play/task roots match while deeply nested keys in unrelated YAML (Spring, Helm values) do not; module markers below stay indentation-free. */
 const ANSIBLE_CONTENT_SIGNAL =
-	/(^|\n)\s*(-\s+)?(hosts|tasks|roles|handlers|pre_tasks|post_tasks|gather_facts|import_playbook)\s*:|become\s*:\s*(true|yes)|ansible\.builtin\./;
+	/(^|\n) {0,2}(-\s+)?(hosts|tasks|roles|handlers|pre_tasks|post_tasks|gather_facts|import_playbook)\s*:|become\s*:\s*(true|yes)|ansible\.builtin\./;
 
-/** Top-level Kubernetes manifest keys. Anchored to column 0 so playbooks that embed an inline manifest under `definition:` (indented keys) are not mistaken for manifests. */
-const KUBERNETES_SIGNAL = /^apiVersion\s*:\s*\S[\s\S]*?^kind\s*:\s*\S/m;
+/** Top-level Kubernetes manifest keys, tested independently so key order cannot matter. Both stay anchored to column 0 so playbooks that embed an inline manifest under `definition:` (indented keys) are not mistaken for manifests. */
+const KUBERNETES_API_SIGNAL = /^apiVersion\s*:\s*\S/m;
+const KUBERNETES_KIND_SIGNAL = /^kind\s*:\s*\S/m;
 const WORKFLOW_SIGNAL = /^\s*on\s*:/m;
 const WORKFLOW_JOBS_SIGNAL = /^\s*jobs\s*:/m;
 /** Top-level Compose key, anchored to column 0 so nested `services:` keys inside playbooks cannot veto them. */
@@ -656,7 +657,7 @@ export function isAnsibleFile(filePath: string, options?: AnsibleFileOptions): b
 	if (TASKFILE_BASENAMES[base]) return false;
 	const head = options?.content ?? readFileHead(filePath);
 	if (head === null) return hasAnsiblePathSignal(lowered, options?.projectRoot);
-	if (KUBERNETES_SIGNAL.test(head)) return false;
+	if (KUBERNETES_API_SIGNAL.test(head) && KUBERNETES_KIND_SIGNAL.test(head)) return false;
 	if (WORKFLOW_SIGNAL.test(head) && WORKFLOW_JOBS_SIGNAL.test(head)) return false;
 	if (COMPOSE_SIGNAL.test(head)) return false;
 	if (ANSIBLE_CONTENT_SIGNAL.test(head)) return true;
