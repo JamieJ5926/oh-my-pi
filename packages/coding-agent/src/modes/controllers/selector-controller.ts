@@ -854,9 +854,7 @@ export class SelectorController {
 			const current = this.ctx.session.model;
 			// Reselecting the active model preserves the live session effort: the
 			// picker advertises it on that row, so Enter must not silently fall
-			// back to the role default (P2 #11330, reselect-active-model thread).
-			const reselecting =
-				thinkingLevel === undefined && current !== undefined && modelsAreEqual(current, model);
+			const reselecting = thinkingLevel === undefined && current !== undefined && modelsAreEqual(current, model);
 			const preserved = reselecting ? this.ctx.session.configuredThinkingLevel() : undefined;
 			const level = thinkingLevel ?? preserved ?? this.ctx.session.resolveTemporaryModelThinkingLevel(model);
 			await this.ctx.session.setModelTemporary(model, level);
