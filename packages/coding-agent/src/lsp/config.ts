@@ -565,6 +565,13 @@ const ANSIBLE_BASENAMES: Record<string, true> = {
 	"site.yml": true,
 	"site.yaml": true,
 };
+/** Taskfile basenames reserved by Task (taskfile.dev). A Taskfile's top-level `tasks:` map is Task syntax, never Ansible. */
+const TASKFILE_BASENAMES: Record<string, true> = {
+	"taskfile.yml": true,
+	"taskfile.yaml": true,
+	"taskfile.dist.yml": true,
+	"taskfile.dist.yaml": true,
+};
 
 /** First bytes read when sniffing a YAML file for Ansible markers. */
 const ANSIBLE_SNIFF_BYTES = 8192;
@@ -640,7 +647,9 @@ function readFileHead(filePath: string): string | null {
  */
 export function isAnsibleFile(filePath: string, options?: AnsibleFileOptions): boolean {
 	const lowered = filePath.toLowerCase();
-	if (ANSIBLE_BASENAMES[path.basename(lowered)]) return true;
+	const base = path.basename(lowered);
+	if (ANSIBLE_BASENAMES[base]) return true;
+	if (TASKFILE_BASENAMES[base]) return false;
 	const head = options?.content ?? readFileHead(filePath);
 	if (head === null) return hasAnsiblePathSignal(lowered, options?.projectRoot);
 	if (ANSIBLE_CONTENT_SIGNAL.test(head)) return true;

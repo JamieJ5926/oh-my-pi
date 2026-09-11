@@ -5432,4 +5432,17 @@ describe("ansible lsp", () => {
 			getLspServerForFile(config, filePath, { content: "- hosts: all\n  tasks:\n    - name: ping\n" })?.[0],
 		).toBe("ansible");
 	});
+	it("does not route Taskfiles to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-taskfile-");
+		try {
+			const filePath = path.join(tempDir.path(), "Taskfile.yml");
+			fs.writeFileSync(filePath, "version: '3'\ntasks:\n  build:\n    cmds:\n      - echo hi\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+			expect(names).not.toContain("ansible");
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
 });
