@@ -691,14 +691,9 @@ function recoverDeliveredPayload(error: unknown): string | undefined {
 	// be a success token. A single ISSUES/BLOCKED/FAIL/ERROR on the resolution chain — the
 	// PASS/ISSUES contradiction, a top-level ISSUES beside a nested child PASS — keeps the payload
 	// on the abort path; so does the absence of any success token (a genuine cancel, a plain error).
-	const tokens = [
-		data?.status,
-		data?.verdict,
-		result?.status,
-		result?.verdict,
-		parsed.status,
-		parsed.verdict,
-	].filter((token): token is string => typeof token === "string");
+	const tokens = [data?.status, data?.verdict, result?.status, result?.verdict, parsed.status, parsed.verdict].filter(
+		(token): token is string => typeof token === "string",
+	);
 	if (tokens.length === 0) return undefined;
 	return tokens.every(token => Object.hasOwn(SUCCESS_OUTCOME_TOKENS, token.toLowerCase())) ? text : undefined;
 }
