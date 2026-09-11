@@ -27,7 +27,7 @@ class SignalingDeleteStorage extends FileSessionStorage {
 
 	override deleteSessionWithArtifactsIf(
 		sessionPath: string,
-		shouldDelete: (content: string) => boolean,
+		shouldDelete: (content: string, complete: boolean) => boolean,
 	): Promise<boolean> {
 		fs.writeFileSync(this.#attemptPath, "");
 		return super.deleteSessionWithArtifactsIf(sessionPath, shouldDelete);
@@ -46,7 +46,7 @@ class LateDraftStorage extends FileSessionStorage {
 
 	override deleteSessionWithArtifactsIf(
 		sessionPath: string,
-		shouldDelete: (content: string) => boolean,
+		shouldDelete: (content: string, complete: boolean) => boolean,
 	): Promise<boolean> {
 		if (this.#draftPath && this.#draftText.length > 0) fs.writeFileSync(this.#draftPath, this.#draftText);
 		return super.deleteSessionWithArtifactsIf(sessionPath, shouldDelete);
@@ -184,6 +184,57 @@ class GcAfterUnlockedPublishStorage extends FileSessionStorage {
 		this.#sessionFile = null;
 		fs.rmSync(sessionFile, { force: true });
 		fs.rmSync(sessionFile.slice(0, -6), { recursive: true, force: true });
+	}
+}
+
+/**
+ * Deletes the session file the instant a writer opens it for appending while
+ * the session-file lock is not held, standing in for the close-time GC another
+ * terminal still holds. A locked append is left alone.
+ */
+class GcOnUnlockedAppendStorage extends FileSessionStorage {
+	#sessionFile: string | null = null;
+	#lockHeld = false;
+
+	armGc(sessionFile: string): void {
+		this.#sessionFile = sessionFile;
+	}
+
+	override withSessionFileLockSync<T>(sessionPath: string, operation: () => T): T {
+		this.#lockHeld = true;
+		try {
+			return super.withSessionFileLockSync(sessionPath, operation);
+		} finally {
+			this.#lockHeld = false;
+		}
+	}
+
+	override openWriter(
+		path: string,
+		options?: { flags?: "a" | "w"; onError?: (err: Error) => void },
+	): SessionStorageWriter {
+		if (!this.#lockHeld && this.#sessionFile !== null && path === this.#sessionFile) {
+			const sessionFile = this.#sessionFile;
+			this.#sessionFile = null;
+			fs.rmSync(sessionFile, { force: true });
+			fs.rmSync(sessionFile.slice(0, -6), { recursive: true, force: true });
+		}
+		return super.openWriter(path, options);
+	}
+}
+
+/** Records what the close-time GC handed to the locked delete predicate. */
+class RecordingDeleteStorage extends FileSessionStorage {
+	readonly probes: Array<{ bytes: number; complete: boolean }> = [];
+
+	override deleteSessionWithArtifactsIf(
+		sessionPath: string,
+		shouldDelete: (content: string, complete: boolean) => boolean,
+	): Promise<boolean> {
+		return super.deleteSessionWithArtifactsIf(sessionPath, (content, complete) => {
+			this.probes.push({ bytes: Buffer.byteLength(content, "utf-8"), complete });
+			return shouldDelete(content, complete);
+		});
 	}
 }
 
@@ -651,5 +702,70 @@ describe("SessionManager close() drops empty metadata-only sessions", () => {
 		expect(content).toContain("real question from terminal A");
 		expect(content).toContain("renamed in terminal B");
 		await termA.close();
+	});
+
+	// Terminal A materializes a draft-only session and arms its GC; terminal B
+	// resumes it and consumes the sidecar, leaving `.draft-only-session` behind.
+	// A third terminal C then resumes: consumeDraft finds no sidecar, so it
+	// cannot re-arm cleanup, and only the marker can still hold C's first
+	// durable append on the lock the stale GC terminal A takes.
+	it("takes the session-file lock for the first durable append when only the marker survives", async () => {
+		using tempDir = TempDir.createSync("@pi-session-marker-backed-first-append-");
+		const termA = SessionManager.create(tempDir.path(), tempDir.path());
+		termA.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		await termA.saveDraft("draft in terminal A");
+
+		const sessionFile = termA.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+
+		const termB = SessionManager.create(tempDir.path(), tempDir.path());
+		await termB.setSessionFile(sessionFile);
+		expect(await termB.consumeDraft()).toBe("draft in terminal A");
+
+		const storage = new GcOnUnlockedAppendStorage();
+		storage.armGc(sessionFile);
+		const termC = SessionManager.create(tempDir.path(), tempDir.path(), storage);
+		await termC.setSessionFile(sessionFile);
+		expect(await termC.consumeDraft()).toBeNull();
+
+		termC.appendMessage({ role: "user", content: "first durable entry in C", timestamp: 1 });
+		await termC.flush();
+
+		const content = await Bun.file(sessionFile).text();
+		expect(parseSessionContent(content).invalidHeader).toBe(false);
+		expect(content).toContain("first durable entry in C");
+		await termB.close();
+		await termA.close();
+	});
+
+	// A stale draft-only manager closing behind a long-running terminal must not
+	// read that terminal's whole transcript to learn the conversation vetoes the
+	// GC: the bounded prefix already carries the first durable entry.
+	it("decides the close-time GC from a bounded prefix instead of the whole body", async () => {
+		using tempDir = TempDir.createSync("@pi-session-gc-bounded-probe-");
+		const storage = new RecordingDeleteStorage();
+		const termA = SessionManager.create(tempDir.path(), tempDir.path(), storage);
+		termA.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		await termA.saveDraft("draft in terminal A");
+
+		const sessionFile = termA.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+
+		const termB = SessionManager.create(tempDir.path(), tempDir.path());
+		await termB.setSessionFile(sessionFile);
+		expect(await termB.consumeDraft()).toBe("draft in terminal A");
+		termB.appendMessage({ role: "user", content: "real question", timestamp: 1 });
+		termB.appendCustomEntry("bulk", "x".repeat(2 * 1024 * 1024));
+		await termB.flush();
+		const fileBytes = (await Bun.file(sessionFile).stat()).size;
+		expect(fileBytes).toBeGreaterThan(256 * 1024);
+		await termB.close();
+
+		await termA.close();
+
+		expect(await fileExists(sessionFile)).toBe(true);
+		expect(storage.probes.length).toBe(1);
+		expect(storage.probes[0]?.complete).toBe(false);
+		expect(storage.probes[0]?.bytes).toBeLessThan(fileBytes);
 	});
 });

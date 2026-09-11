@@ -1004,13 +1004,17 @@ export class SessionManager {
 	 * True while `entry` is the first durable entry written out of a draft-only
 	 * materialization. Every other in-memory entry is startup selector state, so
 	 * the on-disk file is still one another manager's close-time GC may drop.
+	 *
+	 * The `.draft-only-session` marker outlives the sidecar a third terminal
+	 * already consumed, so it alone keeps the write on the lock even though
+	 * `#setSessionFile` and a missing sidecar both left the arm flag clear.
 	 */
 	#isDraftOnlyFirstDurableEntry(entry: SessionEntry): boolean {
 		return (
-			this.#draftOnlySessionCleanupArmed &&
 			this.#storage.withSessionFileLockSync !== undefined &&
 			!isDraftOnlyMetadataEntry(entry) &&
-			this.#entries.every(candidate => candidate === entry || isDraftOnlyMetadataEntry(candidate))
+			this.#entries.every(candidate => candidate === entry || isDraftOnlyMetadataEntry(candidate)) &&
+			(this.#draftOnlySessionCleanupArmed || this.#hasDraftOnlySessionMarker())
 		);
 	}
 
@@ -1949,10 +1953,10 @@ export class SessionManager {
 	 */
 	#batchPublishesDraftOnlyFirstDurable(batch: AtomicEntryBatch): boolean {
 		return (
-			this.#draftOnlySessionCleanupArmed &&
 			this.#storage.withSessionFileLockSync !== undefined &&
 			this.#entries.some(entry => batch.entryIds.has(entry.id) && !isDraftOnlyMetadataEntry(entry)) &&
-			this.#entries.every(entry => batch.entryIds.has(entry.id) || isDraftOnlyMetadataEntry(entry))
+			this.#entries.every(entry => batch.entryIds.has(entry.id) || isDraftOnlyMetadataEntry(entry)) &&
+			(this.#draftOnlySessionCleanupArmed || this.#hasDraftOnlySessionMarker())
 		);
 	}
 
@@ -2052,10 +2056,13 @@ export class SessionManager {
 			// so its marker must survive for `consumeDraft` to re-arm cleanup
 			// later. Only durable or invalid content retires the marker.
 			let vetoedByDraft = false;
-			const deleted = await deleteSessionWithArtifactsIf.call(this.#storage, sessionFile, content => {
+			const deleted = await deleteSessionWithArtifactsIf.call(this.#storage, sessionFile, (content, complete) => {
 				const onDisk = parseSessionContent(content);
-				if (onDisk.invalidHeader) return false;
 				if (!onDisk.entries.slice(1).every(isDraftOnlyMetadataEntry)) return false;
+				// A bounded prefix without durable content only proves the body
+				// still needs reading; the header verdict needs the whole file.
+				if (!complete) return true;
+				if (onDisk.invalidHeader) return false;
 				// The draft sidecar may have been saved after this manager read
 				// the directory; its parent session must survive with it.
 				if (draftPath !== null && this.#storage.existsSync(draftPath)) {

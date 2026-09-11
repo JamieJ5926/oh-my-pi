@@ -6,6 +6,13 @@ import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } 
 
 const utf8Decoder = new TextDecoder("utf-8");
 
+/**
+ * Bytes the close-time draft GC reads before it must scan the whole body. A
+ * conversation's first durable entry lands far inside this prefix, so a stale
+ * manager vetoes the delete without loading a GiB-scale file.
+ */
+const DRAFT_GC_PROBE_BYTES = 256 * 1024;
+
 export interface SessionStorageStat {
 	size: number;
 	mtimeMs: number;
@@ -100,12 +107,21 @@ export interface SessionStorage {
 	 * session content read under that same cross-process lock. Resolves to
 	 * whether the delete happened.
 	 *
+	 * `shouldDelete` is called first with a bounded line-aligned prefix
+	 * (`complete === false`), so a stale manager can veto the delete without
+	 * reading a GiB-scale body another terminal grew, and once more with the
+	 * whole body (`complete === true`) when the prefix did not veto. A `false`
+	 * from either call cancels the delete.
+	 *
 	 * Optional: a backend whose content check and delete cannot be one atomic
 	 * step must not run the close-time draft GC at all, because a conversation
 	 * another process writes between the check and the delete would be lost
 	 * (issue #11497).
 	 */
-	deleteSessionWithArtifactsIf?(sessionPath: string, shouldDelete: (content: string) => boolean): Promise<boolean>;
+	deleteSessionWithArtifactsIf?(
+		sessionPath: string,
+		shouldDelete: (content: string, complete: boolean) => boolean,
+	): Promise<boolean>;
 	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter;
 	/**
 	 * Wait for every backing write scheduled by this storage to become durably
@@ -480,20 +496,27 @@ export class FileSessionStorage implements SessionStorage {
 	/**
 	 * Conditionally delete under the same cross-process lock the first durable
 	 * append to a draft-only session takes, so the re-read decision and the
-	 * unlink cannot be split by another process's write.
+	 * unlink cannot be split by another process's write. The decision reads a
+	 * bounded line-aligned prefix first and the whole body only when the prefix
+	 * does not veto, so a stale manager closing behind a long-running terminal
+	 * never loads that terminal's whole transcript to learn it must keep the file.
 	 */
-	deleteSessionWithArtifactsIf(sessionPath: string, shouldDelete: (content: string) => boolean): Promise<boolean> {
+	deleteSessionWithArtifactsIf(
+		sessionPath: string,
+		shouldDelete: (content: string, complete: boolean) => boolean,
+	): Promise<boolean> {
 		const deleted = this.withSessionFileLockSync(sessionPath, () => {
-			let content: string;
+			let probe: { content: string; complete: boolean };
 			try {
-				content = fs.readFileSync(sessionPath, "utf-8");
+				probe = readSessionGcProbeSync(sessionPath, DRAFT_GC_PROBE_BYTES);
 			} catch (err) {
 				// The file is already gone: report "not deleted" so the caller
 				// re-checks its own state instead of assuming it won the race.
 				if (isEnoent(err)) return false;
 				throw err;
 			}
-			if (!shouldDelete(content)) return false;
+			if (!shouldDelete(probe.content, probe.complete)) return false;
+			if (!probe.complete && !shouldDelete(fs.readFileSync(sessionPath, "utf-8"), true)) return false;
 			// Unlink and artifact cleanup stay inside the lock: a session file
 			// whose artifacts outlive it would orphan the next writer's draft.
 			fs.unlinkSync(sessionPath);
@@ -536,6 +559,27 @@ export class FileSessionStorage implements SessionStorage {
 				},
 			);
 		}
+	}
+}
+
+/**
+ * Read a line-aligned prefix of a session file for the close-time draft GC.
+ * `complete` is false only when the file continues past the prefix, so a caller
+ * that finds durable content in the prefix can veto without reading the rest.
+ */
+function readSessionGcProbeSync(sessionPath: string, maxBytes: number): { content: string; complete: boolean } {
+	const fd = fs.openSync(sessionPath, "r");
+	try {
+		if (fs.fstatSync(fd).size <= maxBytes) return { content: fs.readFileSync(sessionPath, "utf-8"), complete: true };
+		const buffer = Buffer.allocUnsafe(maxBytes);
+		const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+		const lastNewline = buffer.lastIndexOf(0x0a, bytesRead - 1);
+		// A single record wider than the prefix leaves nothing decidable early;
+		// fall back to the whole body instead of a partial record.
+		if (lastNewline < 0) return { content: fs.readFileSync(sessionPath, "utf-8"), complete: true };
+		return { content: buffer.toString("utf-8", 0, lastNewline + 1), complete: false };
+	} finally {
+		fs.closeSync(fd);
 	}
 }
 
