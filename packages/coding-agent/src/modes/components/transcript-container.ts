@@ -84,9 +84,18 @@ type RetirementPolicy = "pressure" | "flush";
 type Offered =
 	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number }
 	| { batch: HistoryBatch; kind: "commit"; end: number }
-	| { batch: HistoryBatch; kind: "replay" };
+	| { batch: HistoryBatch; kind: "replay"; start: number; end: number; complete: boolean; headPrefix: boolean };
 
 const MAX_LIVE_BLOCKS = 256;
+/**
+ * Upper bound on rows in one replay chunk. A settled resize replays the whole
+ * committed ledger, so one unbounded batch renders O(history) rows in a single
+ * synchronous frame (600 markdown renders / 44k-84k rows at 200 blocks). Chunks
+ * keep each frame's transient allocation bounded no matter how long history
+ * grows; the writer appends chunks across frames and converges on the same
+ * terminal state as the old single write.
+ */
+const REPLAY_CHUNK_ROWS = 2000;
 /** Grace before a pressure-blocked frontier is reported; a streaming block may legitimately hold it briefly. */
 const PINNED_FRONTIER_WARN_MS = 30_000;
 const EMPTY_ROWS: readonly string[] = [];
@@ -141,6 +150,10 @@ export class TranscriptContainer extends Container {
 	#offered: Offered | undefined;
 	#replayPending = false;
 	#replayRequested = false;
+	// Committed-entry cursor where the next replay chunk starts. A settled
+	// resize drains the ledger chunk by chunk across frames; acking a partial
+	// chunk advances this instead of clearing the replay.
+	#replayIndex = 0;
 	#toolActivityVisible = true;
 	#lastFrame: AnimationFrame = { tick: 0, now: 0 };
 	// Start rows from the last full render(), keyed by child component (transcript deep-links).
@@ -181,6 +194,7 @@ export class TranscriptContainer extends Container {
 		this.#pinnedFrontier = undefined;
 		this.#replayPending = false;
 		this.#replayRequested = false;
+		this.#replayIndex = 0;
 	}
 
 	setToolActivityVisible(visible: boolean): void {
@@ -253,8 +267,7 @@ export class TranscriptContainer extends Container {
 		const active = this.#entries.filter(entry => entry.state === "active").length;
 		return Math.max(0, Math.trunc(rows)) > active && this.#liveCount() < MAX_LIVE_BLOCKS;
 	}
-
-	/** Prepares one atomic replay of the committed ledger and an emitted active-head prefix. */
+	/** Prepares a chunked replay of the committed ledger and an emitted active-head prefix. */
 	beginReplay(): void {
 		this.#syncEntries();
 		if (this.#offered !== undefined) {
@@ -271,6 +284,7 @@ export class TranscriptContainer extends Container {
 	cancelReplay(): void {
 		this.#replayPending = false;
 		this.#replayRequested = false;
+		this.#replayIndex = 0;
 	}
 
 	/** Total rows the live, un-emitted tail occupies at `width`. */
@@ -357,20 +371,48 @@ export class TranscriptContainer extends Container {
 		return this.#peekBatch(width, capacity, "pressure");
 	}
 
-	/** Returns only a prepared complete replay, never a normal retirement offer. */
-	peekReplayBatch(width: number): HistoryBatch | undefined {
+	/**
+	 * Returns the next prepared replay chunk, never a normal retirement offer.
+	 * A settled resize drains the ledger chunk by chunk: each ack either advances
+	 * the cursor (partial chunk, offered as `append` so the writer pumps the next
+	 * frame) or ends the replay (final chunk, `replay`, exactly like the old
+	 * single batch). Concatenated chunk rows equal one full `#renderRange` over
+	 * the committed prefix plus the head prefix on the final chunk.
+	 */
+	peekReplayBatch(width: number, maxRows: number = REPLAY_CHUNK_ROWS): HistoryBatch | undefined {
 		this.#syncEntries();
 		this.#settleFinalized();
 		if (this.#offered !== undefined) {
 			return this.#offered.kind === "replay" ? this.#offered.batch : undefined;
 		}
 		if (!this.#replayPending) return undefined;
-		const rows = this.#renderReplay(width);
+		const chunk = this.#renderReplayChunk(width, Math.max(1, Math.trunc(maxRows)));
 		this.#replayPending = false;
-		if (rows.length === 0) return undefined;
-		const batch: HistoryBatch = { id: this.#nextBatchId++, rows, kind: "replay" };
-		this.#offered = { batch, kind: "replay" };
+		if (chunk.rows.length === 0) {
+			this.#replayIndex = 0;
+			return undefined;
+		}
+		// A partial chunk is finalized rows being re-added, so it rides the
+		// existing append pump (ack schedules the next frame); only the final
+		// chunk keeps the `replay` framing and its viewport split.
+		const batch: HistoryBatch = {
+			id: this.#nextBatchId++,
+			rows: chunk.rows,
+			kind: chunk.complete ? "replay" : "append",
+		};
+		this.#offered = {
+			batch,
+			kind: "replay",
+			start: chunk.start,
+			end: chunk.end,
+			complete: chunk.complete,
+			headPrefix: chunk.headPrefix,
+		};
 		return batch;
+	}
+	/** Whether a replay still has unoffered or unacknowledged chunks. */
+	hasPendingReplay(): boolean {
+		return this.#replayPending || (this.#offered?.kind === "replay" && !this.#offered.complete);
 	}
 
 	/** Offers the complete currently eligible prefix for graceful shutdown. */
@@ -392,7 +434,7 @@ export class TranscriptContainer extends Container {
 		} else if (offered.kind === "commit") {
 			rows = this.#renderRange(this.#frontier, offered.end, width, true);
 		} else {
-			rows = this.#renderReplay(width);
+			rows = this.#renderReplayRange(width, offered.start, offered.end, offered.headPrefix);
 		}
 		offered.batch = { id: offered.batch.id, rows, kind: offered.batch.kind };
 		return offered.batch;
@@ -501,6 +543,14 @@ export class TranscriptContainer extends Container {
 				this.#entries[index]!.emitted = 0;
 			}
 			this.#frontier = offered.end;
+		} else if (!offered.complete) {
+			// Partial replay chunk accepted: the next peek resumes at the chunk
+			// end. Replay never rewinds commit state, so acking only moves this
+			// cursor; a superseding beginReplay resets it via #startReplay.
+			this.#replayIndex = offered.end;
+			this.#replayPending = true;
+		} else {
+			this.#replayIndex = 0;
 		}
 		this.#offered = undefined;
 		if (this.#replayRequested) this.#startReplay();
@@ -641,14 +691,55 @@ export class TranscriptContainer extends Container {
 		return rows;
 	}
 
-	#renderReplay(width: number): readonly string[] {
-		const rows = Array.from(this.#renderRange(0, this.#frontier, width, true));
-		const head = this.#entries[this.#frontier];
-		if (head?.mode === "appendOnly" && head.emitted > 0) {
-			this.#setAllocation(head.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-			this.#renderEntry(head, width);
-			rows.push(...this.#renderStablePrefix(head, head.emitted, width));
+	/**
+	 * Render the next replay chunk starting at the replay cursor. Entries stay
+	 * whole: accumulation stops at the first entry boundary past `maxRows` (past
+	 * the cursor when one block alone exceeds it), so concatenated chunk rows
+	 * equal one full `#renderRange` plus the head prefix on the final chunk.
+	 */
+	#renderReplayChunk(
+		width: number,
+		maxRows: number,
+	): { rows: readonly string[]; start: number; end: number; complete: boolean; headPrefix: boolean } {
+		const start = Math.min(this.#replayIndex, this.#frontier);
+		let end = start;
+		const rows: string[] = [];
+		while (end < this.#frontier) {
+			const block = this.#renderRange(end, end + 1, width, false);
+			end++;
+			if (block.length === 0) continue;
+			if (rows.length > 0) rows.push("");
+			rows.push(...block);
+			if (rows.length >= maxRows) break;
 		}
+		const complete = end >= this.#frontier;
+		const headPrefix = complete;
+		if (headPrefix) {
+			const head = this.#entries[this.#frontier];
+			if (head?.mode === "appendOnly" && head.emitted > 0) {
+				this.#setAllocation(head.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+				this.#renderEntry(head, width);
+				if (rows.length > 0) rows.push("");
+				rows.push(...this.#renderStablePrefix(head, head.emitted, width));
+			}
+		}
+		if (rows.length > 0) rows.push("");
+		return { rows, start, end, complete, headPrefix };
+	}
+
+	/** Re-render one offered replay chunk (same entry range, new width). */
+	#renderReplayRange(width: number, start: number, end: number, headPrefix: boolean): readonly string[] {
+		const rows = Array.from(this.#renderRange(start, end, width, false));
+		if (headPrefix) {
+			const head = this.#entries[this.#frontier];
+			if (head?.mode === "appendOnly" && head.emitted > 0) {
+				this.#setAllocation(head.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+				this.#renderEntry(head, width);
+				if (rows.length > 0) rows.push("");
+				rows.push(...this.#renderStablePrefix(head, head.emitted, width));
+			}
+		}
+		if (rows.length > 0) rows.push("");
 		return rows;
 	}
 
@@ -670,6 +761,7 @@ export class TranscriptContainer extends Container {
 		const head = this.#entries[this.#frontier];
 		this.#replayPending = this.#frontier > 0 || (head?.mode === "appendOnly" && head.emitted > 0);
 		this.#replayRequested = false;
+		this.#replayIndex = 0;
 	}
 
 	#renderEmergency(

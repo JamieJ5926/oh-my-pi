@@ -141,6 +141,9 @@ export class Composer implements TerminalFrameProvider {
 		| undefined;
 	#historyReplayRequested = false;
 	#headerReplayPending = false;
+	// Set once the header rows join the first chunk of a multi-chunk replay so
+	// later chunks carry transcript rows only; reset when the replay completes.
+	#headerReplaySent = false;
 	#historyFlush = false;
 	// The welcome header retires to terminal history exactly once, after the
 	// intro settles; until then it renders as mutable viewport chrome.
@@ -260,8 +263,14 @@ export class Composer implements TerminalFrameProvider {
 				offered.source.transcript.acknowledgeFinalizedBatch(offered.source.transcriptId);
 			}
 			if (offered.source.header === "replay") {
-				this.#headerReplayPending = false;
-				if (offered.source.headerRows !== undefined) this.#retiredHeaderRows = offered.source.headerRows;
+				// A partial chunk leaves the transcript replay pending: keep the
+				// header state so the next frame offers the following chunk
+				// (transcript rows only) as an append the writer pumps.
+				if (!offered.source.transcript.hasPendingReplay()) {
+					this.#headerReplayPending = false;
+					this.#headerReplaySent = false;
+					if (offered.source.headerRows !== undefined) this.#retiredHeaderRows = offered.source.headerRows;
+				}
 			}
 		}
 		this.#offeredHistory = undefined;
@@ -308,6 +317,7 @@ export class Composer implements TerminalFrameProvider {
 		// stays valid and is accepted by the flush loop.
 		this.#historyReplayRequested = false;
 		this.#headerReplayPending = false;
+		this.#headerReplaySent = false;
 		for (const child of this.#runtimeChildren) {
 			if (child instanceof TranscriptContainer) child.cancelReplay();
 		}
@@ -316,12 +326,13 @@ export class Composer implements TerminalFrameProvider {
 	#startHistoryReplay(): void {
 		this.#headerReplayPending = this.#headerRetired && (this.#retiredHeaderRows?.length ?? 0) > 0;
 		this.#historyReplayRequested = false;
+		this.#headerReplaySent = false;
 		for (const child of this.#runtimeChildren) {
 			if (child instanceof TranscriptContainer) child.beginReplay();
 		}
 	}
 
-	/** Header retires first; replay coalesces it with the complete transcript ledger. */
+	/** Header retires first; replay coalesces it with the next transcript chunk. */
 	#offerHistory(
 		transcript: TranscriptContainer,
 		width: number,
@@ -344,10 +355,17 @@ export class Composer implements TerminalFrameProvider {
 			// committed rows, hard-wrapped the way the terminal would.
 			const recomposed = this.#header.render(width);
 			const headerRows = recomposed.length > 0 ? [...recomposed, ""] : this.#reflowRetiredHeader(width, 0);
+			// Only the first chunk carries the header; later chunks are transcript
+			// rows only. A partial chunk rides the append pump (the writer
+			// schedules the next frame on ack); only the final chunk keeps the
+			// `replay` framing and its viewport split.
+			const first = !this.#headerReplaySent;
+			this.#headerReplaySent = true;
+			const more = transcript.hasPendingReplay();
 			this.#offeredHistory = {
 				id: this.#nextHistoryId++,
-				rows: [...headerRows, ...(transcriptReplay?.rows ?? [])],
-				kind: "replay",
+				rows: first ? [...headerRows, ...(transcriptReplay?.rows ?? [])] : [...(transcriptReplay?.rows ?? [])],
+				kind: more ? "append" : "replay",
 				source: {
 					transcript,
 					transcriptId: transcriptReplay?.id,
