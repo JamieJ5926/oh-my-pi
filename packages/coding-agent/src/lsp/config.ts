@@ -540,9 +540,15 @@ export function getConfig(cwd: string): LspConfig {
 // Per-server file gates
 // =============================================================================
 
-/** Directory segments that conventionally hold Ansible content. A YAML file under one of these is treated as Ansible without reading it. */
+/**
+ * Directory segments that conventionally hold Ansible YAML. A YAML file under
+ * one of these is treated as Ansible without reading it. The `roles/` container
+ * is deliberately absent: a role's `files/` and `templates/` subdirectories
+ * hold arbitrary payloads (OpenAPI specs, chart values), so only the
+ * structural role subdirectories below (tasks, handlers, vars, defaults, meta)
+ * grant the signal, never the role root itself.
+ */
 const ANSIBLE_PATH_SEGMENTS: Record<string, true> = {
-	roles: true,
 	tasks: true,
 	handlers: true,
 	vars: true,
@@ -583,8 +589,14 @@ const ANSIBLE_CONTENT_SIGNAL =
 /** Top-level Kubernetes manifest keys, tested independently so key order cannot matter. Both stay anchored to column 0 so playbooks that embed an inline manifest under `definition:` (indented keys) are not mistaken for manifests. */
 const KUBERNETES_API_SIGNAL = /^apiVersion\s*:\s*\S/m;
 const KUBERNETES_KIND_SIGNAL = /^kind\s*:\s*\S/m;
-const WORKFLOW_SIGNAL = /^\s*on\s*:/m;
-const WORKFLOW_JOBS_SIGNAL = /^\s*jobs\s*:/m;
+/**
+ * Top-level GitHub Actions keys, anchored to column 0 like the Kubernetes and
+ * Compose vetoes. A playbook may embed a workflow document in a block scalar
+ * (`content: |`); the indented `on:`/`jobs:` lines inside that scalar must not
+ * veto the enclosing playbook.
+ */
+const WORKFLOW_SIGNAL = /^on\s*:/m;
+const WORKFLOW_JOBS_SIGNAL = /^jobs\s*:/m;
 /** Top-level Compose key, anchored to column 0 so nested `services:` keys inside playbooks cannot veto them. */
 const COMPOSE_SIGNAL = /^services\s*:/m;
 

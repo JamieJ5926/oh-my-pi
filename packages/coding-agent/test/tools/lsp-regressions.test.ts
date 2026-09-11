@@ -5523,4 +5523,54 @@ describe("ansible lsp", () => {
 			tempDir.removeSync();
 		}
 	});
+
+	it("does not route non-Ansible role payload files to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-rolepayload-");
+		try {
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			for (const rel of [
+				path.join("roles", "web", "files", "openapi.yaml"),
+				path.join("roles", "web", "templates", "values.yaml"),
+			]) {
+				const filePath = path.join(tempDir.path(), rel);
+				fs.mkdirSync(path.dirname(filePath), { recursive: true });
+				fs.writeFileSync(filePath, "openapi: 3.0.0\ninfo:\n  title: web\n  version: '1'\npaths: {}\n");
+				const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+				expect(names).not.toContain("ansible");
+				expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+			}
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("routes role task files to ansible by path even when content is silent", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-roletask-");
+		try {
+			const filePath = path.join(tempDir.path(), "roles", "web", "tasks", "main.yaml");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "unknown_key: value\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not let an embedded workflow document veto an enclosing playbook", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-embedwf-");
+		try {
+			const filePath = path.join(tempDir.path(), "deploy.yml");
+			fs.writeFileSync(
+				filePath,
+				"- hosts: web\n  tasks:\n    - name: write workflow\n      ansible.builtin.copy:\n        dest: /etc/ci.yml\n        content: |\n          name: CI\n          on:\n            push:\n          jobs:\n            test:\n              runs-on: ubuntu-latest\n",
+			);
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+			expect(names.indexOf("ansible")).toBeLessThan(names.indexOf("yamlls"));
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
 });
