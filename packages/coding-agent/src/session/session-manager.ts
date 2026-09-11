@@ -412,6 +412,7 @@ interface SessionManagerStateSnapshot {
 	onDisk: boolean;
 	needsRewrite: boolean;
 	draftOnlySessionCleanupArmed: boolean;
+	draftOnlyFirstDurablePending: boolean;
 	fallbackRuntimeOnly: boolean;
 	header: SessionHeader;
 	entries: SessionEntry[];
@@ -508,6 +509,17 @@ export class SessionManager {
 	 * ensureOnDisk() callers (ACP session/new, handoff) must survive close().
 	 */
 	#draftOnlySessionCleanupArmed = false;
+
+	/**
+	 * A first durable write out of a draft-only materialization was routed to
+	 * the session-file lock but never published there (WE-e): the failed entry
+	 * stays in #entries, so the entries-derived predicates below can no longer
+	 * recognize the retry. While set, the next durable write takes the lock
+	 * again instead of falling into an unlocked full rewrite that a concurrent
+	 * locked publish or delete could clobber. Cleared by a locked publish that
+	 * leaves the manager current, or by any session reset.
+	 */
+	#draftOnlyFirstDurablePending = false;
 
 	/**
 	 * Collab replication tap: invoked for every appended entry with the
@@ -1008,13 +1020,17 @@ export class SessionManager {
 	 * The `.draft-only-session` marker outlives the sidecar a third terminal
 	 * already consumed, so it alone keeps the write on the lock even though
 	 * `#setSessionFile` and a missing sidecar both left the arm flag clear.
+	 * A lock failure leaves the failed entry in memory, which also defeats the
+	 * entries check above; `#draftOnlyFirstDurablePending` keeps the retry on
+	 * the lock until a locked write succeeds.
 	 */
 	#isDraftOnlyFirstDurableEntry(entry: SessionEntry): boolean {
 		return (
 			this.#storage.withSessionFileLockSync !== undefined &&
 			!isDraftOnlyMetadataEntry(entry) &&
-			this.#entries.every(candidate => candidate === entry || isDraftOnlyMetadataEntry(candidate)) &&
-			(this.#draftOnlySessionCleanupArmed || this.#hasDraftOnlySessionMarker())
+			(this.#draftOnlyFirstDurablePending ||
+				(this.#entries.every(candidate => candidate === entry || isDraftOnlyMetadataEntry(candidate)) &&
+					(this.#draftOnlySessionCleanupArmed || this.#hasDraftOnlySessionMarker())))
 		);
 	}
 
@@ -1031,6 +1047,9 @@ export class SessionManager {
 			this.#appendToCurrentSessionFile(entry);
 			return;
 		}
+		// The entry is now owed a locked publish: a lock failure below leaves it
+		// in memory, so remember to keep the retry on the lock (WE-e).
+		this.#draftOnlyFirstDurablePending = true;
 		try {
 			withSessionFileLockSync.call(this.#storage, sessionFile, () => {
 				if (!this.#storage.existsSync(sessionFile)) {
@@ -1039,6 +1058,9 @@ export class SessionManager {
 				}
 				this.#appendToCurrentSessionFile(entry);
 			});
+			// Only a publish that left the manager current retires the debt; a
+			// lock throw or a failed inner rewrite keeps the next write locked.
+			if (this.#fileIsCurrent && !this.#rewriteRequired) this.#draftOnlyFirstDurablePending = false;
 		} catch (err) {
 			// The lock could not be taken, so the append did not happen. Keep the
 			// entry in memory and let the next durable write republish it.
@@ -1181,10 +1203,13 @@ export class SessionManager {
 		const sessionFile = this.#sessionFile;
 		const withSessionFileLockSync = this.#storage.withSessionFileLockSync;
 		if (!sessionFile || !withSessionFileLockSync) return;
+		// Same owed-publish debt as #appendFirstDurableEntryLocked (WE-e).
+		this.#draftOnlyFirstDurablePending = true;
 		try {
 			withSessionFileLockSync.call(this.#storage, sessionFile, () =>
 				this.#appendTitleChangeUnderSessionFileLock(entry, update, sessionFile),
 			);
+			if (this.#fileIsCurrent && !this.#rewriteRequired) this.#draftOnlyFirstDurablePending = false;
 		} catch (err) {
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
@@ -1288,6 +1313,7 @@ export class SessionManager {
 		this.#rewriteRequired = false;
 		this.#forceFileCreation = false;
 		this.#draftOnlySessionCleanupArmed = false;
+		this.#draftOnlyFirstDurablePending = false;
 		this.#turnBudgetTotal = null;
 		this.#turnBudgetHard = false;
 		this.#turnOutputBaseline = 0;
@@ -1460,6 +1486,7 @@ export class SessionManager {
 			onDisk: this.#fileIsCurrent,
 			needsRewrite: this.#rewriteRequired,
 			draftOnlySessionCleanupArmed: this.#draftOnlySessionCleanupArmed,
+			draftOnlyFirstDurablePending: this.#draftOnlyFirstDurablePending,
 			fallbackRuntimeOnly: this.#fallbackRuntimeOnly,
 			// Entries are snapshotted by reference (switch/reload replaces the
 			// array wholesale). The header is cloned: moveTo mutates it in place
@@ -1502,6 +1529,7 @@ export class SessionManager {
 		this.#rewriteRequired = snapshot.needsRewrite;
 		this.#forceFileCreation = snapshot.onDisk;
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
+		this.#draftOnlyFirstDurablePending = snapshot.draftOnlyFirstDurablePending;
 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
@@ -1558,6 +1586,7 @@ export class SessionManager {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
+		this.#draftOnlyFirstDurablePending = false;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
 		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
@@ -1681,6 +1710,7 @@ export class SessionManager {
 		this.#rewriteRequired = false;
 		this.#forceFileCreation = true;
 		this.#draftOnlySessionCleanupArmed = false;
+		this.#draftOnlyFirstDurablePending = false;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
 		this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
@@ -1954,9 +1984,10 @@ export class SessionManager {
 	#batchPublishesDraftOnlyFirstDurable(batch: AtomicEntryBatch): boolean {
 		return (
 			this.#storage.withSessionFileLockSync !== undefined &&
-			this.#entries.some(entry => batch.entryIds.has(entry.id) && !isDraftOnlyMetadataEntry(entry)) &&
-			this.#entries.every(entry => batch.entryIds.has(entry.id) || isDraftOnlyMetadataEntry(entry)) &&
-			(this.#draftOnlySessionCleanupArmed || this.#hasDraftOnlySessionMarker())
+			(this.#draftOnlyFirstDurablePending ||
+				(this.#entries.some(entry => batch.entryIds.has(entry.id) && !isDraftOnlyMetadataEntry(entry)) &&
+					this.#entries.every(entry => batch.entryIds.has(entry.id) || isDraftOnlyMetadataEntry(entry)) &&
+					(this.#draftOnlySessionCleanupArmed || this.#hasDraftOnlySessionMarker())))
 		);
 	}
 
@@ -1964,8 +1995,11 @@ export class SessionManager {
 		const sessionFile = this.#sessionFile;
 		const withSessionFileLockSync = this.#storage.withSessionFileLockSync;
 		if (!sessionFile || !withSessionFileLockSync) return;
+		// Same owed-publish debt as #appendFirstDurableEntryLocked (WE-e).
+		this.#draftOnlyFirstDurablePending = true;
 		try {
 			withSessionFileLockSync.call(this.#storage, sessionFile, () => this.#rewriteSynchronously());
+			if (this.#fileIsCurrent && !this.#rewriteRequired) this.#draftOnlyFirstDurablePending = false;
 		} catch (err) {
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
