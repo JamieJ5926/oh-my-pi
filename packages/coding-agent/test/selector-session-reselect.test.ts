@@ -78,4 +78,16 @@ describe("switchSessionModel reselect", () => {
 		expect(setModelTemporary).toHaveBeenCalledTimes(1);
 		expect(setModelTemporary).toHaveBeenCalledWith(other, ThinkingLevel.Low);
 	});
+	test("reselecting the active row at no effort applies nothing", async () => {
+		// P2 (PR #11330, reselect-undefined thread): the session is
+		// deliberately at inherit/no effort and the row renders terminal
+		// with no badge. Reselecting must not fall through to a sibling
+		// role's level, so the switch is skipped entirely.
+		const current = makeModel("test", "session-model");
+		const { controller, setModelTemporary } = makeController(current, undefined, ThinkingLevel.Low);
+
+		await controller.switchSessionModel(current);
+
+		expect(setModelTemporary).not.toHaveBeenCalled();
+	});
 });

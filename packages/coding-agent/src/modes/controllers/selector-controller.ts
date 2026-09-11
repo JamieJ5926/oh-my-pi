@@ -856,6 +856,11 @@ export class SelectorController {
 			// picker advertises it on that row, so Enter must not silently fall
 			const reselecting = thinkingLevel === undefined && current !== undefined && modelsAreEqual(current, model);
 			const preserved = reselecting ? this.ctx.session.configuredThinkingLevel() : undefined;
+			// An effortless reselect is a no-op: the active row renders
+			// terminal with no badge, so falling through to a sibling role's
+			// level would silently apply effort the row never advertised
+			// (P2 #11330, reselect-undefined thread).
+			if (reselecting && preserved === undefined) return;
 			const level = thinkingLevel ?? preserved ?? this.ctx.session.resolveTemporaryModelThinkingLevel(model);
 			await this.ctx.session.setModelTemporary(model, level);
 			this.ctx.statusLine.invalidate();
