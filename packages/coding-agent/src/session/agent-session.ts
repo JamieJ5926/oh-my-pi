@@ -10482,7 +10482,19 @@ export class AgentSession {
 		// Target keys claimed by this pass below; released in the finally.
 		const claimedTargetKeys: string[] = [];
 
-		const run = (async (): Promise<boolean> => {
+		const run = executePass
+			.call(this)
+			.catch(error => {
+				// Eligibility IO (cache invalidation / usage fetch) failed; the
+				// retry pipeline must keep running, so a blocked pass never rejects.
+				logger.warn("codex-auto-reset: blocked pass failed", { account: accountKey, error: String(error) });
+				return false;
+			})
+			.finally(() => {
+				coordinator.inFlightByAccount.delete(accountKey);
+				for (const key of claimedTargetKeys) coordinator.inFlightByAccount.delete(key);
+			});
+		async function executePass(this: AgentSession): Promise<boolean> {
 			// Serialize against an in-flight salvage sweep: it planned on a
 			// live listing that predates this pass, and attempt keys differ
 			// per trigger (`salvage|…` vs `block|…`), so planning concurrently
@@ -10547,17 +10559,7 @@ export class AgentSession {
 				return false;
 			}
 			return (await this.#executeCodexResetActions(plan.actions, coordinator)) > 0;
-		})()
-			.catch(error => {
-				// Eligibility IO (cache invalidation / usage fetch) failed; the
-				// retry pipeline must keep running, so a blocked pass never rejects.
-				logger.warn("codex-auto-reset: blocked pass failed", { account: accountKey, error: String(error) });
-				return false;
-			})
-			.finally(() => {
-				coordinator.inFlightByAccount.delete(accountKey);
-				for (const key of claimedTargetKeys) coordinator.inFlightByAccount.delete(key);
-			});
+		}
 		coordinator.inFlightByAccount.set(accountKey, run);
 		return run;
 	}
