@@ -18,6 +18,13 @@ const SECTION_HEADER_RE = /^\s*#{1,6}\s+\S+\s*/;
 const LEADING_WRAPPER_RE = /^\s*(?:⟨[^⟩]*⟩|<[a-z][\w-]*>)\s*/i;
 /** A trailing closing tag left behind by an unwrapped envelope. */
 const TRAILING_CLOSING_TAG_RE = /\s*<\/[a-z][\w-]*>\s*$/i;
+/**
+ * A leading tag fragment with no closing `>`: a `<tag`/`</tag` cut by a length
+ * cap, e.g. `<ti`, `</lab`. The lookahead keeps a complete tag out of this rule.
+ */
+const LEADING_TAG_FRAGMENT_RE = /^\s*<\/?[a-z][\w-]*(?=\s|$)\s*/i;
+/** The same fragment at the text's end (`… reading <ti`, `… reading </lab`), where a cap cuts it. */
+const TRAILING_TAG_FRAGMENT_RE = /\s*<\/?[a-z][\w-]*\s*$/i;
 /** A content line, cut at its first sentence end. */
 const FIRST_SENTENCE_RE = /^.*?[.!?](?=\s|$)/;
 /** Content lines that are still scaffolding, never label text. */
@@ -34,7 +41,7 @@ export function labelEchoesHandle(handle: string | undefined, label: string): bo
 	return /^\d+$/.test(suffix) && prefix.localeCompare(label, undefined, { sensitivity: "accent" }) === 0;
 }
 
-/** Drops the leading prompt scaffolding an assignment may open with, so no section header, role mark, or envelope tag reaches a HUD row. */
+/** Drops the prompt scaffolding an assignment may open with or be cut into, so no section header, role mark, envelope tag, or tag fragment reaches a HUD row. */
 function stripLabelScaffolding(text: string): string {
 	let out = text;
 	// Each pass strictly shortens the text, so this always terminates.
@@ -42,11 +49,14 @@ function stripLabelScaffolding(text: string): string {
 		const next = out
 			.replace(ROLE_MARK_RE, "")
 			.replace(SECTION_HEADER_RE, "")
-			.replace(LEADING_WRAPPER_RE, "");
+			.replace(LEADING_WRAPPER_RE, "")
+			.replace(TRAILING_CLOSING_TAG_RE, "")
+			.replace(LEADING_TAG_FRAGMENT_RE, "")
+			.replace(TRAILING_TAG_FRAGMENT_RE, "");
 		if (next === out) break;
 		out = next;
 	}
-	return out.replace(TRAILING_CLOSING_TAG_RE, "");
+	return out;
 }
 
 /** The first human line of an assignment, cut at its first sentence end. */
@@ -97,7 +107,11 @@ export async function generateTaskLabel(
 			TASK_LABEL_SYSTEM_PROMPT,
 			signal,
 		);
-		if (label && !labelEchoesHandle(sessionId, label)) return label;
+		// The model's own output is stripped exactly like the local fallback, then
+		// capped: a `<title>` envelope or a tag the model's output cap cut in half
+		// (`<ti`) must not reach a row. A clean label survives both untouched.
+		const sanitized = label ? stripLabelScaffolding(label) : "";
+		if (sanitized && !labelEchoesHandle(sessionId, sanitized)) return oneLineLabel(sanitized, LABEL_MAX);
 	} catch (err) {
 		logger.debug("task-label: generation failed", {
 			sessionId,

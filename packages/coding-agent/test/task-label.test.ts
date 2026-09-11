@@ -96,6 +96,36 @@ describe("task label generation", () => {
 		expect(labeled).toBe("Sleep then reply done");
 	});
 
+	it("strips a tag fragment the tiny model returns as its label", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Spawn four readers </lab>" }],
+		} as never);
+
+		const label = await generateTaskLabel(
+			"Spawn four readers from the manifest",
+			createRegistry(model),
+			createSettings(model),
+		);
+		expect(label).toBe("Spawn four readers");
+	});
+
+	it("passes a clean tiny-model label through unchanged", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Migrate the users table</title>" }],
+		} as never);
+
+		const label = await generateTaskLabel(
+			"Migrate the users table now",
+			createRegistry(model),
+			createSettings(model),
+		);
+		expect(label).toBe("Migrate the users table");
+	});
+
 	it("treats a case-insensitive Name-N collision as an echoed handle", () => {
 		expect(labelEchoesHandle("AuthLoader-3", "authloader")).toBe(true);
 		expect(labelEchoesHandle("AuthLoader-3", "AuthLoader")).toBe(true);
@@ -151,6 +181,45 @@ describe("task label local fallback", () => {
 			createSettings(model),
 		);
 		expect(label).toBeNull();
+	});
+
+	it("returns null for a truncated tag fragment that is all the assignment holds", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "402 Insufficient Balance",
+			content: [],
+		} as never);
+
+		expect(await generateTaskLabel("<ti", createRegistry(model), createSettings(model))).toBeNull();
+		expect(await generateTaskLabel("<title", createRegistry(model), createSettings(model))).toBeNull();
+	});
+
+	it("unwraps a complete tag pair around the assignment and drops a trailing fragment", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "402 Insufficient Balance",
+			content: [],
+		} as never);
+
+		expect(await generateTaskLabel("<label>x</label>", createRegistry(model), createSettings(model))).toBe("x");
+		expect(await generateTaskLabel("x</lab", createRegistry(model), createSettings(model))).toBe("x");
+	});
+
+	it("caps the label after stripping, so no fragment survives at the cap boundary", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "402 Insufficient Balance",
+			content: [],
+		} as never);
+
+		// 79 characters plus a trailing fragment: stripping first leaves a label
+		// under the 80-character cap, so it is neither truncated nor does it carry
+		// the fragment. Capping first would emit 79 z's plus an ellipsis.
+		const label = await generateTaskLabel(`${"z".repeat(79)} </lab`, createRegistry(model), createSettings(model));
+		expect(label).toBe("z".repeat(79));
 	});
 
 	it("returns null when the derived label would only echo the spawn handle", async () => {

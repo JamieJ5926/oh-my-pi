@@ -207,6 +207,23 @@ describe("subagent HUD lines", () => {
 		expect(multiLineDesc).toContain("First line ↵ Second line");
 		expect(multiLineDesc).not.toContain("\nSecond line");
 	});
+
+	it("strips a complete tag pair or a tag fragment before the description cap", () => {
+		const cases: readonly (readonly [string, string])[] = [
+			["<ti", "● TrackB 0 · ?"],
+			["<title", "● TrackB 0 · ?"],
+			["<label>x</label>", "● TrackB x 0 · ?"],
+			["x</lab", "● TrackB x 0 · ?"],
+		];
+		for (const [description, expected] of cases) {
+			const line = render([makeSession({ id: "TrackB", description })])
+				.split("\n")
+				.find(row => row.includes("TrackB"));
+			expect(line).toBeDefined();
+			expect(line).not.toContain("<");
+			expect((line ?? "").replace(/\s+/g, " ").trim()).toBe(expected);
+		}
+	});
 	it("hides non-detached spawns: sync task calls and eval agent() helpers", () => {
 		// Sync task spawn (parent blocked on the call) and eval `agent()` spawn
 		// (no detached flag at all) both stay off the HUD.
@@ -686,6 +703,42 @@ describe("subagent HUD lines", () => {
 		expect(text).not.toContain("explorer x1");
 		expect(text).toContain("1 active below");
 		expect(text).not.toContain("Deep");
+	});
+
+	it("renders no active-below note when every descendant has settled", () => {
+		const settledChild = makeSession({ id: "Lead.Settled.Worker", agent: "explorer", status: "completed" });
+		const ancestry = [
+			{ id: "Lead.Settled", parentId: "Lead" },
+			{ id: settledChild.id, parentId: "Lead.Settled" },
+		];
+		const settled = renderSubagentHudLines(
+			[
+				makeSession({ id: "Lead" }),
+				makeSession({ id: "Lead.Settled", agent: "poteto-agent", status: "completed" }),
+				settledChild,
+			],
+			120,
+			ancestry,
+		);
+		const settledText = Bun.stripANSI(settled.subagents.join("\n"));
+		expect(settledText).toContain("Settled");
+		expect(settledText).not.toContain("active below");
+
+		const late = makeSession({ id: "Lead.Settled.Late", agent: "explorer" });
+		const reopened = Bun.stripANSI(
+			renderSubagentHudLines(
+				[
+					makeSession({ id: "Lead" }),
+					makeSession({ id: "Lead.Settled", agent: "poteto-agent", status: "completed" }),
+					settledChild,
+					late,
+				],
+				120,
+				[...ancestry, { id: late.id, parentId: "Lead.Settled" }],
+			)
+				.subagents.join("\n"),
+		);
+		expect(reopened).toContain("1 active below");
 	});
 	it("chains completed roots in task order across narrow wrapped lines", () => {
 		const bus = new EventBus();
