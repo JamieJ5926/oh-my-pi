@@ -1036,9 +1036,9 @@ export class ModelBrowser implements Component {
 			// ordinary row advertises only that level. Insertion follows
 			// MODEL_ROLE_IDS first, matching the resolver's role order. The hub
 			// (flag unset) keeps multi-role attribution below.
-		const only = [...levels.keys()][0];
-		if (only === undefined) return "";
-		return this.#appliedBadgeFor(item.model, only);
+			const only = [...levels.keys()][0];
+			if (only === undefined) return "";
+			return this.#appliedBadgeFor(item.model, only);
 		}
 		if (levels.size === 1) {
 			const only = [...levels.keys()][0];
