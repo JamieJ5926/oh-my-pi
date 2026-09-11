@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, pathIsWithin, relativePathWithinRoot, type WhichOptions } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { getConfigDirPaths } from "../config";
 import { type ClaudePluginRoot, getPreloadedPluginRoots } from "../discovery/helpers";
@@ -616,16 +616,18 @@ export interface AnsibleFileOptions {
 	projectRoot?: string;
 }
 
-function hasAnsiblePathSignal(loweredFilePath: string, projectRoot?: string): boolean {
-	let relative = loweredFilePath;
+function hasAnsiblePathSignal(filePath: string, projectRoot?: string): boolean {
+	let relative = filePath;
 	if (projectRoot !== undefined) {
-		const root = path.resolve(projectRoot.toLowerCase());
-		const absolute = path.resolve(loweredFilePath);
-		const scoped = path.relative(root, absolute);
-		if (scoped === "" || scoped.startsWith("..") || path.isAbsolute(scoped)) return false;
+		// Containment is computed from the original paths: folding case before
+		// `path.relative` aliases distinct siblings on case-sensitive
+		// filesystems (root `/tmp/Project` vs `/tmp/project/...`). Only the
+		// resulting segments are lowercased for the directory match.
+		const scoped = relativePathWithinRoot(projectRoot, filePath);
+		if (scoped === null) return false;
 		relative = scoped;
 	}
-	const segments = path.dirname(relative).split(path.sep);
+	const segments = path.dirname(relative.toLowerCase()).split(path.sep);
 	return segments.some(segment => ANSIBLE_PATH_SEGMENTS[segment]);
 }
 
@@ -654,30 +656,35 @@ function readFileHead(filePath: string): string | null {
  * only understands playbooks, roles, and inventory; every other YAML file in
  * an Ansible project (Kubernetes manifests, workflows, Compose files,
  * Taskfiles) must fall through to the generic YAML server instead of being
- * claimed by extension alone. Unreadable files fall back to the path signal
- * only.
+ * claimed by extension or conventional basename alone. Unreadable files fall
+ * back to the conventional basename and the path signal only.
  *
  * Definite non-Ansible document markers (Kubernetes manifests, workflows)
- * always win over the content signal, and matching only top-level keys keeps
- * playbooks that embed an inline manifest or workflow from being vetoed. The
- * Compose `services:` key is weaker (it is also an ordinary Ansible variable
- * name), so it only vetoes a file that is not already under a structural
- * Ansible directory.
+ * always win over the content signal and the conventional basenames, and
+ * matching only top-level keys keeps playbooks that embed an inline manifest
+ * or workflow from being vetoed. The Compose `services:` key is weaker (it is
+ * also an ordinary Ansible variable name), so it only vetoes a file that is
+ * not already under a structural Ansible directory.
  */
 export function isAnsibleFile(filePath: string, options?: AnsibleFileOptions): boolean {
 	const lowered = filePath.toLowerCase();
 	const base = path.basename(lowered);
-	if (ANSIBLE_BASENAMES[base]) return true;
 	if (TASKFILE_BASENAMES[base]) return false;
 	const head = options?.content ?? readFileHead(filePath);
-	const ansiblePath = hasAnsiblePathSignal(lowered, options?.projectRoot);
-	if (head === null) return ansiblePath;
+	const ansiblePath = hasAnsiblePathSignal(filePath, options?.projectRoot);
+	// Unreadable files carry no vetoes, so a conventional entry-point name
+	// still counts alongside the path signal.
+	if (head === null) return ANSIBLE_BASENAMES[base] || ansiblePath;
 	if (KUBERNETES_API_SIGNAL.test(head) && KUBERNETES_KIND_SIGNAL.test(head)) return false;
 	if (WORKFLOW_SIGNAL.test(head) && WORKFLOW_JOBS_SIGNAL.test(head)) return false;
 	// `services:` is also an ordinary Ansible variable name (a `defaults/main.yml`
 	// services map), so a file already under a structural Ansible directory
 	// outranks the Compose guess; the key only vetoes otherwise.
 	if (COMPOSE_SIGNAL.test(head) && !ansiblePath) return false;
+	// The conventional basenames accept only after the document vetoes above:
+	// a manifest, workflow, or Compose file named `playbook.yml`/`site.yml`
+	// stays with the generic YAML server.
+	if (ANSIBLE_BASENAMES[base]) return true;
 	if (ANSIBLE_CONTENT_SIGNAL.test(head)) return true;
 	return ansiblePath;
 }

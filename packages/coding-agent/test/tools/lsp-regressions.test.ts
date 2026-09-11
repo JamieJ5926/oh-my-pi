@@ -5613,4 +5613,37 @@ describe("ansible lsp", () => {
 			tempDir.removeSync();
 		}
 	});
+
+	it("vetoes non-Ansible documents before accepting conventional basenames", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-basename-veto-");
+		try {
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const manifest = path.join(tempDir.path(), "playbook.yml");
+			fs.writeFileSync(manifest, "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n");
+			expect(getLspServerForFile(config, manifest, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+			const workflow = path.join(tempDir.path(), "site.yml");
+			fs.writeFileSync(workflow, "on:\n  push:\n    branches: [main]\njobs:\n  build:\n    runs-on: ubuntu-latest\n");
+			expect(getLspServerForFile(config, workflow, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("computes the project-root boundary before folding case", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-root-case-");
+		try {
+			// Sibling directories that differ only by case are distinct roots:
+			// the `tasks/` segment below the lowercase sibling must not count
+			// for a file judged against the capitalized root. Both paths stay
+			// uncreated so the check is lexical on every filesystem.
+			const filePath = path.join(tempDir.path(), "project", "tasks", "plain.yml");
+			const root = path.join(tempDir.path(), "Project");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const options = { projectRoot: root, content: "note: plain yaml without ansible markers\n" };
+			const names = getServersForFile(config, filePath, options).map(([name]) => name);
+			expect(names).not.toContain("ansible");
+			expect(getLspServerForFile(config, filePath, options)?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
 });
