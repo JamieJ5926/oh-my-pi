@@ -654,7 +654,7 @@ describe("ModelBrowser effort badge", () => {
 		expect(rows[2]).not.toContain("\x01");
 	});
 	test("picker clamps an out-of-ladder role level to the model's effort", () => {
-		// P2 (PR #11330, thread 3975504061): default:max on a model capped at
+		// P2 (PR #11330, clamp-picker-badges thread): default:max on a model capped at
 		// high. Enter clamps through setThinkingLevel, so the picker row must
 		// advertise high — the level the switch actually applies — not max.
 		const capped = makeModel("test", "capped-1", undefined, [Effort.Low, Effort.Medium, Effort.High]);

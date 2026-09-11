@@ -948,7 +948,7 @@ export class ModelBrowser implements Component {
 
 	/**
 	 * Badge text for a role level on `model`, snapped to the model's effort
-	 * ladder exactly like activation (P2 #11330, thread 3975504061): Enter
+	 * ladder exactly like activation (P2 #11330, clamp-picker-badges thread): Enter
 	 * resolves the raw role level through `setThinkingLevel`, so the picker
 	 * advertises the applied level — or no badge when the model has no
 	 * controllable effort — never the raw request. `auto` renders as today;

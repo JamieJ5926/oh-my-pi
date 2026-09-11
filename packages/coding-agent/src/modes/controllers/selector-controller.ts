@@ -3,6 +3,7 @@ import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import { type Model, PASTE_CODE_LOGIN_PROVIDERS, type UsageReport } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Component, OverlayHandle, ResizeScrollbackMode } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
@@ -850,7 +851,14 @@ export class SelectorController {
 		compactFirst: boolean,
 	): Promise<void> {
 		const apply = async () => {
-			const level = thinkingLevel ?? this.ctx.session.resolveTemporaryModelThinkingLevel(model);
+			const current = this.ctx.session.model;
+			// Reselecting the active model preserves the live session effort: the
+			// picker advertises it on that row, so Enter must not silently fall
+			// back to the role default (P2 #11330, reselect-active-model thread).
+			const reselecting =
+				thinkingLevel === undefined && current !== undefined && modelsAreEqual(current, model);
+			const preserved = reselecting ? this.ctx.session.configuredThinkingLevel() : undefined;
+			const level = thinkingLevel ?? preserved ?? this.ctx.session.resolveTemporaryModelThinkingLevel(model);
 			await this.ctx.session.setModelTemporary(model, level);
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
