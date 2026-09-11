@@ -136,6 +136,8 @@ export class Composer implements TerminalFrameProvider {
 							header: "none" | "replay";
 							/** Recomposed header rows to accept as the new retired-header bytes. */
 							headerRows?: readonly string[];
+							/** True when this offer's rows include the header (first replay chunk only). */
+							headerFirst: boolean;
 					  };
 		  }
 		| undefined;
@@ -371,6 +373,7 @@ export class Composer implements TerminalFrameProvider {
 					transcriptId: transcriptReplay?.id,
 					header: "replay",
 					headerRows,
+					headerFirst: first,
 				},
 			};
 			return {
@@ -411,7 +414,7 @@ export class Composer implements TerminalFrameProvider {
 			id: this.#nextHistoryId++,
 			rows: batch.rows,
 			kind: batch.kind ?? "append",
-			source: { transcript, transcriptId: batch.id, header: "none" },
+			source: { transcript, transcriptId: batch.id, header: "none", headerFirst: false },
 		};
 		return {
 			id: this.#offeredHistory.id,
@@ -436,7 +439,11 @@ export class Composer implements TerminalFrameProvider {
 		const recomposed = this.#header.render(width);
 		const headerRows = recomposed.length > 0 ? [...recomposed, ""] : this.#reflowRetiredHeader(width, 0);
 		offered.source.headerRows = headerRows;
-		offered.rows = [...headerRows, ...(transcript?.rows ?? [])];
+		// A re-rendered later chunk stays transcript rows only; prepending the
+		// header again would duplicate it into scrollback below the first chunk.
+		offered.rows = offered.source.headerFirst
+			? [...headerRows, ...(transcript?.rows ?? [])]
+			: [...(transcript?.rows ?? [])];
 	}
 
 	#renderRoots(roots: readonly Component[], width: number): string[] {
