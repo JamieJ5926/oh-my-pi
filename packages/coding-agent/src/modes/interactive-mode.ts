@@ -502,6 +502,14 @@ const SUBAGENT_HUD_DESC_COL = 22;
 /** Description column floor, so a terminal too narrow for every cell still labels rows. */
 const SUBAGENT_HUD_MIN_DESC_COLS = 12;
 const SUBAGENT_HUD_GUTTER = 2;
+/**
+ * Brackets of the dim `⟨role⟩` badge on a non-group row. Fixed at U+27E8/U+27E9
+ * by Jamie's FINAL subagents-HUD row spec (2026-09-11), so the badge glyph does
+ * not follow `theme.format.bracketLeft`, which is preset-dependent (`⟦` unicode,
+ * `⟨` nerd, `[` ascii).
+ */
+const SUBAGENT_HUD_ROLE_OPEN = "\u27e8";
+const SUBAGENT_HUD_ROLE_CLOSE = "\u27e9";
 const SUBAGENT_HUD_STRIP_COLS = 9;
 const SUBAGENT_HUD_TOKEN_COLS = 8;
 const SUBAGENT_HUD_MODEL_COLS = 10;
@@ -619,41 +627,74 @@ export function renderSubagentHudLines(
 	type Rows = { lines: string[]; depths: number[] };
 	const activeRows: Rows = { lines: [], depths: [] };
 	const completed: string[] = [];
-	const add = (text: string, depth: number, target = activeRows) => {
-		target.depths.push(depth);
-		target.lines.push(truncateToWidth(` ${text}`, Math.max(0, columns)));
-	};
-	/** One standard-layout row: marker, dot, name, then the description, strip, token and model cells. */
-	const renderRow = (row: {
+	/** A row's styled cells short of the description column, which every row in the block shares. */
+	type RowCells = {
 		depth: number;
-		marker: string;
-		state: ObservableSession["status"];
-		name: string;
+		left: string;
 		description: string;
 		strip: string;
 		token: string;
 		model: string;
-	}): string => {
+	};
+	/** One emitted line: a standard row, or a raw indented line such as the `N active below` note. */
+	type RowEntry = { kind: "row"; cells: RowCells } | { kind: "raw"; text: string; depth: number };
+	const rowEntries: RowEntry[] = [];
+	const add = (text: string, depth: number) => {
+		rowEntries.push({ kind: "raw", text, depth });
+	};
+	/** Columns the tree guides occupy before a row's own cells. */
+	const indentCols = (depth: number): number => (depth === 0 ? 0 : depth * 2 + 2);
+	/** One standard-layout row: marker, dot, name, then the description, strip, token and model cells. */
+	const rowCells = (row: {
+		depth: number;
+		marker: string;
+		state: ObservableSession["status"];
+		name: string;
+		/** Entity role cell; `task` is the absence of a role and draws no badge. Group rows omit it. */
+		role?: string;
+		description: string;
+		strip: string;
+		token: string;
+		model: string;
+	}): RowCells => {
 		const marker = row.marker ? `${row.marker} ` : " ";
 		const name = row.state === "completed" ? theme.fg("dim", row.name) : theme.bold(row.name);
 		const outcome =
 			row.state === "failed" ? theme.fg("error", "✗") : row.state === "aborted" ? theme.fg("dim", "⊘") : "";
-		const left = `${marker}${dot(row.state)} ${name}${outcome}`;
-		const prefixCols = row.depth === 0 ? 0 : row.depth * 2 + 2;
-		const descStart = Math.max(SUBAGENT_HUD_DESC_COL, prefixCols + visibleWidth(left) + SUBAGENT_HUD_GUTTER);
+		// The outcome marker stays glued to the name, as shipped; the role badge follows it.
+		const role =
+			row.role && row.role !== "task"
+				? ` ${theme.fg("dim", `${SUBAGENT_HUD_ROLE_OPEN}${row.role}${SUBAGENT_HUD_ROLE_CLOSE}`)}`
+				: "";
+		return {
+			depth: row.depth,
+			left: `${marker}${dot(row.state)} ${name}${outcome}${role}`,
+			description: row.description,
+			strip: row.strip,
+			token: row.token,
+			model: row.model,
+		};
+	};
+	/** The leftmost description column this row fits in: its own cells plus one gutter. */
+	const demandedCol = (cells: RowCells): number =>
+		indentCols(cells.depth) + visibleWidth(cells.left) + SUBAGENT_HUD_GUTTER;
+	/** Lay a row out at the block's shared description column; a row too wide for it keeps its own. */
+	const layoutRow = (cells: RowCells, descStart: number): string => {
+		const indent = indentCols(cells.depth);
+		const start = Math.max(descStart, indent + visibleWidth(cells.left) + SUBAGENT_HUD_GUTTER);
 		const descCols = Math.max(
 			SUBAGENT_HUD_MIN_DESC_COLS,
 			columns -
-				descStart -
+				start -
 				(SUBAGENT_HUD_GUTTER * 3 + SUBAGENT_HUD_STRIP_COLS + SUBAGENT_HUD_TOKEN_COLS + SUBAGENT_HUD_MODEL_COLS),
 		);
 		const gutter = " ".repeat(SUBAGENT_HUD_GUTTER);
 		return (
-			`${left}${" ".repeat(Math.max(0, descStart - prefixCols - visibleWidth(left)))}` +
-			truncateToWidth(row.description, descCols, undefined, true) +
-			`${gutter}${truncateToWidth(row.strip, SUBAGENT_HUD_STRIP_COLS, undefined, true)}` +
-			`${gutter}${" ".repeat(Math.max(0, SUBAGENT_HUD_TOKEN_COLS - visibleWidth(row.token)))}${row.token}` +
-			`${gutter}${theme.fg("dim", row.model)}`
+			`${cells.left}${" ".repeat(Math.max(0, start - indent - visibleWidth(cells.left)))}` +
+			truncateToWidth(cells.description, descCols, undefined, true) +
+			`${gutter}${truncateToWidth(cells.strip, SUBAGENT_HUD_STRIP_COLS, undefined, true)}` +
+			`${gutter}${" ".repeat(Math.max(0, SUBAGENT_HUD_TOKEN_COLS - visibleWidth(cells.token)))}${cells.token}` +
+			`${gutter}${theme.fg("dim", cells.model)}`
 		);
 	};
 	const delegatingRoles: Record<string, true> = { "poteto-agent": true, "poteto-agent-deep": true, owner: true };
@@ -703,22 +744,19 @@ export function renderSubagentHudLines(
 			if (group) {
 				const role = roleOf(group[0]!);
 				const groupModel = modelCell(group[0]!);
-				activeRows.depths.push(depth);
-				activeRows.lines.push(
-					truncateToWidth(
-						renderRow({
-							depth,
-							marker: "",
-							state: aggregateState(group),
-							name: `${role} ×${group.length}`,
-							description: group.map(member => localName(member)).join("  "),
-							strip: stripOf(group.map(member => member.status)),
-							token: formatHudTokenCount(group.reduce((sum, member) => sum + tokens(member), 0)),
-							model: group.every(member => modelCell(member) === groupModel) ? groupModel : "···",
-						}),
-						Math.max(0, columns),
-					),
-				);
+				rowEntries.push({
+					kind: "row",
+					cells: rowCells({
+						depth,
+						marker: "",
+						state: aggregateState(group),
+						name: `${role} ×${group.length}`,
+						description: group.map(member => localName(member)).join("  "),
+						strip: stripOf(group.map(member => member.status)),
+						token: formatHudTokenCount(group.reduce((sum, member) => sum + tokens(member), 0)),
+						model: group.every(member => modelCell(member) === groupModel) ? groupModel : "···",
+					}),
+				});
 				continue;
 			}
 			if (parent === undefined && !isSubtreeActive(session)) {
@@ -749,27 +787,54 @@ export function renderSubagentHudLines(
 			const kids = kidsOf(session);
 			const token =
 				kids.length > 0 ? `Σ ${formatHudTokenCount(subtreeTokens(session))}` : formatHudTokenCount(tokens(session));
-			activeRows.depths.push(depth);
-			activeRows.lines.push(
-				truncateToWidth(
-					renderRow({
-						depth,
-						marker: markerFor(session),
-						state: session.status,
-						name,
-						description: preview,
-						strip: stripFor(session),
-						token,
-						model: modelCell(session),
-					}),
-					Math.max(0, columns),
-				),
-			);
+			rowEntries.push({
+				kind: "row",
+				cells: rowCells({
+					depth,
+					marker: markerFor(session),
+					state: session.status,
+					name,
+					role: roleOf(session),
+					description: preview,
+					strip: stripFor(session),
+					token,
+					model: modelCell(session),
+				}),
+			});
 			if (session.status !== "active") add(`${activeBelow.get(session.id) ?? 0} active below`, depth + 1);
 			renderChildren(session.id, depth + 1);
 		}
 	};
 	renderChildren(undefined, 0);
+	/**
+	 * The block's description column: wide enough for the widest `Name ⟨role⟩` any row
+	 * draws, so descriptions line up; clamped to keep the description readable when the
+	 * terminal is too narrow, where a row back on its own wider start gets truncated.
+	 */
+	const descStart = Math.min(
+		rowEntries.reduce(
+			(wide, entry) => (entry.kind === "row" ? Math.max(wide, demandedCol(entry.cells)) : wide),
+			SUBAGENT_HUD_DESC_COL,
+		),
+		Math.max(
+			SUBAGENT_HUD_DESC_COL,
+			columns -
+				(SUBAGENT_HUD_GUTTER * 3 +
+					SUBAGENT_HUD_STRIP_COLS +
+					SUBAGENT_HUD_TOKEN_COLS +
+					SUBAGENT_HUD_MODEL_COLS +
+					SUBAGENT_HUD_MIN_DESC_COLS),
+		),
+	);
+	for (const entry of rowEntries) {
+		activeRows.depths.push(entry.kind === "row" ? entry.cells.depth : entry.depth);
+		activeRows.lines.push(
+			truncateToWidth(
+				entry.kind === "row" ? layoutRow(entry.cells, descStart) : ` ${entry.text}`,
+				Math.max(0, columns),
+			),
+		);
+	}
 	const section = ({ lines: rows, depths: rowDepths }: Rows, title: string): string[] => {
 		if (rows.length === 0) return [];
 		const followingSibling = new Set<number>();

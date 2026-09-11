@@ -47,14 +47,18 @@ const ancestry = sessions
 	.map(s => ({ id: s.id, parentId: s.id.slice(0, s.id.lastIndexOf(".")) }));
 
 const GOLDEN_COMPLETED = ["● SkillsTrack -> ● ScriptsTrack"];
+// The role cell (Jamie's follow-up, 2026-09-11, verbatim): "non-group rows (leads/parents and single lanes) must
+// show the role in angle brackets after the name, dim, like the installed renderer did: `● GateOff ⟨poteto-agent⟩
+// <description>`. Group rows keep `role ×N` (no brackets)." The brackets are U+27E8/U+27E9, the generic `task`
+// worker draws no badge, and every row shares one description column so the cell cannot push rows out of line.
 const GOLDEN_SUBAGENTS = [
 	"",
 	"Subagents",
-	"▾ ● RulesTrack        Nested rules synthesis                                             ●●           Σ 2.1m  · ?",
-	"  ├─▾ ● RulesInner                                                                       ●           Σ 82.3k  · ?",
-	"  │ └─▾ ● RulesSynth                                                                     ●           Σ 39.7k  · ?",
-	"  │   └─ ● explorer ×3  RuleA  RuleB  RuleC                                              ●●●            1.2k  · ?",
-	"  └─ ● Owner          Writes the merged file                                                              2m  · ?",
+	"▾ ● RulesTrack ⟨poteto-agent⟩       Nested rules synthesis                               ●●           Σ 2.1m  · ?",
+	"  ├─▾ ● RulesInner ⟨poteto-agent⟩                                                        ●           Σ 82.3k  · ?",
+	"  │ └─▾ ● RulesSynth ⟨synthesizer⟩                                                       ●           Σ 39.7k  · ?",
+	"  │   └─ ● explorer ×3              RuleA  RuleB  RuleC                                  ●●●            1.2k  · ?",
+	"  └─ ● Owner ⟨owner⟩                Writes the merged file                                                2m  · ?",
 ];
 
 describe("subagent HUD golden render", () => {
@@ -78,6 +82,18 @@ describe("subagent HUD golden render", () => {
 			"-> ● ModelsTrack -> ● 工具Track -> ● ReviewTrack",
 		]);
 		expect(lines.join(" ")).toBe(completed.map(item => `● ${item.id}`).join(" -> "));
+	});
+
+	it("carries the ⟨role⟩ cell on every non-group row and none on a group row", () => {
+		const lines = renderSubagentHudLines(sessions, 120, ancestry).subagents.map(line => Bun.stripANSI(line).trimEnd());
+		expect(lines).toEqual(GOLDEN_SUBAGENTS);
+		const named = lines.filter(line => /● (RulesTrack|RulesInner|RulesSynth|Owner) /.test(line));
+		expect(named.length).toBe(4);
+		for (const line of named) expect(line).toMatch(/● \S+ ⟨[a-z-]+⟩ {2,}\S/);
+		const group = lines.find(line => line.includes("explorer ×3")) ?? "";
+		expect(group).toContain("explorer ×3");
+		expect(group).not.toContain("⟨");
+		expect(group).not.toContain("⟩");
 	});
 
 	it("never renders task prompt text on any row", () => {
