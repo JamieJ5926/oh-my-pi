@@ -5573,4 +5573,44 @@ describe("ansible lsp", () => {
 			tempDir.removeSync();
 		}
 	});
+
+	it("does not route non-Ansible payloads under a collection to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-collection-");
+		try {
+			const filePath = path.join(
+				tempDir.path(),
+				"collections",
+				"ansible_collections",
+				"acme",
+				"web",
+				"roles",
+				"app",
+				"files",
+				"openapi.yaml",
+			);
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "openapi: 3.0.0\ninfo:\n  title: web\n  version: '1'\npaths: {}\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+			expect(names).not.toContain("ansible");
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("keeps Ansible variable files with a services key routed to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-svcvar-");
+		try {
+			const filePath = path.join(tempDir.path(), "roles", "web", "defaults", "main.yml");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "services:\n  nginx:\n    enabled: true\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+			expect(names.indexOf("ansible")).toBeLessThan(names.indexOf("yamlls"));
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
 });

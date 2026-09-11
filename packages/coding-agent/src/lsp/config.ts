@@ -542,11 +542,12 @@ export function getConfig(cwd: string): LspConfig {
 
 /**
  * Directory segments that conventionally hold Ansible YAML. A YAML file under
- * one of these is treated as Ansible without reading it. The `roles/` container
- * is deliberately absent: a role's `files/` and `templates/` subdirectories
- * hold arbitrary payloads (OpenAPI specs, chart values), so only the
- * structural role subdirectories below (tasks, handlers, vars, defaults, meta)
- * grant the signal, never the role root itself.
+ * one of these is treated as Ansible without reading it. Container directories
+ * with mixed contents are deliberately absent: a role's `files/` and
+ * `templates/` subdirectories hold arbitrary payloads (OpenAPI specs, chart
+ * values), and `collections/ansible_collections` nests that same role layout,
+ * so only the structural subdirectories below (tasks, handlers, vars,
+ * defaults, meta) grant the signal, never the container root.
  */
 const ANSIBLE_PATH_SEGMENTS: Record<string, true> = {
 	tasks: true,
@@ -560,7 +561,6 @@ const ANSIBLE_PATH_SEGMENTS: Record<string, true> = {
 	playbook: true,
 	group_vars: true,
 	host_vars: true,
-	collections: true,
 	ansible: true,
 };
 
@@ -657,10 +657,12 @@ function readFileHead(filePath: string): string | null {
  * claimed by extension alone. Unreadable files fall back to the path signal
  * only.
  *
- * Definite non-Ansible document markers (Kubernetes manifests, workflows,
- * Compose files) win over the content signal so nested Ansible-looking keys
- * inside those documents cannot claim them; the vetoes only fire on
- * top-level markers, so playbooks embedding inline manifests stay Ansible.
+ * Definite non-Ansible document markers (Kubernetes manifests, workflows)
+ * always win over the content signal, and matching only top-level keys keeps
+ * playbooks that embed an inline manifest or workflow from being vetoed. The
+ * Compose `services:` key is weaker (it is also an ordinary Ansible variable
+ * name), so it only vetoes a file that is not already under a structural
+ * Ansible directory.
  */
 export function isAnsibleFile(filePath: string, options?: AnsibleFileOptions): boolean {
 	const lowered = filePath.toLowerCase();
@@ -668,12 +670,16 @@ export function isAnsibleFile(filePath: string, options?: AnsibleFileOptions): b
 	if (ANSIBLE_BASENAMES[base]) return true;
 	if (TASKFILE_BASENAMES[base]) return false;
 	const head = options?.content ?? readFileHead(filePath);
-	if (head === null) return hasAnsiblePathSignal(lowered, options?.projectRoot);
+	const ansiblePath = hasAnsiblePathSignal(lowered, options?.projectRoot);
+	if (head === null) return ansiblePath;
 	if (KUBERNETES_API_SIGNAL.test(head) && KUBERNETES_KIND_SIGNAL.test(head)) return false;
 	if (WORKFLOW_SIGNAL.test(head) && WORKFLOW_JOBS_SIGNAL.test(head)) return false;
-	if (COMPOSE_SIGNAL.test(head)) return false;
+	// `services:` is also an ordinary Ansible variable name (a `defaults/main.yml`
+	// services map), so a file already under a structural Ansible directory
+	// outranks the Compose guess; the key only vetoes otherwise.
+	if (COMPOSE_SIGNAL.test(head) && !ansiblePath) return false;
 	if (ANSIBLE_CONTENT_SIGNAL.test(head)) return true;
-	return hasAnsiblePathSignal(lowered, options?.projectRoot);
+	return ansiblePath;
 }
 
 /**
