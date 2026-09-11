@@ -5622,7 +5622,10 @@ describe("ansible lsp", () => {
 			fs.writeFileSync(manifest, "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n");
 			expect(getLspServerForFile(config, manifest, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
 			const workflow = path.join(tempDir.path(), "site.yml");
-			fs.writeFileSync(workflow, "on:\n  push:\n    branches: [main]\njobs:\n  build:\n    runs-on: ubuntu-latest\n");
+			fs.writeFileSync(
+				workflow,
+				"on:\n  push:\n    branches: [main]\njobs:\n  build:\n    runs-on: ubuntu-latest\n",
+			);
 			expect(getLspServerForFile(config, workflow, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
 		} finally {
 			tempDir.removeSync();
