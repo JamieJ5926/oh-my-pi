@@ -440,6 +440,49 @@ describe("codex saved-reset trigger integration", () => {
 			coordinator.sweepInFlight = false;
 		}
 	});
+
+	it("defers a blocked pass when a planned sibling target is already claimed (issue #11470D)", async () => {
+		// The cross-session race from review: another AgentSession sharing
+		// this coordinator already holds acct-2 (its own blocked pass is
+		// mid-flight). Our 429 plans acct-1 (restore) plus acct-2 (expiring
+		// salvage, any trigger); without target claims both passes plan on one
+		// live listing and can double-spend the final credit. The pass must
+		// spend nothing — not just skip the held account.
+		const { session, coordinator, redeemTargets } = buildSession({
+			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 12 },
+			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 0.5, limitReached: false, credits: 2 }),
+			reports: [
+				codexReport({ primaryUsed: 0.6, weeklyUsed: 0.5, limitReached: false, credits: 2 }),
+				codexReport({
+					primaryUsed: 1.0,
+					weeklyUsed: 0.3,
+					limitReached: false,
+					credits: 2,
+					creditExpiresInMs: 3 * HOUR,
+					accountId: "acct-2",
+					email: "second@example.com",
+				}),
+			],
+			liveCredits: [liveCreditStatus(2), liveCreditStatus(2, 3 * HOUR, "acct-2", "second@example.com")],
+			streamErrorFirst: true,
+		});
+		// Foreign pass holds the sibling target (and incidentally suppresses
+		// the heartbeat sweep, which defers to any in-flight account).
+		const foreignGate = Promise.withResolvers<void>();
+		coordinator.inFlightByAccount.set(
+			"acct-2",
+			foreignGate.promise.then(() => false),
+		);
+		try {
+			await session.prompt("trigger a codex usage limit");
+			await session.waitForIdle();
+			expect(redeemTargets).toHaveLength(0);
+		} finally {
+			coordinator.inFlightByAccount.delete("acct-2");
+			foreignGate.resolve();
+		}
+		expect(coordinator.inFlightByAccount.size).toBe(0);
+	});
 	it("names the final-credit account in headless warnings when it is not first (issue #11470B)", async () => {
 		// The misleading-guidance repro: the batch opens with a non-final
 		// action and the final-credit action comes later. Headless users must

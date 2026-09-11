@@ -10479,6 +10479,8 @@ export class AgentSession {
 		if (!accountKey) return false;
 		const existing = coordinator.inFlightByAccount.get(accountKey);
 		if (existing) return existing;
+		// Target keys claimed by this pass below; released in the finally.
+		const claimedTargetKeys: string[] = [];
 
 		const run = (async (): Promise<boolean> => {
 			// Serialize against an in-flight salvage sweep: it planned on a
@@ -10514,6 +10516,23 @@ export class AgentSession {
 			}
 			const plan = this.#planCodexResets("blocked", effectiveReports, identity, coordinator, activeBlockUnblockAtMs);
 			if (plan.actions.length === 0) return false;
+			// Claim every planned target account in the existing process-wide
+			// in-flight map, all-or-nothing: a blocked pass in another session
+			// shares this coordinator and its plan can name the same sibling
+			// accounts (the salvage rule runs on any trigger), while attempt keys
+			// differ per trigger — so without this, two passes can plan on one
+			// live listing and double-spend a final credit. Denial defers the
+			// whole pass (fail closed, nothing spent, no prompt). The synchronous
+			// check-and-set is atomic, so claims can never deadlock.
+			for (const action of plan.actions) {
+				if (action.accountKey === accountKey) continue;
+				if (coordinator.inFlightByAccount.has(action.accountKey)) return false;
+			}
+			for (const action of plan.actions) {
+				if (action.accountKey === accountKey || claimedTargetKeys.includes(action.accountKey)) continue;
+				coordinator.inFlightByAccount.set(action.accountKey, run);
+				claimedTargetKeys.push(action.accountKey);
+			}
 			if (
 				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
 				!(await this.#confirmCodexAutoRedeem(plan.actions, coordinator))
@@ -10535,7 +10554,10 @@ export class AgentSession {
 				logger.warn("codex-auto-reset: blocked pass failed", { account: accountKey, error: String(error) });
 				return false;
 			})
-			.finally(() => coordinator.inFlightByAccount.delete(accountKey));
+			.finally(() => {
+				coordinator.inFlightByAccount.delete(accountKey);
+				for (const key of claimedTargetKeys) coordinator.inFlightByAccount.delete(key);
+			});
 		coordinator.inFlightByAccount.set(accountKey, run);
 		return run;
 	}
