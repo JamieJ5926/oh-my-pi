@@ -390,7 +390,51 @@ describe("subagent HUD lines", () => {
 		expect(frame).toContain(`${theme.styledSymbol("status.enabled", "success")} ${theme.fg("dim", "Finished")}`);
 		expect(out).toContain("Broken✗");
 		expect(out).toContain("Stopped⊘");
-		expect(out).toMatch(/Finished\s+idle row/);
+		expect(out).toMatch(/Finished ⟨reviewer⟩\s+idle row/);
+	});
+
+	it("tags a non-group row with a dim ⟨role⟩ cell, drops it on a generic task lane, and keeps group rows bracketless", () => {
+		const parent = makeSession({ id: "Lead" });
+		const solo = makeSession({ id: "Lead.PaneExitDiag", agent: "diagnose", description: "pane driving" });
+		const generic = makeSession({ id: "Lead.GateOff", description: "gate watching" });
+		const grouped = Array.from({ length: 3 }, (_, index) =>
+			makeSession({ id: `Lead.Kid${index}`, agent: "explorer" }),
+		);
+		const ancestry = [solo, generic, ...grouped].map(child => ({ id: child.id, parentId: parent.id }));
+		const frame = renderSubagentHudLines([parent, solo, generic, ...grouped], 160, ancestry, 2).subagents.join("\n");
+		const out = Bun.stripANSI(frame);
+		expect(frame).toContain(`${theme.bold("PaneExitDiag")} ${theme.fg("dim", "⟨diagnose⟩")}`);
+		expect(out).toMatch(/PaneExitDiag ⟨diagnose⟩ {2,}pane driving/);
+		// The generic worker holds no role, so it draws no badge rather than the word "task".
+		expect(out).toMatch(/GateOff {2,}gate watching/);
+		expect(out).not.toContain("⟨task⟩");
+		const group = out.split("\n").find(line => line.includes("explorer ×3")) ?? "";
+		expect(group).toContain("explorer ×3");
+		expect(group).not.toContain("⟨");
+		expect(group).not.toContain("⟩");
+	});
+
+	it("holds one description column across rows, widening the block when a Name ⟨role⟩ cell overruns it", () => {
+		const parent = makeSession({ id: "Lead" });
+		const long = makeSession({ id: "Lead.VeryLongLaneNameOverflows", agent: "implementer", description: "LONGMARK" });
+		const short = makeSession({ id: "Lead.Edge", agent: "explorer", description: "SHORTMARK" });
+		const ancestry = [long, short].map(child => ({ id: child.id, parentId: parent.id }));
+		const lines = renderSubagentHudLines([parent, long, short], 160, ancestry, 2).subagents.map(line =>
+			Bun.stripANSI(line),
+		);
+		const longColumn = (lines.find(line => line.includes("LONGMARK")) ?? "").indexOf("LONGMARK");
+		const shortColumn = (lines.find(line => line.includes("SHORTMARK")) ?? "").indexOf("SHORTMARK");
+		expect(longColumn).toBeGreaterThan(22);
+		expect(shortColumn).toBe(longColumn);
+
+		// A block whose names all fit the standard column keeps descriptions there.
+		const narrow = renderSubagentHudLines(
+			[parent, makeSession({ id: "Lead.Tiny", description: "TINYMARK" })],
+			160,
+			[{ id: "Lead.Tiny", parentId: "Lead" }],
+			2,
+		).subagents.map(line => Bun.stripANSI(line));
+		expect((narrow.find(line => line.includes("TINYMARK")) ?? "").indexOf("TINYMARK")).toBe(22);
 	});
 
 	it("leaves the strip cell blank on a leaf row", () => {
@@ -400,7 +444,7 @@ describe("subagent HUD lines", () => {
 			.subagents.join("\n");
 		const leafLine = frame.split("\n").find(line => Bun.stripANSI(line).includes("Leaf"));
 		if (!leafLine) throw new Error("Expected a leaf row");
-		expect(Bun.stripANSI(leafLine)).toMatch(/Leaf\s+no children\s+0\s+· \?/);
+		expect(Bun.stripANSI(leafLine)).toMatch(/Leaf ⟨explorer⟩\s+no children\s+0\s+· \?/);
 		expect(leafLine).not.toContain("•");
 		expect(Bun.stripANSI(frame)).not.toContain("—");
 	});
@@ -460,7 +504,7 @@ describe("subagent HUD lines", () => {
 			expect(out).toMatch(/explorer ×1\s+Worker/);
 			const expanded = Bun.stripANSI(renderSubagentHudLines(sessions, 160, ancestry, 4).subagents.join("\n"));
 			expect(expanded).not.toContain("explorer x1");
-			expect(expanded).toMatch(/Worker\s+0\s+· \?/);
+			expect(expanded).toMatch(/Worker ⟨explorer⟩\s+0\s+· \?/);
 			expect(expanded).not.toContain("—");
 		}
 	});
@@ -637,7 +681,7 @@ describe("subagent HUD lines", () => {
 		const sections = renderSubagentHudLines(sessions, 120, ancestry);
 		expect(sections.completed).toEqual([]);
 		const text = Bun.stripANSI(sections.subagents.join("\n"));
-		expect(text).toMatch(/Worker\s+0\s+· \?/);
+		expect(text).toMatch(/Worker ⟨explorer⟩\s+0\s+· \?/);
 		expect(text).not.toContain("—");
 		expect(text).not.toContain("explorer x1");
 		expect(text).toContain("1 active below");
