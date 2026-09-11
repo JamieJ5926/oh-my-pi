@@ -532,6 +532,33 @@ function formatHudTokenCount(value: number): string {
 	return `${Number((value / divisor).toFixed(1))}${suffix}`;
 }
 
+/**
+ * A complete `<tag>` / `</tag>` envelope around a description, and the fragments
+ * a length or column cap leaves when it cuts a tag in half (`<ti`, `</lab`).
+ * Both fragment rules are anchored to a text end, which is where a truncated tag
+ * lands; the lookahead keeps a complete opened tag out of the fragment rule.
+ */
+const HUD_LEADING_OPEN_TAG_RE = /^\s*<[a-z][\w-]*>\s*/i;
+const HUD_TRAILING_CLOSE_TAG_RE = /\s*<\/[a-z][\w-]*>\s*$/i;
+const HUD_LEADING_TAG_FRAGMENT_RE = /^\s*<\/?[a-z][\w-]*(?=\s|$)\s*/i;
+const HUD_TRAILING_TAG_FRAGMENT_RE = /\s*<\/?[a-z][\w-]*\s*$/i;
+
+/** Drops a description's tag scaffolding, looping until the text stops changing so nesting and mixed cases terminate. */
+function stripHudTagScaffolding(text: string): string {
+	let out = text;
+	// Each pass strictly shortens the text, so this always terminates.
+	for (;;) {
+		const next = out
+			.replace(HUD_LEADING_OPEN_TAG_RE, "")
+			.replace(HUD_TRAILING_CLOSE_TAG_RE, "")
+			.replace(HUD_LEADING_TAG_FRAGMENT_RE, "")
+			.replace(HUD_TRAILING_TAG_FRAGMENT_RE, "");
+		if (next === out) break;
+		out = next;
+	}
+	return out;
+}
+
 export function renderSubagentHudLines(
 	sessions: readonly ObservableSession[],
 	columns: number,
@@ -773,15 +800,14 @@ export function renderSubagentHudLines(
 			}
 			const name = parent === undefined ? formatTaskId(session.id) : localName(session);
 			const description = session.description?.trim() || session.progress?.description?.trim();
-			// A generated label can arrive wrapped in a prompt tag (`<label>…</label>`),
-			// which is prompt scaffolding, never text to show.
+			// A generated label can arrive wrapped in a prompt tag (`<label>…</label>`)
+			// or cut by a cap into a bare fragment (`<ti`, `</lab`): both are prompt
+			// scaffolding, never text to show. Stripping runs before the label cap, so
+			// the cap can never leave a fragment of its own.
 			const preview =
 				description && !labelEchoesHandle(session.id, description)
 					? oneLineLabel(
-							description
-								.replace(/^<[a-z][\w-]*>\s*/i, "")
-								.replace(/\s*<\/[a-z][\w-]*>$/i, "")
-								.replace(/\s*[\r\n]+\s*/g, " ↵ "),
+							stripHudTagScaffolding(description).replace(/\s*[\r\n]+\s*/g, " ↵ "),
 						)
 					: "";
 			const kids = kidsOf(session);
@@ -801,7 +827,10 @@ export function renderSubagentHudLines(
 					model: modelCell(session),
 				}),
 			});
-			if (session.status !== "active") add(`${activeBelow.get(session.id) ?? 0} active below`, depth + 1);
+			// Only a settled row with live work still buried under it earns the note;
+			// a count of zero means every descendant settled, so the row stands alone.
+			const below = activeBelow.get(session.id) ?? 0;
+			if (session.status !== "active" && below > 0) add(`${below} active below`, depth + 1);
 			renderChildren(session.id, depth + 1);
 		}
 	};
