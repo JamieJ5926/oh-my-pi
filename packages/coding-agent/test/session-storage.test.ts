@@ -222,6 +222,57 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		// path during a scan, so a leftover here would list the deleted session.
 		await expect(listSessions(tempDir, storage)).resolves.toEqual([]);
 	});
+	it("removes stale backups before the primary so a concurrent scan cannot resurrect the session", async () => {
+		const sessionPath = await createSessionFile("backup-first");
+		const staleBackup = `${sessionPath}.1234567890.bak`;
+		await fsp.copyFile(sessionPath, staleBackup);
+
+		const order: string[] = [];
+		vi.spyOn(storage, "unlink").mockImplementation(async (target: string) => {
+			order.push(target);
+			return fs.promises.unlink(target);
+		});
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(order).toEqual([staleBackup, sessionPath]);
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(staleBackup)).toBe(false);
+	});
+
+	it("fails closed when a stale backup cannot be removed", async () => {
+		const sessionPath = await createSessionFile("backup-cleanup-failure");
+		const staleBackup = `${sessionPath}.1234567890.bak`;
+		await fsp.copyFile(sessionPath, staleBackup);
+
+		const backupError = Object.assign(new Error("permission denied"), { code: "EACCES" });
+		vi.spyOn(storage, "unlink").mockImplementation(async (target: string) => {
+			if (target === staleBackup) throw backupError;
+			return fs.promises.unlink(target);
+		});
+
+		await expect(storage.deleteSessionWithArtifacts(sessionPath)).rejects.toThrow(
+			`Session file not deleted: failed to remove stale backup ${staleBackup}: permission denied`,
+		);
+		// Fail-closed: the primary is left in place so the caller sees the failure
+		// instead of a success that a later rescan would undo.
+		expect(fs.existsSync(sessionPath)).toBe(true);
+		expect(fs.existsSync(staleBackup)).toBe(true);
+	});
+
+	it("leaves backups of a different primary alone", async () => {
+		const sessionPath = await createSessionFile("foo");
+		// A distinct primary whose name extends this session's basename.
+		const siblingPath = await createSessionFile("foo.jsonl.copy");
+		const siblingBackup = `${siblingPath}.1234567890.bak`;
+		await fsp.copyFile(siblingPath, siblingBackup);
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(siblingPath)).toBe(true);
+		expect(fs.existsSync(siblingBackup)).toBe(true);
+	});
 
 	it("throws when artifact cleanup fails after the session file is deleted", async () => {
 		const sessionPath = await createSessionFile("cleanup-failure");

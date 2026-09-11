@@ -449,35 +449,45 @@ export class FileSessionStorage implements SessionStorage {
 	 * resurrect the deleted session.
 	 */
 	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
+		// Remove stale rewrite backups BEFORE the primary. Leftovers happen when the
+		// EPERM-rewrite cleanup unlink fails or a crash lands between the two renames.
+		// Sweeping first closes the resurrection window: a listing scan running
+		// recoverOrphanedBackups() after the primary unlink would otherwise promote a
+		// surviving backup back to the primary path and silently undo the deletion.
+		// Non-ENOENT cleanup failures propagate (fail-closed) like the artifact
+		// cleanup below, so callers never report success while recoverable data remains.
+		// Note listFilesSync returns [] when the directory scan itself fails, so a
+		// scan failure cannot enforce this contract — same as recoverOrphanedBackups.
+		const dir = path.dirname(sessionPath);
+		const sessionBase = path.basename(sessionPath);
+		for (const backup of this.listFilesSync(dir, "*.bak")) {
+			// Match only "<primary>.<snowflake>.bak" for THIS primary: parse the final
+			// suffix the same way recoverOrphanedBackups() does and require the derived
+			// primary basename to equal this session's. A plain startsWith would also
+			// match "foo.jsonl.copy.jsonl.<snowflake>.bak", the backup of the distinct
+			// primary "foo.jsonl.copy.jsonl".
+			const name = path.basename(backup);
+			if (!name.endsWith(".bak")) continue;
+			const trimmed = name.slice(0, -".bak".length);
+			const dotIdx = trimmed.lastIndexOf(".");
+			if (dotIdx <= 0) continue;
+			if (trimmed.slice(0, dotIdx) !== sessionBase) continue;
+			try {
+				await this.unlink(backup);
+			} catch (err) {
+				if (isEnoent(err)) continue;
+				const error = toError(err);
+				throw new Error(
+					`Session file not deleted: failed to remove stale backup ${backup}: ${error.message}`,
+					{
+						cause: error,
+					},
+				);
+			}
+		}
+
 		// Delete the session file itself
 		await this.unlink(sessionPath);
-
-		// Remove stale rewrite backups beside the primary. Leftovers happen when the
-		// EPERM-rewrite cleanup unlink fails or a crash lands between the two renames.
-		// Best-effort and warn-only: the session itself is already deleted.
-		try {
-			const dir = path.dirname(sessionPath);
-			const prefix = `${path.basename(sessionPath)}.`;
-			for (const backup of this.listFilesSync(dir, "*.bak")) {
-				if (!path.basename(backup).startsWith(prefix)) continue;
-				try {
-					await this.unlink(backup);
-				} catch (err) {
-					if (!isEnoent(err)) {
-						logger.warn("Failed to remove stale session backup", {
-							sessionFile: sessionPath,
-							backupPath: backup,
-							error: toError(err).message,
-						});
-					}
-				}
-			}
-		} catch (err) {
-			logger.warn("Failed to scan for stale session backups", {
-				sessionFile: sessionPath,
-				error: toError(err).message,
-			});
-		}
 
 		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
 		const artifactsDir = sessionPath.slice(0, -6);
