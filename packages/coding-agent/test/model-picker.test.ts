@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, type Mock, test, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -16,8 +16,8 @@ function normalize(lines: readonly string[]): string {
 	return stripVTControlCharacters(lines.join("\n")).replace(/\s+/g, " ").trim();
 }
 
-function makeModel(provider: string, id: string, contextWindow = 128_000): Model {
-	return buildModel({
+function makeModel(provider: string, id: string, contextWindow = 128_000, ladder?: Effort[]): Model {
+	const model = buildModel({
 		id,
 		name: id,
 		api: "ollama-chat",
@@ -29,7 +29,14 @@ function makeModel(provider: string, id: string, contextWindow = 128_000): Model
 		contextWindow,
 		maxTokens: 1024,
 	});
+	// Fixtures asserting a badge opt into an explicit ladder: without one the
+	// picker clamp (activation parity) strips every badge.
+	if (!ladder) return model;
+	return { ...model, reasoning: true, thinking: { mode: "effort", efforts: ladder } };
 }
+
+/** Full effort ladder: asserted badges survive the picker clamp unchanged. */
+const FULL_LADDER = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
 
 let testTheme = await getThemeByName("dark");
 
@@ -287,7 +294,7 @@ describe("ModelPicker", () => {
 	test("scoped row keeps effort its qualified selector still wins at activation", () => {
 		// Same scope, but the configured selector names the scoped provider,
 		// so activation applies high and the row must advertise it.
-		const scoped = makeModel("providerA", "shared-x");
+		const scoped = makeModel("providerA", "shared-x", 128_000, FULL_LADDER);
 		const other = makeModel("providerB", "shared-x");
 		const settings = Settings.isolated({
 			modelRoles: { default: "providerA/shared-x:high" },

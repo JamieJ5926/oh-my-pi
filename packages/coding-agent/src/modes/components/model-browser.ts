@@ -28,9 +28,11 @@ import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS } from "../../config/model
 import type { Settings } from "../../config/settings";
 import type { ModelPerfStats } from "../../session/agent-storage";
 import {
+	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	getConfiguredThinkingLevelMetadata,
 	parseConfiguredThinkingLevel,
+	resolveThinkingLevelForModel,
 } from "../../thinking";
 import { thinkingLevelGlyph as sharedThinkingLevelGlyph } from "../../tools/render-utils";
 import { type ThemeColor, theme } from "../theme/theme";
@@ -945,6 +947,20 @@ export class ModelBrowser implements Component {
 	}
 
 	/**
+	 * Badge text for a role level on `model`, snapped to the model's effort
+	 * ladder exactly like activation (P2 #11330, thread 3975504061): Enter
+	 * resolves the raw role level through `setThinkingLevel`, so the picker
+	 * advertises the applied level — or no badge when the model has no
+	 * controllable effort — never the raw request. `auto` renders as today;
+	 * the session resolves it per turn.
+	 */
+	#appliedBadgeFor(model: Model, level: ConfiguredThinkingLevel): string {
+		const applied = level === AUTO_THINKING ? level : resolveThinkingLevelForModel(model, level);
+		if (applied === undefined) return "";
+		return ` ${formatThinkingLevelBadge(applied)}`;
+	}
+
+	/**
 	 * Resolved effort badge for `item`'s row. Hidden entirely while
 	 * `showThinkingBadges` is false (Task-subagent target mode). Precedence:
 	 * the row's own role level for virtual `@role` rows, then the session
@@ -959,7 +975,7 @@ export class ModelBrowser implements Component {
 	#thinkingBadgeFor(item: ModelBrowserItem): string {
 		if (!this.#showThinkingBadges) return "";
 		if (item.thinkingLevel !== undefined && item.thinkingLevel !== ThinkingLevel.Inherit) {
-			return ` ${formatThinkingLevelBadge(item.thinkingLevel)}`;
+			return this.#appliedBadgeFor(item.model, item.thinkingLevel);
 		}
 		if (item.selector.startsWith("@")) return "";
 		if (
@@ -1020,9 +1036,9 @@ export class ModelBrowser implements Component {
 			// ordinary row advertises only that level. Insertion follows
 			// MODEL_ROLE_IDS first, matching the resolver's role order. The hub
 			// (flag unset) keeps multi-role attribution below.
-			const only = [...levels.keys()][0];
-			if (only === undefined) return "";
-			return ` ${formatThinkingLevelBadge(only)}`;
+		const only = [...levels.keys()][0];
+		if (only === undefined) return "";
+		return this.#appliedBadgeFor(item.model, only);
 		}
 		if (levels.size === 1) {
 			const only = [...levels.keys()][0];

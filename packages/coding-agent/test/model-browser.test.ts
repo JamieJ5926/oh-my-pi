@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -22,8 +22,8 @@ import type { TUI } from "@oh-my-pi/pi-tui";
 /** Optional presentation metadata a catalog or discovery source may attach. */
 type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps">;
 
-function makeModel(provider: string, id: string, metadata?: NativeMetadata): Model {
-	return buildModel({
+function makeModel(provider: string, id: string, metadata?: NativeMetadata, ladder?: Effort[]): Model {
+	const model = buildModel({
 		id,
 		name: id,
 		api: "ollama-chat",
@@ -36,7 +36,14 @@ function makeModel(provider: string, id: string, metadata?: NativeMetadata): Mod
 		maxTokens: 1024,
 		...metadata,
 	});
+	// Without a ladder the picker clamp (activation parity) strips every
+	// badge, so fixtures asserting a badge opt into an explicit ladder.
+	if (!ladder) return model;
+	return { ...model, reasoning: true, thinking: { mode: "effort", efforts: ladder } };
 }
+
+/** Full effort ladder: asserted badges survive the picker clamp unchanged. */
+const FULL_LADDER = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
 
 /** Browser preloaded with `models`, MRU-sorted like the hub does on sync. */
 function makeBrowser(
@@ -312,7 +319,7 @@ describe("ModelBrowser effort badge", () => {
 		// the Alt+P picker preserves the session effort (low/auto) instead.
 		// The picker row must stay unbadged; an explicit `:high` suffix still badges.
 		const derived = makeModel("openai", "gpt-5");
-		const explicit = makeModel("openai", "gpt-4");
+		const explicit = makeModel("openai", "gpt-4", undefined, FULL_LADDER);
 		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
 		const rows = renderRows(
 			[derived, explicit],
@@ -422,7 +429,7 @@ describe("ModelBrowser effort badge", () => {
 		// P2 (PR #11330): shared model default:low + slow:max. Enter applies
 		// the first matching role (low), so the picker row must show low
 		// only; the hub keeps both attributions (previous test).
-		const shared = makeModel("openai", "gpt-5");
+		const shared = makeModel("openai", "gpt-5", undefined, FULL_LADDER);
 		const lowBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Low));
 		const maxBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Max));
 		const rows = renderRows(
@@ -444,7 +451,7 @@ describe("ModelBrowser effort badge", () => {
 		// slow:max on one model. resolveTemporaryModelThinkingLevel still
 		// iterates the hidden role and applies low on Enter, so the picker
 		// row must advertise low, not max.
-		const shared = makeModel("openai", "gpt-5");
+		const shared = makeModel("openai", "gpt-5", undefined, FULL_LADDER);
 		const lowBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Low));
 		const maxBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Max));
 		const browser = new ModelBrowser(Settings.isolated({ modelTags: { default: { hidden: true } } }), {
@@ -523,7 +530,7 @@ describe("ModelBrowser effort badge", () => {
 	test("hidden badges suppress session, own-role, and role-derived levels", () => {
 		// Task-subagent target mode: neither the session effort nor any role
 		// level transfers, so every row stays unbadged while hidden.
-		const shared = makeModel("openai", "gpt-5");
+		const shared = makeModel("openai", "gpt-5", undefined, FULL_LADDER);
 		const browser = new ModelBrowser(Settings.isolated({}), {
 			sessionThinkingLevel: ThinkingLevel.High,
 		});
@@ -608,7 +615,7 @@ describe("ModelBrowser effort badge", () => {
 	test("quick-role row resolves its own role level before the model-wide fallback", () => {
 		// `@slow` at max shares its model with `default` at low: the row must
 		// show max (what Enter applies), never default's low.
-		const shared = makeModel("openai", "gpt-5");
+		const shared = makeModel("openai", "gpt-5", undefined, FULL_LADDER);
 		const items: ModelBrowserItem[] = [
 			...buildBrowserItems([shared]),
 			{ provider: "", id: "@slow", model: shared, selector: "@slow", thinkingLevel: ThinkingLevel.Max },
@@ -645,6 +652,66 @@ describe("ModelBrowser effort badge", () => {
 		expect(rows[2]).not.toContain("\t");
 		expect(rows[2]).not.toContain("\n");
 		expect(rows[2]).not.toContain("\x01");
+	});
+	test("picker clamps an out-of-ladder role level to the model's effort", () => {
+		// P2 (PR #11330, thread 3975504061): default:max on a model capped at
+		// high. Enter clamps through setThinkingLevel, so the picker row must
+		// advertise high — the level the switch actually applies — not max.
+		const capped = makeModel("test", "capped-1", undefined, [Effort.Low, Effort.Medium, Effort.High]);
+		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
+		const maxBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Max));
+		const rows = renderRows(
+			[capped],
+			{
+				default: {
+					model: capped,
+					thinkingLevel: ThinkingLevel.Max,
+					autoSelected: false,
+					explicitThinkingLevel: true,
+				},
+			},
+			{ suppressDerivedThinkingLevels: true },
+		);
+
+		expect(rows[2]).toContain(highBadge);
+		expect(rows[2]).not.toContain(maxBadge);
+	});
+	test("quick-role row clamps its own level to the model's effort", () => {
+		// Same P2: a virtual @role row with an explicit :max on a model
+		// capped at high applies high on Enter, so its badge must agree.
+		const capped = makeModel("test", "capped-1", undefined, [Effort.Low, Effort.Medium, Effort.High]);
+		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
+		const maxBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.Max));
+		const items: ModelBrowserItem[] = [
+			...buildBrowserItems([capped]),
+			{ provider: "", id: "@fast", model: capped, selector: "@fast", thinkingLevel: ThinkingLevel.Max },
+		];
+		const rows = renderRows([capped], {}, { suppressDerivedThinkingLevels: true }, items);
+
+		expect(rows[3]).toContain("@fast");
+		expect(rows[3]).toContain(highBadge);
+		expect(rows[3]).not.toContain(maxBadge);
+	});
+	test("picker omits the badge when the model has no controllable effort", () => {
+		// Same P2: a :high role on a non-reasoning model applies no effort
+		// (setThinkingLevel resolves it to undefined), so the row stays
+		// unbadged instead of advertising high.
+		const plain = makeModel("test", "plain-1");
+		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
+		const rows = renderRows(
+			[plain],
+			{
+				default: {
+					model: plain,
+					thinkingLevel: ThinkingLevel.High,
+					autoSelected: false,
+					explicitThinkingLevel: true,
+				},
+			},
+			{ suppressDerivedThinkingLevels: true },
+		);
+
+		expect(rows[2]).not.toContain(highBadge);
 	});
 });
 
