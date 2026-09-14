@@ -605,9 +605,9 @@ const TASKFILE_BASENAMES: Record<string, true> = {
 /** First bytes read when sniffing a YAML file for Ansible markers. */
 const ANSIBLE_SNIFF_BYTES = 8192;
 
-/** Ansible play/task keys. Indentation is capped at two spaces so play/task roots match while deeply nested keys in unrelated YAML (Spring, Helm values) do not. Residual markers are line-anchored like the first alternation so comments and prose cannot match: `become:` must start a YAML key line, `ansible.builtin.<module>:` must start a module invocation, and `action: ansible.builtin.<module>` covers the action-form module spelling (no trailing colon; arguments follow the name). */
+/** Ansible play/task keys. Indentation is capped at two spaces so play/task roots match while deeply nested keys in unrelated YAML (Spring, Helm values) do not. Play keys accept YAML single- and double-quoted spellings (`- "hosts": all`, `"tasks":`): quoting is legal at the top level and a quoted key otherwise hides the playbook from the signal (thread iA2Cp). The quote group backreferences itself so mixed `"tasks':` spellings never match. Residual markers are line-anchored like the first alternation so comments and prose cannot match: `become:` must start a YAML key line, `ansible.builtin.<module>:` must start a module invocation, and `action: ansible.builtin.<module>` covers the action-form module spelling (no trailing colon; arguments follow the name). */
 const ANSIBLE_CONTENT_SIGNAL =
-	/(^|\n) {0,2}(-\s+)?(hosts|tasks|roles|handlers|pre_tasks|post_tasks|gather_facts|import_playbook)\s*:|(^|\n)[ \t]*(-\s+)?become\s*:\s*(true|yes)\b|(^|\n)[ \t]*(-\s+)?ansible\.builtin\.[a-z0-9_]+\s*:|(^|\n)[ \t]*(-\s+)?action\s*:\s*ansible\.builtin\.[a-z0-9_]+\b/;
+	/(^|\n) {0,2}(-\s+)?(["']?)(hosts|tasks|roles|handlers|pre_tasks|post_tasks|gather_facts|import_playbook)\3\s*:|(^|\n)[ \t]*(-\s+)?become\s*:\s*(true|yes)\b|(^|\n)[ \t]*(-\s+)?ansible\.builtin\.[a-z0-9_]+\s*:|(^|\n)[ \t]*(-\s+)?action\s*:\s*ansible\.builtin\.[a-z0-9_]+\b/;
 /**
  * Bare short module names for standalone task lists (thread 3_u9). A task
  * file outside the structural directories (e.g. `includes/setup.yml`) has
@@ -670,6 +670,19 @@ const ANSIBLE_SHORT_TASK_MODULES: Record<string, true> = {
 	setup: true,
 	ping: true,
 };
+/**
+ * Short names that also open list items in other CI DSLs, excluded from the
+ * nameless `- <module>:` branch only (thread iA2Ck): Azure Pipelines opens
+ * steps with `- script:` and `- template:`, Buildkite with `- command:` and
+ * `- group:`, and neither shape carries a document veto marker. They still
+ * count as `- name:` siblings, where the task structure disambiguates them.
+ */
+const TASK_LIST_BARE_OPENER_EXCLUDED: Record<string, true> = {
+	script: true,
+	template: true,
+	command: true,
+	group: true,
+};
 const TASK_LIST_NAME_OPENER = /^[ \t]*-\s+name\s*:/;
 const TASK_LIST_MODULE_OPENER = /^[ \t]*-\s+([A-Za-z0-9_]+)\s*:/;
 const TASK_LIST_SIBLING_KEY = /^[ \t]+([A-Za-z0-9_]+)\s*:/;
@@ -684,7 +697,12 @@ function hasShortModuleTaskItem(strippedHead: string): boolean {
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index];
 		const moduleOpener = TASK_LIST_MODULE_OPENER.exec(line);
-		if (moduleOpener && ANSIBLE_SHORT_TASK_MODULES[moduleOpener[1]]) return true;
+		if (
+			moduleOpener &&
+			!TASK_LIST_BARE_OPENER_EXCLUDED[moduleOpener[1]] &&
+			ANSIBLE_SHORT_TASK_MODULES[moduleOpener[1]]
+		)
+			return true;
 		if (!TASK_LIST_NAME_OPENER.test(line)) continue;
 		const openerIndent = countLeadingSpaces(line);
 		let next = index + 1;
@@ -697,9 +715,9 @@ function hasShortModuleTaskItem(strippedHead: string): boolean {
 	return false;
 }
 
-/** Top-level Kubernetes manifest keys, tested independently so key order cannot matter. Both stay anchored to column 0 so playbooks that embed an inline manifest under `definition:` (indented keys) are not mistaken for manifests. */
-const KUBERNETES_API_SIGNAL = /^apiVersion\s*:\s*\S/m;
-const KUBERNETES_KIND_SIGNAL = /^kind\s*:\s*\S/m;
+/** Top-level Kubernetes manifest keys, tested independently so key order cannot matter. Both stay anchored to column 0 so playbooks that embed an inline manifest under `definition:` (indented keys) are not mistaken for manifests. Both accept YAML single- and double-quoted spellings, like the workflow veto: quoting is legal at the top level and a quoted key otherwise hides the manifest from the veto (thread iA2Cn). */
+const KUBERNETES_API_SIGNAL = /^(?:"apiVersion"|'apiVersion'|apiVersion)\s*:\s*\S/m;
+const KUBERNETES_KIND_SIGNAL = /^(?:"kind"|'kind'|kind)\s*:\s*\S/m;
 /**
  * Top-level GitHub Actions keys, anchored to column 0 like the Kubernetes and
  * Compose vetoes. A playbook may embed a workflow document in a block scalar

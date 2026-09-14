@@ -5738,4 +5738,61 @@ describe("ansible lsp", () => {
 			tempDir.removeSync();
 		}
 	});
+	it("does not route Azure Pipelines or Buildkite steps to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-cisteps-");
+		try {
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const azure = path.join(tempDir.path(), "azure-pipelines.yml");
+			fs.writeFileSync(azure, "trigger:\n  - main\nsteps:\n  - script: echo hello\n    displayName: greet\n");
+			expect(getLspServerForFile(config, azure, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+			const azureTemplate = path.join(tempDir.path(), "azure-template.yml");
+			fs.writeFileSync(azureTemplate, "steps:\n  - template: build.yml\n");
+			expect(getLspServerForFile(config, azureTemplate, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+			const buildkite = path.join(tempDir.path(), "pipeline.yml");
+			fs.writeFileSync(buildkite, "steps:\n  - command: make test\n  - group: deploy\n");
+			expect(getLspServerForFile(config, buildkite, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("still routes named template tasks to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-namedtpl-");
+		try {
+			const dir = path.join(tempDir.path(), "includes");
+			fs.mkdirSync(dir, { recursive: true });
+			const filePath = path.join(dir, "web.yml");
+			fs.writeFileSync(filePath, "- name: Render config\n  template:\n    src: web.j2\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("vetoes manifests with quoted discriminator keys", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-quotedk8s-");
+		try {
+			const filePath = path.join(tempDir.path(), "widget.yml");
+			fs.writeFileSync(
+				filePath,
+				'"apiVersion": acme/v1\n"kind": Widget\nmetadata:\n  name: web\nspec:\n  tasks:\n    - deploy\n',
+			);
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+			expect(names).not.toContain("ansible");
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("routes playbooks with quoted structural keys to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-quotedplay-");
+		try {
+			const filePath = path.join(tempDir.path(), "deploy.yml");
+			fs.writeFileSync(filePath, '- "hosts": all\n  "tasks":\n    - name: ping\n');
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
 });
