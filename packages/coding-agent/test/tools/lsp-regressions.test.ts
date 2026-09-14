@@ -5649,4 +5649,93 @@ describe("ansible lsp", () => {
 			tempDir.removeSync();
 		}
 	});
+	it("routes standalone task lists with short module names to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-shortmod-");
+		try {
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const dir = path.join(tempDir.path(), "includes");
+			fs.mkdirSync(dir, { recursive: true });
+			const named = path.join(dir, "setup.yml");
+			fs.writeFileSync(named, "- name: Install\n  apt:\n    name: nginx\n");
+			expect(getLspServerForFile(config, named, { projectRoot: tempDir.path() })?.[0]).toBe("ansible");
+			const nameless = path.join(dir, "packages.yml");
+			fs.writeFileSync(nameless, "- apt:\n    name: nginx\n");
+			expect(getLspServerForFile(config, nameless, { projectRoot: tempDir.path() })?.[0]).toBe("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("does not route named-object lists without ansible modules to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-namedlist-");
+		try {
+			const filePath = path.join(tempDir.path(), "servers.yml");
+			fs.writeFileSync(filePath, "servers:\n  - name: web\n    ip: 10.0.0.1\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+			expect(names).not.toContain("ansible");
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("vetoes workflows with quoted top-level keys", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-quotedwf-");
+		try {
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			for (const [stem, quote] of [
+				["quoted-double", '"'],
+				["quoted-single", "'"],
+			] as const) {
+				const filePath = path.join(tempDir.path(), `${stem}.yml`);
+				fs.writeFileSync(filePath, `${quote}on${quote}: [push]\njobs:\n  tasks:\n    runs-on: ubuntu-latest\n`);
+				const names = getServersForFile(config, filePath, { projectRoot: tempDir.path() }).map(([name]) => name);
+				expect(names).not.toContain("ansible");
+				expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+			}
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("does not route comment or scalar prose mentioning ansible markers to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-prose-");
+		try {
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const commented = path.join(tempDir.path(), "notes.yml");
+			fs.writeFileSync(commented, "# become: true is not a key here\nnote: plain yaml\n");
+			expect(getLspServerForFile(config, commented, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+			const documented = path.join(tempDir.path(), "docs.yml");
+			fs.writeFileSync(documented, "docs: |\n  see ansible.builtin.copy for details\nnote: plain yaml\n");
+			expect(getLspServerForFile(config, documented, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("defeats the ansible container signal inside role payload directories", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-container-");
+		try {
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const payload = path.join(tempDir.path(), "ansible", "roles", "web", "files", "openapi.yaml");
+			fs.mkdirSync(path.dirname(payload), { recursive: true });
+			fs.writeFileSync(payload, "openapi: 3.0.0\ninfo:\n  title: web\n  version: '1'\npaths: {}\n");
+			expect(getLspServerForFile(config, payload, { projectRoot: tempDir.path() })?.[0]).toBe("yamlls");
+			const requirements = path.join(tempDir.path(), "ansible", "requirements.yml");
+			fs.writeFileSync(requirements, "- src: geerlingguy.nginx\n  version: 3.4.0\n");
+			expect(getLspServerForFile(config, requirements, { projectRoot: tempDir.path() })?.[0]).toBe("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("keeps group variable files with manifest key names routed to ansible", () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ansible-groupvars-");
+		try {
+			const dir = path.join(tempDir.path(), "group_vars");
+			fs.mkdirSync(dir, { recursive: true });
+			const filePath = path.join(dir, "all.yml");
+			fs.writeFileSync(filePath, "apiVersion: v1\nkind: Config\nreplicas: 3\n");
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			expect(getLspServerForFile(config, filePath, { projectRoot: tempDir.path() })?.[0]).toBe("ansible");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
 });

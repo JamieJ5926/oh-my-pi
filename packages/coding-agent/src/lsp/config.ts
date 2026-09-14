@@ -608,6 +608,94 @@ const ANSIBLE_SNIFF_BYTES = 8192;
 /** Ansible play/task keys. Indentation is capped at two spaces so play/task roots match while deeply nested keys in unrelated YAML (Spring, Helm values) do not. Residual markers are line-anchored like the first alternation so comments and prose cannot match: `become:` must start a YAML key line, `ansible.builtin.<module>:` must start a module invocation, and `action: ansible.builtin.<module>` covers the action-form module spelling (no trailing colon; arguments follow the name). */
 const ANSIBLE_CONTENT_SIGNAL =
 	/(^|\n) {0,2}(-\s+)?(hosts|tasks|roles|handlers|pre_tasks|post_tasks|gather_facts|import_playbook)\s*:|(^|\n)[ \t]*(-\s+)?become\s*:\s*(true|yes)\b|(^|\n)[ \t]*(-\s+)?ansible\.builtin\.[a-z0-9_]+\s*:|(^|\n)[ \t]*(-\s+)?action\s*:\s*ansible\.builtin\.[a-z0-9_]+\b/;
+/**
+ * Bare short module names for standalone task lists (thread 3_u9). A task
+ * file outside the structural directories (e.g. `includes/setup.yml`) has
+ * no play-level key and no FQCN spelling, so the content signal above stays
+ * silent on `- name: Install` plus `apt:`. These names count only as task
+ * structure (see `hasShortModuleTaskItem`): a bare `service:` or `user:` key
+ * in unrelated YAML must not route by itself. Workflow steps (`run:`,
+ * `uses:`) and Kubernetes list items (`image:`, `ports:`, `value:`) are
+ * deliberately absent, and the document vetoes run before this check, so a
+ * workflow or manifest that also lists names stays vetoed.
+ */
+const ANSIBLE_SHORT_TASK_MODULES: Record<string, true> = {
+	apt: true,
+	yum: true,
+	dnf: true,
+	package: true,
+	pip: true,
+	copy: true,
+	template: true,
+	file: true,
+	lineinfile: true,
+	blockinfile: true,
+	service: true,
+	systemd: true,
+	command: true,
+	shell: true,
+	script: true,
+	raw: true,
+	git: true,
+	get_url: true,
+	uri: true,
+	unarchive: true,
+	synchronize: true,
+	fetch: true,
+	user: true,
+	group: true,
+	authorized_key: true,
+	cron: true,
+	mount: true,
+	sysctl: true,
+	hostname: true,
+	reboot: true,
+	wait_for: true,
+	pause: true,
+	stat: true,
+	find: true,
+	replace: true,
+	set_fact: true,
+	debug: true,
+	assert: true,
+	fail: true,
+	meta: true,
+	include_tasks: true,
+	import_tasks: true,
+	include_role: true,
+	import_role: true,
+	include_vars: true,
+	add_host: true,
+	group_by: true,
+	setup: true,
+	ping: true,
+};
+const TASK_LIST_NAME_OPENER = /^[ \t]*-\s+name\s*:/;
+const TASK_LIST_MODULE_OPENER = /^[ \t]*-\s+([A-Za-z0-9_]+)\s*:/;
+const TASK_LIST_SIBLING_KEY = /^[ \t]+([A-Za-z0-9_]+)\s*:/;
+/**
+ * Recognize standalone task lists that use short module names: a `- name:`
+ * item whose next non-blank line is a deeper-indented short-module key, or
+ * a nameless `- <module>:` item. Runs on the scalar-stripped head so task
+ * names quoted inside documentation scalars cannot match.
+ */
+function hasShortModuleTaskItem(strippedHead: string): boolean {
+	const lines = strippedHead.split("\n");
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index];
+		const moduleOpener = TASK_LIST_MODULE_OPENER.exec(line);
+		if (moduleOpener && ANSIBLE_SHORT_TASK_MODULES[moduleOpener[1]]) return true;
+		if (!TASK_LIST_NAME_OPENER.test(line)) continue;
+		const openerIndent = countLeadingSpaces(line);
+		let next = index + 1;
+		while (next < lines.length && lines[next].trim() === "") next++;
+		if (next >= lines.length) continue;
+		const sibling = TASK_LIST_SIBLING_KEY.exec(lines[next]);
+		if (sibling && countLeadingSpaces(lines[next]) > openerIndent && ANSIBLE_SHORT_TASK_MODULES[sibling[1]])
+			return true;
+	}
+	return false;
+}
 
 /** Top-level Kubernetes manifest keys, tested independently so key order cannot matter. Both stay anchored to column 0 so playbooks that embed an inline manifest under `definition:` (indented keys) are not mistaken for manifests. */
 const KUBERNETES_API_SIGNAL = /^apiVersion\s*:\s*\S/m;
@@ -616,10 +704,12 @@ const KUBERNETES_KIND_SIGNAL = /^kind\s*:\s*\S/m;
  * Top-level GitHub Actions keys, anchored to column 0 like the Kubernetes and
  * Compose vetoes. A playbook may embed a workflow document in a block scalar
  * (`content: |`); the indented `on:`/`jobs:` lines inside that scalar must not
- * veto the enclosing playbook.
+ * veto the enclosing playbook. Both keys accept YAML single- and
+ * double-quoted spellings (`"on": [push]`): quoting is legal at the top
+ * level and a quoted key otherwise hides the workflow from the veto.
  */
-const WORKFLOW_SIGNAL = /^on\s*:/m;
-const WORKFLOW_JOBS_SIGNAL = /^jobs\s*:/m;
+const WORKFLOW_SIGNAL = /^(?:"on"|'on'|on)\s*:/m;
+const WORKFLOW_JOBS_SIGNAL = /^(?:"jobs"|'jobs'|jobs)\s*:/m;
 /** Top-level Compose key, anchored to column 0 so nested `services:` keys inside playbooks cannot veto them. */
 const COMPOSE_SIGNAL = /^services\s*:/m;
 /**
@@ -638,8 +728,10 @@ const COMPOSE_SIGNAL = /^services\s*:/m;
  * (CONTRACT-COMBO.md §1); the truncated 8192-byte sniff head additionally
  * cannot feed a whole-document parser. Hence this line filter.
  */
-const YAML_BLOCK_SCALAR_MAP_HEADER = /^([ ]*)(-\s+)?((?:"(?:[^"\n]|"")*"|'(?:[^'\n]|'')*'|[^#:\n][^:\n]*)):\s*(?:[&!][^\s:,<>\[\]{},"]+(?:\s+[&!][^\s:,<>\[\]{},"]+)?\s+)?([|>])([-+]?[1-9]?|[1-9][-+]?)?\s*(#.*)?$/;
-const YAML_BLOCK_SCALAR_SEQ_HEADER = /^([ ]*)-\s+(?:[&!][^\s:,<>\[\]{},"]+(?:\s+[&!][^\s:,<>\[\]{},"]+)?\s+)?([|>])([-+]?[1-9]?|[1-9][-+]?)?\s*(#.*)?$/;
+const YAML_BLOCK_SCALAR_MAP_HEADER =
+	/^([ ]*)(-\s+)?((?:"(?:[^"\n]|"")*"|'(?:[^'\n]|'')*'|[^#:\n][^:\n]*)):\s*(?:[&!][^\s:,<>[\]{},"]+(?:\s+[&!][^\s:,<>[\]{},"]+)?\s+)?([|>])([-+]?[1-9]?|[1-9][-+]?)?\s*(#.*)?$/;
+const YAML_BLOCK_SCALAR_SEQ_HEADER =
+	/^([ ]*)-\s+(?:[&!][^\s:,<>[\]{},"]+(?:\s+[&!][^\s:,<>[\]{},"]+)?\s+)?([|>])([-+]?[1-9]?|[1-9][-+]?)?\s*(#.*)?$/;
 const YAML_BLOCK_SCALAR_ROOT_HEADER = /^([ ]*)([|>])([-+]?[1-9]?|[1-9][-+]?)?\s*(#.*)?$/;
 
 function countLeadingSpaces(line: string): number {
@@ -871,11 +963,14 @@ export function isAnsibleFile(filePath: string, options?: AnsibleFileOptions): b
 	// scalar quoting `become:`/`ansible.builtin.*` lines must not count as
 	// Ansible markers (thread :587; CONTRACT-C12.md §2). Vetoes above keep
 	// the raw head — they are column-0 anchored and scalar bodies always
-	// carry indent, so a body line can never match them.
-	if (ANSIBLE_CONTENT_SIGNAL.test(stripYamlBlockScalarBodies(head))) return true;
+	// carry indent, so a body line can never match them. The stripped head
+	// is computed once: both the keyword signal and the task-list structure
+	// check (thread 3_u9) read structure, never scalar prose.
+	const strippedHead = stripYamlBlockScalarBodies(head);
+	if (ANSIBLE_CONTENT_SIGNAL.test(strippedHead)) return true;
+	if (hasShortModuleTaskItem(strippedHead)) return true;
 	return ansiblePath;
 }
-
 
 /**
  * Find all servers that can handle a file based on extension.
