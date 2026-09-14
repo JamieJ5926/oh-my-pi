@@ -1232,6 +1232,16 @@ export class SessionManager {
 			this.#rewriteSynchronously();
 			return;
 		}
+		// The cached writer may reference an inode the GC unlinked and recreated
+		// after the writer opened: appending through it would persist the entry
+		// into the unlinked file while the title slot below updates the current
+		// path. Refresh only when every append through this manager was
+		// synchronous, so the detached writer has no in-flight append an async
+		// close could land after the fresh handle's write. File writers close
+		// their fd synchronously inside close(), so the reopen under this lock
+		// (which the GC also takes to delete) follows the current file.
+		const cachedWriter = this.#writer?.isOpen() ? this.#writer : undefined;
+		if (cachedWriter?.appendSync) this.#closeWriterEventually();
 		const writer = this.#appendWriter();
 		if (!this.#storage.existsSync(sessionFile) || this.#storage.statSync(sessionFile).size === 0) {
 			// The GC removed the file while the writer opened, so the writer's
@@ -1241,10 +1251,37 @@ export class SessionManager {
 			return;
 		}
 		const line = this.#lineFor(entry);
+		// An async-only writer cannot publish before this synchronous callback
+		// returns and the lock is released: fire-and-forget would let close()'s
+		// GC decide on a file that does not carry the entry yet, and a post-close
+		// landing would append to a closed writer. Serialize the publish on the
+		// disk tail instead so close() awaits it, and keep the rewrite debt so a
+		// superseding rewrite (or the next locked durable write) republishes
+		// under a lock. Epoch-skipped tail work is already covered: the rewrite
+		// that bumped the epoch republished this entry in full.
+		let publishedSync = true;
 		if (writer.appendSync) {
 			writer.appendSync(line);
 		} else {
-			void writer.append(line).catch(err => {
+			publishedSync = false;
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#hasTitleSlot = false;
+			// Clear the retained debt when the queued publish actually lands:
+			// leaving rewriteRequired set would force the next write into a
+			// full-body rewrite from a journal that never saw another manager's
+			// durable append and drop it. Clear only in the same generation
+			// with no failure latched, so a superseding rewrite or any other
+			// failure keeps its own state (an epoch-skipped body never runs).
+			const publishEpoch = this.#diskEpoch;
+			void this.#scheduleDiskWork(async () => {
+				await writer.append(line);
+				if (this.#diskEpoch === publishEpoch && !this.#diskFailure) {
+					this.#fileIsCurrent = true;
+					this.#rewriteRequired = false;
+					this.#hasTitleSlot = true;
+				}
+			}).catch(err => {
 				this.#fileIsCurrent = false;
 				this.#rewriteRequired = true;
 				this.#noteDiskFailure(err);
@@ -1254,12 +1291,28 @@ export class SessionManager {
 		if (updateSessionTitleSync) {
 			updateSessionTitleSync.call(this.#storage, sessionFile, update);
 		} else {
-			void this.#storage.updateSessionTitle(sessionFile, update).catch(err => {
+			publishedSync = false;
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#hasTitleSlot = false;
+			// Same debt clearing as the entry publish above: a landed title
+			// slot needs no reconciling rewrite, while any failure keeps the
+			// debt for the next locked publish.
+			const titleEpoch = this.#diskEpoch;
+			void this.#scheduleDiskWork(async () => {
+				await this.#storage.updateSessionTitle(sessionFile, update);
+				if (this.#diskEpoch === titleEpoch && !this.#diskFailure) {
+					this.#fileIsCurrent = true;
+					this.#rewriteRequired = false;
+					this.#hasTitleSlot = true;
+				}
+			}).catch(err => {
 				this.#fileIsCurrent = false;
 				this.#rewriteRequired = true;
 				this.#noteDiskFailure(err);
 			});
 		}
+		if (!publishedSync) return;
 		this.#clearDiskError();
 		this.#fileIsCurrent = true;
 		this.#rewriteRequired = false;
@@ -2088,9 +2141,14 @@ export class SessionManager {
 		try {
 			// A veto from a late draft leaves the session a draft-only GC target,
 			// so its marker must survive for `consumeDraft` to re-arm cleanup
-			// later. Only durable or invalid content retires the marker.
+			// later. Only a predicate verdict on durable or invalid content retires
+			// the marker: a missing file never ran the predicate, so its artifacts
+			// already went with whoever deleted it — and a session re-materialized
+			// after the lock released owns its fresh marker.
 			let vetoedByDraft = false;
+			let predicateRan = false;
 			const deleted = await deleteSessionWithArtifactsIf.call(this.#storage, sessionFile, (content, complete) => {
+				predicateRan = true;
 				const onDisk = parseSessionContent(content);
 				if (!onDisk.entries.slice(1).every(isDraftOnlyMetadataEntry)) return false;
 				// A bounded prefix without durable content only proves the body
@@ -2106,7 +2164,12 @@ export class SessionManager {
 				return true;
 			});
 			if (!deleted) {
-				if (!vetoedByDraft) await this.#clearDraftOnlySessionMarker();
+				// A missing file returns before the predicate runs (ENOENT probe
+				// in FileSessionStorage, null readFull in IndexedSessionStorage),
+				// so this verdict carries no information about the marker: leave
+				// it for whoever owns the session now — same as the missing-file
+				// entry path that only disarms.
+				if (predicateRan && !vetoedByDraft) await this.#clearDraftOnlySessionMarker();
 				this.#draftOnlySessionCleanupArmed = false;
 				return;
 			}
@@ -2413,6 +2476,14 @@ export class SessionManager {
 			sessionFile !== undefined &&
 			!this.#storage.existsSync(sessionFile) &&
 			this.#entries.every(isDraftOnlyMetadataEntry);
+		// Snapshot marker eligibility BEFORE the await below: GC during
+		// ensureOnDisk can remove the file and its marker, and the post-await
+		// check alone would then miss the resume and write the sidecar unlocked
+		// without re-materializing the session. A marker created during the
+		// await is still honored through markerBackedResume; a marker removed
+		// during the await means the session went with it, so the locked path
+		// below recreates both.
+		const markerBackedPreAwait = this.#hasDraftOnlySessionMarker();
 		// Force the header onto disk so resume can find the file this draft attaches to.
 		await this.ensureOnDisk();
 
@@ -2428,7 +2499,10 @@ export class SessionManager {
 		// outlives the session `--resume` looks for.
 		if (
 			sessionFile !== undefined &&
-			(draftWillMaterializeMetadataOnlyFile || this.#draftOnlySessionCleanupArmed || markerBackedResume) &&
+			(draftWillMaterializeMetadataOnlyFile ||
+				this.#draftOnlySessionCleanupArmed ||
+				markerBackedPreAwait ||
+				markerBackedResume) &&
 			this.#storage.withSessionFileLockSync !== undefined
 		) {
 			const withSessionFileLockSync = this.#storage.withSessionFileLockSync;
@@ -2438,7 +2512,7 @@ export class SessionManager {
 						this.#forceFileCreation = true;
 						this.#rewriteSynchronously();
 					}
-					if (draftWillMaterializeMetadataOnlyFile || markerBackedResume) {
+					if (draftWillMaterializeMetadataOnlyFile || markerBackedPreAwait || markerBackedResume) {
 						const markerPath = this.#draftOnlySessionMarkerPath();
 						if (markerPath) this.#storage.writeTextSync(markerPath, "");
 						this.#draftOnlySessionCleanupArmed = true;

@@ -386,7 +386,30 @@ export class IndexedSessionStorage implements SessionStorage {
 					// Already gone (or never published): same "not deleted"
 					// verdict the file backend reports for a missing file.
 					if (content === null) return;
-					if (!shouldDelete(content, true)) return;
+					// Cross-instance draft visibility: the predicate below only
+					// sees this instance's index, so a draft sidecar another
+					// instance published straight to the backend would be
+					// invisible and the remove below would orphan that draft.
+					// Briefly lend the verdict the backend's draft key so the
+					// predicate's own existsSync veto fires and the caller keeps
+					// the marker; the loan is withdrawn before anything else runs
+					// (the predicate is synchronous, so no await can observe it).
+					// A draft landing after this read still races `remove` --
+					// closing that window needs a backend conditional-remove
+					// primitive `SessionStorageBackend` does not offer.
+					const draftPath = `${prefix}draft.txt`;
+					const backendDraft = await this.#backend.readFull(draftPath);
+					// Re-validate AFTER the await: a same-instance publish during
+					// the read populates the real index entry, which must never
+					// be lent over. Set-through-finally holds no yield (the
+					// predicate is synchronous), so nothing else can interleave.
+					const lentDraft = backendDraft !== null && !this.#index.has(draftPath);
+					if (lentDraft) this.#index.set(draftPath, { size: 0, mtimeMs: 0 });
+					try {
+						if (!shouldDelete(content, true)) return;
+					} finally {
+						if (lentDraft) this.#index.delete(draftPath);
+					}
 					for (const path of paths) this.#index.delete(path);
 					await this.#backend.remove(paths);
 					deleted = true;
