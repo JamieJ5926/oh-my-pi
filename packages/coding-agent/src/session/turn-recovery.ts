@@ -1885,7 +1885,6 @@ export class TurnRecovery {
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
-		if (message.errorStatus === 402 && is402BillingCapBody(message.errorMessage)) return false;
 		const model = this.#host.model();
 		if (!model) return false;
 		const immutableAnthropicThinkingError =

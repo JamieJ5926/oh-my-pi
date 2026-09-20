@@ -76,7 +76,7 @@ function billingCapMessage(current: Model): AssistantMessage {
 	} as unknown as AssistantMessage;
 }
 
-describe("spawn-abort: 402 billing cap surfaces instead of substitute-then-abort", () => {
+describe("spawn-abort: 402 billing cap is not same-model retryable and is chain-fallback eligible", () => {
 	const current = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!current) throw new Error("Expected bundled model anthropic/claude-sonnet-4-5");
 	const fallback = getBundledModel("openai", "gpt-4o-mini");
@@ -99,13 +99,13 @@ describe("spawn-abort: 402 billing cap surfaces instead of substitute-then-abort
 		tempDir.removeSync();
 	});
 
-	test("402 Insufficient Balance is not retryable and not fallback eligible", () => {
+	test("402 Insufficient Balance is not retryable on the same model and is hard-error fallback eligible", () => {
 		const host = createHost(current, modelRegistry, {
 			default: [`${fallback.provider}/${fallback.id}`],
 		});
 		const recovery = new TurnRecovery(host);
 		const message = billingCapMessage(current);
 		expect(recovery.isRetryableError(message)).toBe(false);
-		expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
+		expect(recovery.isHardErrorFallbackEligible(message)).toBe(true);
 	});
 });
