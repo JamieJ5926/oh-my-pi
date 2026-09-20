@@ -7,12 +7,19 @@ import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task";
 // Golden render accepted by Jamie on 2026-09-08 ("no its right", pane w2B:pDQ, build cf46fb59).
 // Changing this snapshot requires a brief that quotes the ask changing the HUD.
 // Standing order 14, reviews/orchestrate/2026-09-08-autonomous-repairs/preferences.md.
-// Ask changing this snapshot, Jamie's FINAL subagents-HUD row spec of 2026-09-11, verbatim: "Row = [▾/▸ only if
-// children] ● (BIG own-state dot: yellow running, green done, red failed) Name  description(flex, truncate last)
-// strip  tokens  model-emoji" — the strip counts the child rows a lane draws (a collapsed same-role group is one)
-// and the members a group row folds in; member names carry no dots, leaves blank.
+// Ask changing this snapshot, Jamie 2026-09-20: "instead of gem at the end can we make it like
+// ⟨poteto-agent⟩⟨model-thinking⟩⟨provider emoji⟩". The 2026-09-11 "model-emoji" clause described the
+// row when the emoji WAS the model information. Once id:level is on the row the emoji is redundant
+// and drops before the model id. Seat stays on the name. Strip still counts child rows a lane draws.
 
-function session(id: string, agent: string, status: ObservableSession["status"], tokens: number, description?: string): ObservableSession {
+function session(
+	id: string,
+	agent: string,
+	status: ObservableSession["status"],
+	tokens: number,
+	description?: string,
+	resolvedModel = "cli-proxy/dddai.grok-4.6:high",
+): ObservableSession {
 	const progress: AgentProgress = {
 		id,
 		index: 0,
@@ -27,6 +34,7 @@ function session(id: string, agent: string, status: ObservableSession["status"],
 		tokens,
 		cost: 0,
 		durationMs: 0,
+		resolvedModel,
 	};
 	return { kind: "subagent", id, label: id, status, detached: true, lastUpdate: 0, agent, description, progress };
 }
@@ -47,18 +55,14 @@ const ancestry = sessions
 	.map(s => ({ id: s.id, parentId: s.id.slice(0, s.id.lastIndexOf(".")) }));
 
 const GOLDEN_COMPLETED = ["● SkillsTrack -> ● ScriptsTrack"];
-// The role cell (Jamie's follow-up, 2026-09-11, verbatim): "non-group rows (leads/parents and single lanes) must
-// show the role in angle brackets after the name, dim, like the installed renderer did: `● GateOff ⟨poteto-agent⟩
-// <description>`. Group rows keep `role ×N` (no brackets)." The brackets are U+27E8/U+27E9, the generic `task`
-// worker draws no badge, and every row shares one description column so the cell cannot push rows out of line.
 const GOLDEN_SUBAGENTS = [
 	"",
 	"Subagents",
-	"▾ ● RulesTrack ⟨poteto-agent⟩       Nested rules synthesis                               ●●           Σ 2.1m  · ?",
-	"  ├─▾ ● RulesInner ⟨poteto-agent⟩                                                        ●           Σ 82.3k  · ?",
-	"  │ └─▾ ● RulesSynth ⟨synthesizer⟩                                                       ●           Σ 39.7k  · ?",
-	"  │   └─ ● explorer ×3              RuleA  RuleB  RuleC                                  ●●●            1.2k  · ?",
-	"  └─ ● Owner ⟨owner⟩                Writes the merged file                                                2m  · ?",
+	"▾ ● RulesTrack ⟨poteto-agent⟩       Nested rules synthesis                       ●●    Σ 2.1m  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
+	"  ├─▾ ● RulesInner ⟨poteto-agent⟩                                                 ●   Σ 82.3k  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
+	"  │ └─▾ ● RulesSynth ⟨synthesizer⟩                                                ●   Σ 39.7k  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
+	"  │   └─ ● explorer ×3              RuleA  RuleB  RuleC                         ●●●      1.2k  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
+	"  └─ ● Owner ⟨owner⟩                Writes the merged file                                 2m  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
 ];
 
 describe("subagent HUD golden render", () => {
@@ -92,8 +96,8 @@ describe("subagent HUD golden render", () => {
 		for (const line of named) expect(line).toMatch(/● \S+ ⟨[a-z-]+⟩ {2,}\S/);
 		const group = lines.find(line => line.includes("explorer ×3")) ?? "";
 		expect(group).toContain("explorer ×3");
-		expect(group).not.toContain("⟨");
-		expect(group).not.toContain("⟩");
+		expect(group).not.toContain("⟨explorer⟩");
+		expect(group).not.toMatch(/● explorer ×3 ⟨[a-z-]+⟩/);
 	});
 
 	it("never renders task prompt text on any row", () => {

@@ -260,6 +260,9 @@ describe("subagent HUD lines", () => {
 		expect(out).not.toContain("end");
 		for (const line of out.split("\n")) {
 			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(60);
+			const trail = line.match(/⟨[^⟨⟩]*$/)?.[0];
+			expect(trail).toBeUndefined();
+			if (line.includes("·")) expect(line).toMatch(/· \?/);
 		}
 	});
 
@@ -427,8 +430,8 @@ describe("subagent HUD lines", () => {
 		expect(out).not.toContain("⟨task⟩");
 		const group = out.split("\n").find(line => line.includes("explorer ×3")) ?? "";
 		expect(group).toContain("explorer ×3");
-		expect(group).not.toContain("⟨");
-		expect(group).not.toContain("⟩");
+		expect(group).not.toContain("⟨explorer⟩");
+		expect(group).not.toContain("⟨task⟩");
 	});
 
 	it("holds one description column across rows, widening the block when a Name ⟨role⟩ cell overruns it", () => {
@@ -802,7 +805,7 @@ describe("subagent HUD lines", () => {
 				renderSubagentHudLines([parent, child], 160, [{ id: child.id, parentId: parent.id }]).subagents.join("\n"),
 			);
 			expect(text).toContain("Σ ");
-			expect(text).toContain(`${expected}  · ?`);
+			expect(text).toMatch(new RegExp(`${expected}\\s+· \\?`));
 			expect(parent.progress?.tokens).toBe(value);
 			expect(child.progress?.tokens).toBe(value);
 		}

@@ -124,7 +124,7 @@ import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-pro
 import { labelEchoesHandle } from "../task/label";
 import { oneLineLabel } from "../task/types";
 import { formatTaskId } from "../task/render";
-import type { ConfiguredThinkingLevel } from "../thinking";
+import { parseThinkingLevel, type ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
@@ -214,6 +214,7 @@ import {
 	type SessionObserverChangeKind,
 	SessionObserverRegistry,
 } from "./session-observer-registry";
+import { resolveServedModel } from "./served-model";
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
 import { sanitizeStatusText } from "./shared";
@@ -512,8 +513,10 @@ const SUBAGENT_HUD_ROLE_OPEN = "\u27e8";
 const SUBAGENT_HUD_ROLE_CLOSE = "\u27e9";
 const SUBAGENT_HUD_STRIP_COLS = 9;
 const SUBAGENT_HUD_TOKEN_COLS = 8;
-const SUBAGENT_HUD_MODEL_COLS = 10;
-/** Resolved-model fragments rendered as an emoji plus a short code in the model cell. */
+/** Roomy trailing cluster for `⟨id:level⟩⟨emoji⟩` plus fallback `⚠`. */
+const SUBAGENT_HUD_MODEL_COLS = 28;
+const SUBAGENT_HUD_FALLBACK_MARK = "\u26a0";
+/** Resolved-model fragments used when the full id:level cluster is squeezed. */
 const SUBAGENT_HUD_MODEL_CODES: readonly (readonly [RegExp, string, string])[] = [
 	[/muse/i, "🟣", "muse"],
 	[/deepseek.*flash/i, "🐳", "ds"],
@@ -524,6 +527,36 @@ const SUBAGENT_HUD_MODEL_CODES: readonly (readonly [RegExp, string, string])[] =
 	[/grok/i, "⚡", "grok"],
 	[/gemini|gemma/i, "💎", "gem"],
 ];
+
+type HudModelParts = {
+	provider: string;
+	id: string;
+	thinking: string;
+	emoji: string;
+	isFallback: boolean;
+};
+
+function parseHudSelector(selector: string): { provider: string; id: string; thinking: string } {
+	const colon = selector.lastIndexOf(":");
+	const explicitLevel = colon >= 0 ? parseThinkingLevel(selector.slice(colon + 1)) : undefined;
+	const modelPart = explicitLevel !== undefined ? selector.slice(0, colon) : selector;
+	const slash = modelPart.indexOf("/");
+	const provider = slash >= 0 ? modelPart.slice(0, slash) : "";
+	const id = slash >= 0 ? modelPart.slice(slash + 1) : modelPart;
+	const thinking = explicitLevel ?? (colon >= 0 && selector.slice(colon + 1) === "auto" ? "auto" : "");
+	return { provider, id, thinking };
+}
+
+function hudModelCode(id: string): { emoji: string; code: string } | undefined {
+	const known = SUBAGENT_HUD_MODEL_CODES.find(([pattern]) => pattern.test(id));
+	return known ? { emoji: known[1], code: known[2] } : undefined;
+}
+
+function wholeCell(text: string, budget: number): string {
+	if (!text) return "";
+	return visibleWidth(text) <= budget ? text : "";
+}
+
 
 function formatHudTokenCount(value: number): string {
 	if (value < 1_000) return value.toString();
@@ -644,13 +677,19 @@ export function renderSubagentHudLines(
 		if (kids.length === 0) return "";
 		return kids.some(isSubtreeActive) ? "▾" : "▸";
 	};
-	const modelCell = (session: ObservableSession): string => {
-		const resolved = session.progress?.resolvedModel;
-		if (!resolved) return "· ?";
-		const id = (resolved.split("/").pop() ?? resolved).toLowerCase();
-		const known = SUBAGENT_HUD_MODEL_CODES.find(([pattern]) => pattern.test(id));
-		return known ? `${known[1]} ${known[2]}` : "· ?";
+	const modelParts = (session: ObservableSession): HudModelParts => {
+		const served = resolveServedModel({ progress: session.progress });
+		if (!served) return { provider: "", id: "", thinking: "", emoji: "", isFallback: false };
+		const parsed = parseHudSelector(served.selector);
+		return {
+			provider: parsed.provider,
+			id: parsed.id,
+			thinking: parsed.thinking,
+			emoji: hudModelCode(parsed.id)?.emoji ?? "",
+			isFallback: served.isFallback,
+		};
 	};
+	const modelCell = (session: ObservableSession): HudModelParts => modelParts(session);
 	type Rows = { lines: string[]; depths: number[] };
 	const activeRows: Rows = { lines: [], depths: [] };
 	const completed: string[] = [];
@@ -661,7 +700,7 @@ export function renderSubagentHudLines(
 		description: string;
 		strip: string;
 		token: string;
-		model: string;
+		model: HudModelParts;
 	};
 	/** One emitted line: a standard row, or a raw indented line such as the `N active below` note. */
 	type RowEntry = { kind: "row"; cells: RowCells } | { kind: "raw"; text: string; depth: number };
@@ -677,18 +716,16 @@ export function renderSubagentHudLines(
 		marker: string;
 		state: ObservableSession["status"];
 		name: string;
-		/** Entity role cell; `task` is the absence of a role and draws no badge. Group rows omit it. */
 		role?: string;
 		description: string;
 		strip: string;
 		token: string;
-		model: string;
+		model: HudModelParts;
 	}): RowCells => {
 		const marker = row.marker ? `${row.marker} ` : " ";
 		const name = row.state === "completed" ? theme.fg("dim", row.name) : theme.bold(row.name);
 		const outcome =
 			row.state === "failed" ? theme.fg("error", "✗") : row.state === "aborted" ? theme.fg("dim", "⊘") : "";
-		// The outcome marker stays glued to the name, as shipped; the role badge follows it.
 		const role =
 			row.role && row.role !== "task"
 				? ` ${theme.fg("dim", `${SUBAGENT_HUD_ROLE_OPEN}${row.role}${SUBAGENT_HUD_ROLE_CLOSE}`)}`
@@ -709,19 +746,81 @@ export function renderSubagentHudLines(
 	const layoutRow = (cells: RowCells, descStart: number): string => {
 		const indent = indentCols(cells.depth);
 		const start = Math.max(descStart, indent + visibleWidth(cells.left) + SUBAGENT_HUD_GUTTER);
-		const descCols = Math.max(
-			SUBAGENT_HUD_MIN_DESC_COLS,
-			columns -
-				start -
-				(SUBAGENT_HUD_GUTTER * 3 + SUBAGENT_HUD_STRIP_COLS + SUBAGENT_HUD_TOKEN_COLS + SUBAGENT_HUD_MODEL_COLS),
-		);
 		const gutter = " ".repeat(SUBAGENT_HUD_GUTTER);
+		const served = cells.model;
+		const buildTrail = (opts: {
+			includeStrip: boolean;
+			includeToken: boolean;
+			includeEmoji: boolean;
+			includeThinking: boolean;
+			idMode: "full" | "ellipsize" | "drop-prefix" | "none";
+		}): { text: string; width: number } => {
+			const warn = served.isFallback ? theme.fg("warning", SUBAGENT_HUD_FALLBACK_MARK) : "";
+			const unknown = !served.id && !served.thinking && !served.isFallback;
+			let idText = served.id;
+			if (opts.idMode === "none" && !unknown) idText = "";
+			else if (opts.idMode === "ellipsize") idText = "";
+			else if (opts.idMode === "drop-prefix" && served.provider) idText = `${served.provider}/${served.id}`;
+			else idText = served.id;
+			const think = opts.includeThinking && served.thinking ? `:${served.thinking}` : "";
+			const inner = `${warn}${idText}${think}`;
+			const hasInner = !unknown && (served.isFallback || idText.length > 0 || think.length > 0);
+			const modelBracket = unknown
+				? theme.fg("dim", "· ?")
+				: hasInner
+					? `${theme.fg("dim", SUBAGENT_HUD_ROLE_OPEN)}${inner}${theme.fg("dim", SUBAGENT_HUD_ROLE_CLOSE)}`
+					: "";
+			const emoji =
+				opts.includeEmoji && served.emoji
+					? theme.fg("dim", `${SUBAGENT_HUD_ROLE_OPEN}${served.emoji}${SUBAGENT_HUD_ROLE_CLOSE}`)
+					: "";
+			const strip =
+				opts.includeStrip && cells.strip && visibleWidth(cells.strip) <= SUBAGENT_HUD_STRIP_COLS ? cells.strip : "";
+			const token = opts.includeToken ? cells.token : "";
+			const parts: string[] = [];
+			if (strip) parts.push(strip.padEnd(SUBAGENT_HUD_STRIP_COLS));
+			if (token) parts.push(`${" ".repeat(Math.max(0, SUBAGENT_HUD_TOKEN_COLS - visibleWidth(token)))}${token}`);
+			if (modelBracket || emoji) parts.push(`${modelBracket}${emoji}`);
+			const text = parts.length ? `${gutter}${parts.join(gutter)}` : "";
+			return { text, width: visibleWidth(text) };
+		};
+		const full = {
+			includeStrip: true,
+			includeToken: true,
+			includeEmoji: true,
+			includeThinking: true,
+			idMode: "full" as const,
+		};
+		let built = buildTrail(full);
+		const roomForDesc = (trailWidth: number) => columns - start - trailWidth;
+		let descCols = roomForDesc(built.width);
+		if (descCols < SUBAGENT_HUD_MIN_DESC_COLS) {
+			built = buildTrail({ ...full, includeToken: false });
+			descCols = roomForDesc(built.width);
+		}
+		if (descCols < SUBAGENT_HUD_MIN_DESC_COLS) {
+			built = buildTrail({ ...full, includeToken: false, includeStrip: false });
+			descCols = roomForDesc(built.width);
+		}
+		if (start + built.width > columns) {
+			const squeeze: Array<Parameters<typeof buildTrail>[0]> = [
+				{ includeStrip: false, includeToken: false, includeEmoji: false, includeThinking: true, idMode: "full" },
+				{ includeStrip: false, includeToken: false, includeEmoji: false, includeThinking: false, idMode: "full" },
+				{ includeStrip: false, includeToken: false, includeEmoji: false, includeThinking: false, idMode: "drop-prefix" },
+				{ includeStrip: false, includeToken: false, includeEmoji: false, includeThinking: false, idMode: "ellipsize" },
+				{ includeStrip: false, includeToken: false, includeEmoji: false, includeThinking: false, idMode: "none" },
+			];
+			for (const attempt of squeeze) {
+				built = buildTrail(attempt);
+				if (start + built.width <= columns) break;
+			}
+			descCols = Math.max(0, roomForDesc(built.width));
+		}
+		descCols = Math.max(0, descCols);
 		return (
 			`${cells.left}${" ".repeat(Math.max(0, start - indent - visibleWidth(cells.left)))}` +
 			truncateToWidth(cells.description, descCols, undefined, true) +
-			`${gutter}${truncateToWidth(cells.strip, SUBAGENT_HUD_STRIP_COLS, undefined, true)}` +
-			`${gutter}${" ".repeat(Math.max(0, SUBAGENT_HUD_TOKEN_COLS - visibleWidth(cells.token)))}${cells.token}` +
-			`${gutter}${theme.fg("dim", cells.model)}`
+			built.text
 		);
 	};
 	const delegatingRoles: Record<string, true> = { "poteto-agent": true, "poteto-agent-deep": true, owner: true };
@@ -781,7 +880,18 @@ export function renderSubagentHudLines(
 						description: group.map(member => localName(member)).join("  "),
 						strip: stripOf(group.map(member => member.status)),
 						token: formatHudTokenCount(group.reduce((sum, member) => sum + tokens(member), 0)),
-						model: group.every(member => modelCell(member) === groupModel) ? groupModel : "···",
+						model: group.every(member => {
+							const other = modelCell(member);
+							return (
+								other.provider === groupModel.provider &&
+								other.id === groupModel.id &&
+								other.thinking === groupModel.thinking &&
+								other.emoji === groupModel.emoji &&
+								other.isFallback === groupModel.isFallback
+							);
+						})
+							? groupModel
+							: { provider: "", id: "", thinking: "", emoji: "", isFallback: false },
 					}),
 				});
 				continue;
@@ -847,22 +957,12 @@ export function renderSubagentHudLines(
 		),
 		Math.max(
 			SUBAGENT_HUD_DESC_COL,
-			columns -
-				(SUBAGENT_HUD_GUTTER * 3 +
-					SUBAGENT_HUD_STRIP_COLS +
-					SUBAGENT_HUD_TOKEN_COLS +
-					SUBAGENT_HUD_MODEL_COLS +
-					SUBAGENT_HUD_MIN_DESC_COLS),
+			columns - (SUBAGENT_HUD_GUTTER * 3 + SUBAGENT_HUD_STRIP_COLS + SUBAGENT_HUD_TOKEN_COLS + SUBAGENT_HUD_MODEL_COLS),
 		),
 	);
 	for (const entry of rowEntries) {
 		activeRows.depths.push(entry.kind === "row" ? entry.cells.depth : entry.depth);
-		activeRows.lines.push(
-			truncateToWidth(
-				entry.kind === "row" ? layoutRow(entry.cells, descStart) : ` ${entry.text}`,
-				Math.max(0, columns),
-			),
-		);
+		activeRows.lines.push(entry.kind === "row" ? layoutRow(entry.cells, descStart) : ` ${entry.text}`);
 	}
 	const section = ({ lines: rows, depths: rowDepths }: Rows, title: string): string[] => {
 		if (rows.length === 0) return [];
@@ -883,9 +983,9 @@ export function renderSubagentHudLines(
 			if (depth > 0) prefix += hasSibling ? theme.tree.branch : theme.tree.last;
 			continuations[depth] = hasSibling;
 			continuations.length = depth + 1;
-			return truncateToWidth(`${theme.fg("dim", prefix)}${row}`, Math.max(0, columns));
+			return `${theme.fg("dim", prefix)}${row}`;
 		});
-		return ["", truncateToWidth(theme.bold(theme.fg("accent", title)), Math.max(0, columns)), ...guided];
+		return ["", theme.bold(theme.fg("accent", title)), ...guided];
 	};
 	const completedLines: string[] = [];
 	const completedWidth = Math.max(1, columns);
