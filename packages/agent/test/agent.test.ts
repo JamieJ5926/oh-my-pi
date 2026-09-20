@@ -202,12 +202,13 @@ describe("Agent", () => {
 		const cases = [
 			{
 				order: ["system", "agent"] as const,
-				expected: "pending system advisory",
+				expected: "Skipped due to pending system advisory",
 				unexpected: "pending parent steering message",
 			},
 			{
 				order: ["agent", "system"] as const,
-				expected: "pending parent steering message",
+				expected:
+					"The tool was not executed. This skipped result is not a failure, completed work, or verification. Read the pending parent steering message, then reissue the identical tool call unless that steering cancels or supersedes it.",
 				unexpected: "pending system advisory",
 			},
 		];
@@ -284,7 +285,7 @@ describe("Agent", () => {
 			const skippedContent = skipped?.result.content[0];
 			expect(skippedContent?.type).toBe("text");
 			if (skippedContent?.type !== "text") throw new Error("skipped tool result must be text");
-			expect(skippedContent.text).toContain(`Skipped due to ${scenario.expected}`);
+			expect(skippedContent.text).toContain(scenario.expected);
 			expect(skippedContent.text).not.toContain(scenario.unexpected);
 		}
 	});
