@@ -1859,28 +1859,28 @@ export class ProcessTerminal implements Terminal {
 			}
 		}
 		const pump = this.#outputPump;
-		if (pump) {
-			if (pump.dead) {
-				this.#markTerminalDisconnected("stdout failed; output pump died");
-				return;
-			}
-			try {
-				// Same stalled-consumer bound as the stream path (#6854): a PTY reader
-				// that never drains must tear the terminal down, not grow the queue.
-				if (pump.write(data) > MAX_STDOUT_BACKLOG_BYTES) {
-					this.#markTerminalDisconnected("stdout backlog exceeded cap; PTY consumer stalled");
-				}
-			} catch (err) {
-				this.#markTerminalDisconnected("stdout failed", err);
-			}
-			return;
-		}
-		// A console-sharing child process may have flipped the console codepage
-		// away from UTF-8; repair it before any bytes hit WriteFile so no frame
-		// is ever translated through an OEM codepage. See ensureWindowsConsoleUtf8.
-		if (process.platform === "win32") ensureWindowsConsoleUtf8();
 		pushLoopPhase("ui.terminal-write");
 		try {
+			if (pump) {
+				if (pump.dead) {
+					this.#markTerminalDisconnected("stdout failed; output pump died");
+					return;
+				}
+				try {
+					// Same stalled-consumer bound as the stream path (#6854): a PTY reader
+					// that never drains must tear the terminal down, not grow the queue.
+					if (pump.write(data) > MAX_STDOUT_BACKLOG_BYTES) {
+						this.#markTerminalDisconnected("stdout backlog exceeded cap; PTY consumer stalled");
+					}
+				} catch (err) {
+					this.#markTerminalDisconnected("stdout failed", err);
+				}
+				return;
+			}
+			// A console-sharing child process may have flipped the console codepage
+			// away from UTF-8; repair it before any bytes hit WriteFile so no frame
+			// is ever translated through an OEM codepage. See ensureWindowsConsoleUtf8.
+			if (process.platform === "win32") ensureWindowsConsoleUtf8();
 			// Windows ConPTY drops viewport tracking when a single write exceeds
 			// ~32-64 KB: the host UI's scroll position stays parked at wherever
 			// the write began, even though every byte landed in scrollback. Split
