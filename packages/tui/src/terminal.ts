@@ -703,6 +703,30 @@ export class ProcessTerminal implements Terminal {
 	// `pendingOutputBytes` exposes the backlog for render-side frame skipping.
 	#outputPump?: TtyWriter;
 	#pumpAttempted = false;
+	#fallbackQueue: string[] = [];
+	#fallbackDraining = false;
+	#drainFallbackQueue = (): void => {
+		const chunk = this.#fallbackQueue.shift();
+		if (this.#dead || chunk === undefined) {
+			this.#fallbackQueue.length = 0;
+			this.#fallbackDraining = false;
+			return;
+		}
+		try {
+			process.stdout.write(chunk);
+			this.#trackStdoutBacklog(process.stdout.writableLength ?? 0);
+		} catch (err) {
+			this.#fallbackQueue.length = 0;
+			this.#fallbackDraining = false;
+			this.#markTerminalDisconnected("stdout failed", err);
+			return;
+		}
+		if (this.#fallbackQueue.length > 0) {
+			setImmediate(this.#drainFallbackQueue);
+		} else {
+			this.#fallbackDraining = false;
+		}
+	};
 
 	#windowsVTInputRestore?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
@@ -1936,28 +1960,25 @@ export class ProcessTerminal implements Terminal {
 			// and a code-unit cap would let CJK transcript rows expand past the
 			// threshold. See #2034 and #2095.
 			const bytes = Buffer.byteLength(data, "utf8");
-			if (!this.#conpty && bytes > MAX_FALLBACK_SLICE_THRESHOLD_BYTES) {
-				const chunks = chunkForConPTY(data, MAX_CONPTY_WRITE_CHUNK_BYTES);
-				let index = 0;
-				const writeSlice = (): void => {
-					if (this.#dead || index >= chunks.length) return;
-					try {
-						process.stdout.write(chunks[index++]);
-						this.#trackStdoutBacklog(process.stdout.writableLength ?? 0);
-					} catch (err) {
-						this.#markTerminalDisconnected("stdout failed", err);
-						return;
-					}
-					if (index < chunks.length) setImmediate(writeSlice);
-				};
-				setImmediate(writeSlice);
-				return;
-			}
 			if (this.#conpty && bytes > MAX_CONPTY_WRITE_CHUNK_BYTES) {
 				for (const chunk of chunkForConPTY(data, MAX_CONPTY_WRITE_CHUNK_BYTES)) {
 					if (this.#dead) break;
 					process.stdout.write(chunk);
 				}
+			} else if (!this.#conpty && (this.#fallbackQueue.length > 0 || bytes > MAX_FALLBACK_SLICE_THRESHOLD_BYTES)) {
+				// Slices drain one per event-loop turn so a multi-MB repaint cannot
+				// block the loop. Every later write joins the same queue; a direct
+				// write here would overtake slices still queued.
+				if (bytes > MAX_FALLBACK_SLICE_THRESHOLD_BYTES) {
+					this.#fallbackQueue.push(...chunkForConPTY(data, MAX_CONPTY_WRITE_CHUNK_BYTES));
+				} else {
+					this.#fallbackQueue.push(data);
+				}
+				if (!this.#fallbackDraining) {
+					this.#fallbackDraining = true;
+					setImmediate(this.#drainFallbackQueue);
+				}
+				return;
 			} else {
 				process.stdout.write(data);
 			}
