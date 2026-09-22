@@ -67,6 +67,7 @@ function shouldPollWindowsTerminalAppearance(env: NodeJS.ProcessEnv = Bun.env): 
  * their safety margin.
  */
 const MAX_CONPTY_WRITE_CHUNK_BYTES = 16 * 1024;
+const MAX_FALLBACK_SLICE_THRESHOLD_BYTES = 2 * 1024 * 1024;
 
 /**
  * Split `data` into chunks whose encoded UTF-8 byte length is no greater than
@@ -652,6 +653,7 @@ export class ProcessTerminal implements Terminal {
 	// froze the whole TUI for the duration of a multi-MB repaint. The pump
 	// `pendingOutputBytes` exposes the backlog for render-side frame skipping.
 	#outputPump?: TtyWriter;
+	#pumpAttempted = false;
 	#fallbackPendingBytes = 0;
 	#fallbackPendingAt = 0;
 	#fallbackWriteCostMs = 0;
@@ -805,7 +807,8 @@ export class ProcessTerminal implements Terminal {
 		// prebuilt natives module without the export falls back to direct writes.
 		// Test suites spy on `process.stdout.write` with a faked isTTY, so the
 		// pump stays off under `bun test` — same philosophy as isTerminalHeadless.
-		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
+		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump && !this.#pumpAttempted) {
+			this.#pumpAttempted = true;
 			try {
 				this.#outputPump = new TtyWriter(1);
 			} catch (err) {
@@ -1851,7 +1854,8 @@ export class ProcessTerminal implements Terminal {
 		if (!process.stdout.isTTY) return;
 		this.#ensureStdoutErrorHandler();
 		this.#trackCursorVisibility(data);
-		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
+		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump && !this.#pumpAttempted) {
+			this.#pumpAttempted = true;
 			try {
 				this.#outputPump = new TtyWriter(1);
 			} catch (err) {
@@ -1896,6 +1900,35 @@ export class ProcessTerminal implements Terminal {
 			const bytes = Buffer.byteLength(data, "utf8");
 			const startedAt = performance.now();
 			let accepted: boolean;
+			if (!this.#conpty && bytes > MAX_FALLBACK_SLICE_THRESHOLD_BYTES) {
+				const chunks = chunkForConPTY(data, MAX_CONPTY_WRITE_CHUNK_BYTES);
+				this.#fallbackPendingBytes = bytes;
+				this.#fallbackPendingAt = performance.now();
+				this.#fallbackWriteCostMs = Math.max(1, this.#fallbackPendingAt - startedAt);
+				let index = 0;
+				const writeSlice = (): void => {
+					if (this.#dead || index >= chunks.length) return;
+					pushLoopPhase("ui.terminal-write");
+					try {
+						const chunk = chunks[index++];
+						const chunkBytes = Buffer.byteLength(chunk, "utf8");
+						const sliceAccepted = process.stdout.write(chunk);
+						if (this.#stdoutBacklog.record(sliceAccepted, chunkBytes)) {
+							this.#markTerminalDisconnected("stdout backlog exceeded cap; PTY consumer stalled");
+						} else if (this.#stdoutBacklog.tracking && !this.#stdoutDrainArmed) {
+							this.#stdoutDrainArmed = true;
+							process.stdout.once("drain", this.#stdoutDrainHandler);
+						}
+					} catch (err) {
+						this.#markTerminalDisconnected("stdout failed", err);
+					} finally {
+						popLoopPhase();
+					}
+					if (index < chunks.length) setImmediate(writeSlice);
+				};
+				setImmediate(writeSlice);
+				return;
+			}
 			if (this.#conpty && bytes > MAX_CONPTY_WRITE_CHUNK_BYTES) {
 				accepted = true;
 				for (const chunk of chunkForConPTY(data, MAX_CONPTY_WRITE_CHUNK_BYTES)) {
