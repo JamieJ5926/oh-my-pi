@@ -6,7 +6,9 @@ import {
 	isBunTestRuntime,
 	isTerminalHeadless,
 	logger,
+	popLoopPhase,
 	postmortem,
+	pushLoopPhase,
 	restoreTerminalStderr,
 	suppressTerminalStderr,
 } from "@oh-my-pi/pi-utils";
@@ -1868,6 +1870,7 @@ export class ProcessTerminal implements Terminal {
 		// away from UTF-8; repair it before any bytes hit WriteFile so no frame
 		// is ever translated through an OEM codepage. See ensureWindowsConsoleUtf8.
 		if (process.platform === "win32") ensureWindowsConsoleUtf8();
+		pushLoopPhase("ui.terminal-write");
 		try {
 			// Windows ConPTY drops viewport tracking when a single write exceeds
 			// ~32-64 KB: the host UI's scroll position stays parked at wherever
@@ -1904,6 +1907,8 @@ export class ProcessTerminal implements Terminal {
 			}
 		} catch (err) {
 			this.#markTerminalDisconnected("stdout failed", err);
+		} finally {
+			popLoopPhase();
 		}
 	}
 
