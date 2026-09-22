@@ -725,12 +725,18 @@ export class TUI extends Container {
 	 * feels dead to the user and no longer justifies further CPU savings.
 	 */
 	static readonly #MAX_ADAPTIVE_RENDER_MS = 200;
-    /** Output size at which a streamed subagent chunk must yield before painting. */
-    static readonly #MAX_SUBAGENT_OUTPUT_BYTES = 64 * 1024;
-    /** Output backlog threshold for ordinary frame suppression. */
-    static readonly #MAX_PENDING_OUTPUT_BYTES = 256 * 1024;
-    /** Retry cadence while the output backlog gate is holding renders back. */
-    static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
+	/**
+	 * Output backpressure gate. While the terminal still owes more than this
+	 * many bytes, composing another frame would only queue a stale paint
+	 * behind the backlog — and once the kernel PTY buffer is full, handing the
+	 * runtime more bytes degrades into thread-blocking writes. Defer the
+	 * render (keeping its forced/clear-scrollback intent) and retry shortly;
+	 * the eventual frame composes the latest component state, so a slow
+	 * terminal receives only fresh frames instead of every intermediate one.
+	 */
+	static readonly #MAX_PENDING_OUTPUT_BYTES = 256 * 1024;
+	/** Retry cadence while the output backlog gate is holding renders back. */
+	static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
 	/** Quiet window before restoring the normal buffer after resize. */
 	static readonly #RESIZE_VIEWPORT_SETTLE_MS = 120;
 	/** Longest wait for a CPR reply before the settled repaint falls back. */
@@ -1771,24 +1777,28 @@ export class TUI extends Container {
 		this.#doRender();
 		this.#lastFrameCostMs = this.#renderScheduler.now() - start;
 	}
-    /**
-     * Defer rendering while a streamed output chunk is large enough to make a
-     * synchronous compose and paint monopolize the event loop. The terminal's
-     * pending byte count is the chunk boundary exposed by the writer, so this
-     * keeps the existing scheduler and watchdog phase intact without changing
-     * any render callers.
-     */
-    #deferRenderForOutputBacklog(): boolean {
-        const pending = this.terminal.pendingOutputBytes;
-        if (pending === undefined || pending <= TUI.#MAX_SUBAGENT_OUTPUT_BYTES) return false;
-        this.#renderRequested = true;
-        this.#renderTimer ??= this.#renderScheduler.scheduleRender(
-            this.#runScheduledRender,
-            TUI.#OUTPUT_BACKLOG_RETRY_MS,
-        );
-        return true;
-    }
-\t#handleInput(data: string): void {
+	/**
+	 * True when the frame was deferred because the terminal's output backlog
+	 * exceeds {@link TUI.#MAX_PENDING_OUTPUT_BYTES}. Re-arms a retry render;
+	 * one-shot paint intents (`#clearScrollbackOnNextRender`,
+	 * `#forceViewportRepaintOnNextRender`) survive untouched for it.
+	 */
+	#deferRenderForOutputBacklog(): boolean {
+		const pending = this.terminal.pendingOutputBytes;
+		if (pending === undefined || pending <= TUI.#MAX_PENDING_OUTPUT_BYTES) return false;
+		this.#renderRequested = true;
+		this.#renderTimer ??= this.#renderScheduler.scheduleRender(
+			this.#runScheduledRender,
+			TUI.#OUTPUT_BACKLOG_RETRY_MS,
+		);
+		return true;
+	}
+
+	#handleInput(data: string): void {
+		// Consume CPR replies (CSI row;col R) while an anchor probe is unanswered;
+		// they are terminal reports, never keystrokes, and must not reach the
+		// focused component.
+		let searchFrom = 0;
 		while (this.#cprColumnTags.size > 0) {
 			const match = data.slice(searchFrom).match(/\x1b\[(\d+);(\d+)R/);
 			if (!match || match.index === undefined) break;
