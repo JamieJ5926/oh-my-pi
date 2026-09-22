@@ -66,6 +66,7 @@ function shouldPollWindowsTerminalAppearance(env: NodeJS.ProcessEnv = Bun.env): 
  * their safety margin.
  */
 const MAX_CONPTY_WRITE_CHUNK_BYTES = 16 * 1024;
+const MAX_FALLBACK_SLICE_THRESHOLD_BYTES = 2 * 1024 * 1024;
 
 /**
  * Split `data` into chunks whose encoded UTF-8 byte length is no greater than
@@ -701,6 +702,7 @@ export class ProcessTerminal implements Terminal {
 	// enqueues frames and performs the blocking write(2) on its own thread;
 	// `pendingOutputBytes` exposes the backlog for render-side frame skipping.
 	#outputPump?: TtyWriter;
+	#pumpAttempted = false;
 
 	#windowsVTInputRestore?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
@@ -846,7 +848,8 @@ export class ProcessTerminal implements Terminal {
 		// prebuilt natives module without the export falls back to direct writes.
 		// Test suites spy on `process.stdout.write` with a faked isTTY, so the
 		// pump stays off under `bun test` — same philosophy as isTerminalHeadless.
-		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
+		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump && !this.#pumpAttempted) {
+			this.#pumpAttempted = true;
 			try {
 				this.#outputPump = new TtyWriter(1);
 			} catch (err) {
@@ -1890,6 +1893,14 @@ export class ProcessTerminal implements Terminal {
 		if (!process.stdout.isTTY) return;
 		this.#ensureStdoutErrorHandler();
 		this.#trackCursorVisibility(data);
+		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump && !this.#pumpAttempted) {
+			this.#pumpAttempted = true;
+			try {
+				this.#outputPump = new TtyWriter(1);
+			} catch (err) {
+				logger.debug("tty output pump unavailable; using direct stdout writes", { err: String(err) });
+			}
+		}
 		const pump = this.#outputPump;
 		if (pump) {
 			if (pump.dead) {
@@ -1925,6 +1936,23 @@ export class ProcessTerminal implements Terminal {
 			// and a code-unit cap would let CJK transcript rows expand past the
 			// threshold. See #2034 and #2095.
 			const bytes = Buffer.byteLength(data, "utf8");
+			if (!this.#conpty && bytes > MAX_FALLBACK_SLICE_THRESHOLD_BYTES) {
+				const chunks = chunkForConPTY(data, MAX_CONPTY_WRITE_CHUNK_BYTES);
+				let index = 0;
+				const writeSlice = (): void => {
+					if (this.#dead || index >= chunks.length) return;
+					try {
+						process.stdout.write(chunks[index++]);
+						this.#trackStdoutBacklog(process.stdout.writableLength ?? 0);
+					} catch (err) {
+						this.#markTerminalDisconnected("stdout failed", err);
+						return;
+					}
+					if (index < chunks.length) setImmediate(writeSlice);
+				};
+				setImmediate(writeSlice);
+				return;
+			}
 			if (this.#conpty && bytes > MAX_CONPTY_WRITE_CHUNK_BYTES) {
 				for (const chunk of chunkForConPTY(data, MAX_CONPTY_WRITE_CHUNK_BYTES)) {
 					if (this.#dead) break;
