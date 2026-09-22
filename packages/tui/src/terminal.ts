@@ -650,9 +650,11 @@ export class ProcessTerminal implements Terminal {
 	// Off-thread output pump (unix TTYs): Bun's `process.stdout.write` blocks
 	// the event loop until the terminal drains, so a slow/occluded emulator
 	// froze the whole TUI for the duration of a multi-MB repaint. The pump
-	// enqueues frames and performs the blocking write(2) on its own thread;
 	// `pendingOutputBytes` exposes the backlog for render-side frame skipping.
 	#outputPump?: TtyWriter;
+	#fallbackPendingBytes = 0;
+	#fallbackPendingAt = 0;
+	#fallbackWriteCostMs = 0;
 	#stdoutDrainArmed = false;
 	#stdoutDrainHandler = () => {
 		this.#stdoutDrainArmed = false;
@@ -1885,6 +1887,7 @@ export class ProcessTerminal implements Terminal {
 			// and a code-unit cap would let CJK transcript rows expand past the
 			// threshold. See #2034 and #2095.
 			const bytes = Buffer.byteLength(data, "utf8");
+			const startedAt = performance.now();
 			let accepted: boolean;
 			if (this.#conpty && bytes > MAX_CONPTY_WRITE_CHUNK_BYTES) {
 				accepted = true;
@@ -1894,6 +1897,11 @@ export class ProcessTerminal implements Terminal {
 				}
 			} else {
 				accepted = process.stdout.write(data);
+			}
+			if (!this.#conpty && accepted) {
+				this.#fallbackPendingBytes = bytes;
+				this.#fallbackPendingAt = performance.now();
+				this.#fallbackWriteCostMs = Math.max(1, this.#fallbackPendingAt - startedAt);
 			}
 			// A stalled-but-alive PTY consumer never throws: write() just returns
 			// false and queues the bytes. Bound that never-draining backlog by
@@ -1918,8 +1926,10 @@ export class ProcessTerminal implements Terminal {
 	}
 	get pendingOutputBytes(): number {
 		if (this.#outputPump) return this.#outputPump.pending();
-		// Stream fallback: bytes queued past the high-water mark by refused writes.
-		return process.stdout.writableLength ?? 0;
+		const elapsed = performance.now() - this.#fallbackPendingAt;
+		if (this.#fallbackPendingBytes === 0 || elapsed >= this.#fallbackWriteCostMs * 2) return process.stdout.writableLength ?? 0;
+		const decay = 1 - elapsed / (this.#fallbackWriteCostMs * 2);
+		return Math.max(process.stdout.writableLength ?? 0, Math.ceil(this.#fallbackPendingBytes * decay));
 	}
 
 	get rows(): number {
