@@ -197,7 +197,7 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 			eventChain = eventChain.then(async () => {
 				await options.onEvent(event);
 				deliveredSeq = event.seq;
-				eventTextBySeq[event.seq - 1] = typeof event.event === "string" ? event.event : (event.event?.name ?? JSON.stringify(event.event));
+				eventTextBySeq[event.seq - 1] = typeof event.event === "string" ? event.event : (isRecord(event.event) && typeof event.event.name === "string" ? event.event.name : JSON.stringify(event.event));
 				if (terminal !== undefined && event.seq <= terminal.final_seq) {
 					foldedText = eventTextBySeq.slice(0, terminal.final_seq).join("");
 				}
