@@ -235,6 +235,7 @@ export function parseModelList(value: unknown): string[] | undefined {
 /** Parsed agent fields from frontmatter (excludes source/filePath/systemPrompt) */
 export interface ParsedAgentFields {
 	name: string;
+	description: string;
 	runtime?: "frank";
 	tools?: string[];
 	spawns?: string[] | "*";

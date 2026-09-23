@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { resolveModelScope } from "../config/model-resolver";
+import { resolveModelRoleValue, resolveModelScope } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -638,6 +638,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				);
 			}
 		}
+		let result: SingleResult;
 		if (policy.effectiveAgent.runtime === "frank") {
 			result = await runFrankSubagent(
 				await frankWorkerOptions(baseOptions, request.session, policy.modelOverride),
