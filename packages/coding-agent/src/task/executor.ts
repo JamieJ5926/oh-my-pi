@@ -2832,20 +2832,33 @@ async function runRetainedFrankFollowUpTurn(
 		error = abortReason;
 		await closeRetainedFrankWorker(id, worker);
 	};
+	let onAbort: (() => void) | undefined;
 	worker.setOnEvent(createFrankEventForwarder(id, options.eventBus, options.subagentEventBus));
 	try {
 		if (signal?.aborted) {
 			await abort();
 		} else {
-			const result = await worker.handle.runTurn(message);
-			rawOutput = result.text;
-			({ exitCode, error, aborted, abortReason } = finalizeFrankTerminal(result, monitor));
+			const abortedTurn = Symbol("aborted");
+			const abortPromise = signal
+				? new Promise<typeof abortedTurn>(resolve => {
+					onAbort = () => { void abort().then(() => resolve(abortedTurn)); };
+					signal.addEventListener("abort", onAbort, { once: true });
+				})
+				: undefined;
+			const result = abortPromise
+				? await Promise.race([worker.handle.runTurn(message), abortPromise])
+				: await worker.handle.runTurn(message);
+			if (result !== abortedTurn) {
+				rawOutput = result.text;
+				({ exitCode, error, aborted, abortReason } = finalizeFrankTerminal(result, monitor));
+			}
 		}
 	} catch (caught) {
 		error = caught instanceof Error ? caught.stack ?? caught.message : String(caught);
 		if (signal?.aborted) await abort();
 		else await closeRetainedFrankWorker(id, worker);
 	} finally {
+		if (signal && onAbort) signal.removeEventListener("abort", onAbort);
 		monitor.finish();
 	}
 	return finalizeRunResult({
@@ -2998,6 +3011,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 	let error: string | undefined;
 	let aborted = false;
 	let abortReason: string | undefined;
+	let retainedWorker: RetainedFrankWorker | undefined;
 	let workerExitError: FrankWorkerExitError | undefined;
 	try {
 		if (signal?.aborted) {

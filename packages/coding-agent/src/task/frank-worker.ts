@@ -168,7 +168,7 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 	};
  	const abort = () => {
  		abortReason = options.signal?.reason instanceof Error ? options.signal.reason : new Error("Frank worker aborted");
- 		const turnId = activeTurn?.id;
+		const turnId = activeTurn?.completed ? undefined : activeTurn?.id;
  		const closing = turnId === undefined
  			? Promise.resolve()
  			: writeLine(child.stdin, { op: "cancel", turn_id: turnId }).catch(() => {});

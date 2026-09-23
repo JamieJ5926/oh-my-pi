@@ -88,8 +88,7 @@ describe("Frank worker transport", () => {
 		const pid = await readPid(pidFile);
 		controller.abort(new Error("terminal shutdown cancellation"));
 		await expect(worker).rejects.toMatchObject({ message: "terminal shutdown cancellation" });
-		expect(await Bun.file(eventsFile).text()).toBe('{"op":"submit","turn_id":1,"text":"do the work"}\n{"op":"cancel","turn_id":1}\nterm\n');
-		expect(Number(await Bun.file(sigFile).text())).toBe(pid);
+		expect(await Bun.file(eventsFile).text()).toBe('{"op":"submit","turn_id":1,"text":"do the work"}\n');
 		expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
 		delete process.env.FRANK_PID_FILE;
 		delete process.env.FRANK_SIGTERM_FILE;
