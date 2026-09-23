@@ -46,7 +46,8 @@ export interface SpawnFrankWorkerOptions {
 }
 
 export function frankWorkerEndpoint(baseUrl: string): string {
-	return baseUrl.endsWith("/chat/completions") ? baseUrl : `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+	const trimmedBaseUrl = baseUrl.replace(/\/+$/, "");
+	return trimmedBaseUrl.endsWith("/chat/completions") ? trimmedBaseUrl : `${trimmedBaseUrl}/chat/completions`;
 }
 
 export interface FrankWorkerResult {
