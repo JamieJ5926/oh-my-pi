@@ -67,6 +67,91 @@ describe("Frank task return integration", () => {
 		expect(lifecycleStatuses).toEqual(["started", "completed"]);
 		expect(AgentRegistry.global().get(id)?.history?.outputPath).toBe(outputPath);
 	});
+	test("folds a Frank worker yield into extractedToolData and validates it against the output schema", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const id = "FrankStructuredReturn";
+		const data = { answer: "forty two" };
+		const result = await runFrankSubagent({
+			id,
+			task: "return a structured answer",
+			assignment: "answer precisely",
+			index: 0,
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			cwd: process.cwd(),
+			exe: "unused",
+			endpoint: "http://127.0.0.1:1",
+			model: "test-model",
+			budgets: { maxToolCalls: 3, wallSecs: 5 },
+			text: "request",
+			outputSchema: {
+				type: "object",
+				properties: { answer: { type: "string" } },
+				required: ["answer"],
+				additionalProperties: false,
+			},
+			outputSchemaMode: "strict",
+			outputSchemaSource: "caller",
+			runWorker: async options => {
+				await options.onEvent({
+					type: "event",
+					seq: 1,
+					event: { type: "tool_call", name: "yield", input: { data, status: "success" } },
+				});
+				return {
+					terminal: { kind: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 1 },
+					exitCode: 0,
+					text: "worker final text",
+				};
+			},
+		});
+		expect(result.extractedToolData?.yield).toEqual([{ data, status: "success" }]);
+		expect(result.structuredOutput).toEqual({ source: "caller", mode: "strict", status: "valid", data });
+		expect(result.output).toContain(JSON.stringify(data));
+	});
+
+	test("rejects a Frank worker yield that violates the strict output schema", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const id = "FrankStructuredReturnInvalid";
+		const data = { answer: 42 };
+		const result = await runFrankSubagent({
+			id,
+			task: "return a structured answer",
+			assignment: "answer precisely",
+			index: 0,
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			cwd: process.cwd(),
+			exe: "unused",
+			endpoint: "http://127.0.0.1:1",
+			model: "test-model",
+			budgets: { maxToolCalls: 3, wallSecs: 5 },
+			text: "request",
+			outputSchema: {
+				type: "object",
+				properties: { answer: { type: "string" } },
+				required: ["answer"],
+				additionalProperties: false,
+			},
+			outputSchemaMode: "strict",
+			outputSchemaSource: "caller",
+			runWorker: async options => {
+				await options.onEvent({
+					type: "event",
+					seq: 1,
+					event: { type: "tool_call", name: "yield", input: { data, status: "success" } },
+				});
+				return {
+					terminal: { kind: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 1 },
+					exitCode: 0,
+					text: "worker final text",
+				};
+			},
+		});
+		expect(result.extractedToolData?.yield).toEqual([{ data, status: "success" }]);
+		expect(result.structuredOutput?.status).toBe("invalid");
+		expect(result.structuredOutput?.data).toEqual(data);
+		expect(result.exitCode).toBe(1);
+		expect(result.error).toContain("schema_violation");
+	});
 
 	test("preserves a nonzero worker exit after Answer as a typed error with folded text", async () => {
 		AgentRegistry.resetGlobalForTests();

@@ -1,4 +1,5 @@
 import type { FrankEvent } from "./frank-worker";
+import type { YieldItem } from "./types";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -48,6 +49,54 @@ export function foldEventsToText(events: FrankEvent[]): string {
 		}
 	}
 	return hasDeltas ? deltas.join("") : finalText;
+}
+
+function parseYieldItem(value: unknown): YieldItem | undefined {
+	if (!isRecord(value)) return undefined;
+	const item: YieldItem = {};
+	if ("data" in value) item.data = value.data;
+	if (value.status === "success" || value.status === "aborted") item.status = value.status;
+	if (typeof value.error === "string") item.error = value.error;
+	if (typeof value.type === "string") item.type = value.type;
+	else if (Array.isArray(value.type) && value.type.every(label => typeof label === "string")) item.type = value.type;
+	if (value.useLastTurn === true) item.useLastTurn = true;
+	if (value.schemaOverridden === true) item.schemaOverridden = true;
+	return item;
+}
+
+export function extractFrankYieldItems(events: FrankEvent[]): YieldItem[] {
+	const items: YieldItem[] = [];
+	let assistantDelta = "";
+	for (const event of events) {
+		const outer = event.event;
+		if (!isRecord(outer)) continue;
+		if (outer.type === "tool_call" && outer.name === "yield") {
+			const item = parseYieldItem(outer.input);
+			if (item) items.push(item);
+			continue;
+		}
+		const kind = outer.kind;
+		if (isRecord(kind) && "Yield" in kind) {
+			const item = parseYieldItem(kind.Yield);
+			if (item) items.push(item);
+			continue;
+		}
+		if (isRecord(kind) && "AssistantDelta" in kind) assistantDelta += eventAssistantText(event);
+	}
+	if (assistantDelta !== "") {
+		try {
+			const envelope: unknown = JSON.parse(assistantDelta);
+			if (isRecord(envelope)) {
+				const hasYieldData = (value: Record<string, unknown>): boolean => "data" in value;
+				const result = "result" in envelope && isRecord(envelope.result) ? envelope.result : undefined;
+				const candidate = result && hasYieldData(result) ? result : envelope;
+				const item = hasYieldData(candidate) ? parseYieldItem(candidate) : undefined;
+				if (item) items.push(item);
+			}
+		} catch {
+		}
+	}
+	return items;
 }
 
 export class FrankWorkerExitError extends Error {

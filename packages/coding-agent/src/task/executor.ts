@@ -90,7 +90,7 @@ import { arrayValuedLabels, assembleYieldResult } from "./yield-assembly";
 
 import type { FrankEvent, FrankWorkerBudgets, FrankWorkerResult, SpawnFrankWorkerOptions } from "./frank-worker";
 import { spawnFrankWorker } from "./frank-worker";
-import { FrankWorkerExitError } from "./frank-worker-fold";
+import { FrankWorkerExitError, extractFrankYieldItems } from "./frank-worker-fold";
 
 export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "task" | "assignment" | "index" | "id" | "description" | "modelOverride" | "modelRole" | "signal" | "onProgress" | "eventBus" | "subagentEventBus" | "parentToolCallId" | "detached" | "artifactsDir" | "outputSchema" | "outputSchemaMode" | "outputSchemaSource"> {
 	cwd: string;
@@ -2880,6 +2880,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			aborted = true;
 			abortReason = signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? "Cancelled");
 		} else {
+			const events: FrankEvent[] = [];
 			const result = await (options.runWorker ?? spawnFrankWorker)({
 				exe: options.exe,
 				endpoint: options.endpoint,
@@ -2890,6 +2891,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				apiKey: options.apiKey,
 				signal,
 				onEvent: async (event: FrankEvent) => {
+					events.push(event);
 					emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_EVENT_CHANNEL, {
 						id,
 						event: event.event,
@@ -2897,6 +2899,8 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				},
 			});
 			rawOutput = result.text;
+			monitor.progress.extractedToolData = monitor.progress.extractedToolData ?? {};
+			monitor.progress.extractedToolData.yield = extractFrankYieldItems(events);
 			exitCode = result.exitCode;
 			switch (result.terminal.terminal) {
 				case "Answer":

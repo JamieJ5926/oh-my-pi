@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
-import { answerExitDecision, eventAssistantText, foldEventsToText, FrankWorkerExitError } from "./frank-worker-fold";
+import { answerExitDecision, eventAssistantText, extractFrankYieldItems, foldEventsToText, FrankWorkerExitError } from "./frank-worker-fold";
 import type { FrankEvent } from "./frank-worker";
 
 const fixtureDirectory = "test/fixtures/frank-worker";
@@ -71,5 +71,28 @@ describe("Frank pure worker decisions", () => {
 
 	test.each(["Error", "Cancelled", "BudgetExceeded"])('%s with nonzero exit preserves its exit code without Answer error conversion', (terminal) => {
 		expect(answerExitDecision(terminal, 9, "terminal detail")).toEqual({ exitCode: 9 });
+	});
+});
+
+describe("Frank structured yield extraction", () => {
+	test("extracts a single yield object as one terminal item", () => {
+		const events = [{ event: { kind: { Yield: { data: { answer: 42 } } } } }];
+		expect(extractFrankYieldItems(events)).toEqual([{ data: { answer: 42 } }]);
+	});
+
+	test("preserves incremental yield sections in event order", () => {
+		const events = [
+			{ event: { kind: { Yield: { type: ["steps"], data: { steps: ["first"] } } } } },
+			{ event: { kind: { Yield: { type: ["steps"], data: { steps: ["second"] } } } } },
+		];
+		expect(extractFrankYieldItems(events)).toEqual([
+			{ type: ["steps"], data: { steps: ["first"] } },
+			{ type: ["steps"], data: { steps: ["second"] } },
+		]);
+	});
+
+	test("extracts a terminal result envelope without nesting its data", () => {
+		const events = [{ event: { kind: { Yield: { type: "result", data: { answer: 42 } } } } }];
+		expect(extractFrankYieldItems(events)).toEqual([{ type: "result", data: { answer: 42 } }]);
 	});
 });
