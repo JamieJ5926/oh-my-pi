@@ -23,7 +23,7 @@ import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
-import { type ExecutorOptions, runFrankSubagent, runSubprocess } from "./executor";
+import { type ExecutorOptions, runFrankSubagent, runSubagentFollowUpTurn, runSubprocess } from "./executor";
 import { frankWorkerEndpoint } from "./frank-worker";
 import {
 	applyEligibleNestedPatches,
@@ -45,14 +45,35 @@ import {
 } from "./types";
 import { type NestedRepoPatch, parseIsolationMode } from "./worktree";
 
-async function frankWorkerOptions(options: ExecutorOptions, session: ToolSession, modelPattern: string | string[] | undefined) {
-	const patterns = modelPattern ?? options.modelOverride ?? options.agent.model ?? [session.getModelString?.()].filter((value): value is string => !!value);
-	if (!session.modelRegistry) throw new StructuredSubagentError("preflight", "No model registry is available for the selected Frank worker seat.");
-	const selected = await resolveModelScope(Array.isArray(patterns) ? patterns : [patterns], session.modelRegistry, undefined, session.settings);
+async function frankWorkerOptions(
+	options: ExecutorOptions,
+	session: ToolSession,
+	modelPattern: string | string[] | undefined,
+) {
+	const patterns =
+		modelPattern ??
+		options.modelOverride ??
+		options.agent.model ??
+		[session.getModelString?.()].filter((value): value is string => !!value);
+	if (!session.modelRegistry)
+		throw new StructuredSubagentError(
+			"preflight",
+			"No model registry is available for the selected Frank worker seat.",
+		);
+	const selected = await resolveModelScope(
+		Array.isArray(patterns) ? patterns : [patterns],
+		session.modelRegistry,
+		undefined,
+		session.settings,
+	);
 	const model = selected[0]?.model;
 	if (!model) throw new StructuredSubagentError("preflight", "No available model for the selected Frank worker seat.");
 	const endpoint = model.baseUrl ?? session.modelRegistry.getProviderBaseUrl(model.provider);
-	if (!endpoint) throw new StructuredSubagentError("preflight", `No provider base URL for Frank worker model ${model.provider}/${model.id}.`);
+	if (!endpoint)
+		throw new StructuredSubagentError(
+			"preflight",
+			`No provider base URL for Frank worker model ${model.provider}/${model.id}.`,
+		);
 	const apiKey = await session.modelRegistry.getApiKey(model, session.getSessionId?.() ?? undefined);
 	return {
 		...options,
@@ -124,6 +145,8 @@ export interface StructuredSubagentRequest {
 	blockedAgent?: string;
 	/** Preserve a completed temporary artifacts directory for an agent:// handle. */
 	retainArtifacts?: boolean;
+	/** Continue a keep-alive Frank worker with a separate follow-up prompt. */
+	followUpMessage?: string;
 	/** Task UI agents keep live registry references; eval one-shots normally do not. */
 	keepAlive?: boolean;
 	/** Task subagents share their parent's eval kernel; eval bridge children must not. */
@@ -613,6 +636,18 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
 	const policy = await resolveEffectiveSubagentPolicy(request);
+	if (request.followUpMessage !== undefined) {
+		if (
+			request.invocationKind !== "task" ||
+			request.keepAlive !== true ||
+			policy.effectiveAgent.runtime !== "frank"
+		) {
+			throw new StructuredSubagentError("preflight", "Follow-up turns require a keep-alive Frank task subagent.");
+		}
+		if (!request.identity?.id) {
+			throw new StructuredSubagentError("preflight", "A Frank follow-up turn requires the existing subagent id.");
+		}
+	}
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
 	let mergeSummary = "";
@@ -647,10 +682,34 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			}
 		}
 		let result: SingleResult;
-		if (!isolationContext && policy.effectiveAgent.runtime === "frank") {
-			result = await runFrankSubagent(
-				await frankWorkerOptions(baseOptions, request.session, policy.modelOverride),
-			);
+		if (
+			!isolationContext &&
+			policy.effectiveAgent.runtime === "frank" &&
+			request.keepAlive &&
+			request.followUpMessage !== undefined
+		) {
+			result = await runSubagentFollowUpTurn({
+				id,
+				agent: policy.effectiveAgent,
+				message: request.assignment,
+				followUpMessage: request.followUpMessage,
+				keepAlive: true,
+				index: request.index,
+				description: trimToUndefined(request.identity?.label),
+				modelRole: policy.modelRole,
+				outputSchema: policy.schema.schema,
+				outputSchemaMode: policy.schema.mode,
+				outputSchemaSource: policy.schema.source,
+				signal: request.signal,
+				onProgress: request.onProgress,
+				eventBus: request.session.eventBus,
+				subagentEventBus: request.session.subagentEventBus,
+				parentToolCallId: request.parentToolCallId,
+				artifactsDir: lease.artifactsDir,
+				maxRuntimeMs: request.maxRuntimeMs,
+			});
+		} else if (!isolationContext && policy.effectiveAgent.runtime === "frank") {
+			result = await runFrankSubagent(await frankWorkerOptions(baseOptions, request.session, policy.modelOverride));
 			onSubprocessResult?.(result);
 		} else if (!isolationContext) {
 			result = await runSubprocess(baseOptions);
@@ -669,14 +728,14 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				onSubprocessResult,
 				...(policy.effectiveAgent.runtime === "frank"
 					? {
-						run: async isolatedOptions =>
-							runFrankSubagent(
-								await frankWorkerOptions(
-									{ ...isolatedOptions, cwd: isolatedOptions.worktree ?? isolatedOptions.cwd },
-									request.session,
-									policy.modelOverride,
+							run: async isolatedOptions =>
+								runFrankSubagent(
+									await frankWorkerOptions(
+										{ ...isolatedOptions, cwd: isolatedOptions.worktree ?? isolatedOptions.cwd },
+										request.session,
+										policy.modelOverride,
+									),
 								),
-							),
 						}
 					: undefined),
 			});

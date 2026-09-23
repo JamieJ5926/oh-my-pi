@@ -88,11 +88,11 @@ import {
 } from "./types";
 import { arrayValuedLabels, assembleYieldResult } from "./yield-assembly";
 
-import type { FrankEvent, FrankWorkerBudgets, FrankWorkerResult, SpawnFrankWorkerOptions } from "./frank-worker";
-import { spawnFrankWorker } from "./frank-worker";
+import type { FrankEvent, FrankWorkerBudgets, FrankWorkerHandle, FrankWorkerResult, SpawnFrankWorkerOptions, StartFrankWorkerOptions } from "./frank-worker";
+import { spawnFrankWorker, startFrankWorker } from "./frank-worker";
 import { FrankWorkerExitError } from "./frank-worker-fold";
 
-export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "task" | "assignment" | "index" | "id" | "description" | "modelOverride" | "modelRole" | "signal" | "onProgress" | "eventBus" | "subagentEventBus" | "parentToolCallId" | "detached" | "artifactsDir" | "outputSchema" | "outputSchemaMode" | "outputSchemaSource"> {
+export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "task" | "assignment" | "index" | "id" | "description" | "modelOverride" | "modelRole" | "signal" | "onProgress" | "eventBus" | "subagentEventBus" | "parentToolCallId" | "detached" | "artifactsDir" | "outputSchema" | "outputSchemaMode" | "outputSchemaSource" | "keepAlive"> {
 	cwd: string;
 	exe: string;
 	endpoint: string;
@@ -101,6 +101,54 @@ export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "t
 	apiKey?: string;
 	text: string;
 	runWorker?: (options: SpawnFrankWorkerOptions) => Promise<FrankWorkerResult>;
+}
+
+interface RetainedFrankWorker {
+	handle: FrankWorkerHandle;
+	spawnOptions: StartFrankWorkerOptions;
+	closed: boolean;
+	setOnEvent: (onEvent: (event: FrankEvent) => void | Promise<void>) => void;
+}
+
+const retainedFrankWorkers = new Map<string, RetainedFrankWorker>();
+
+async function closeRetainedFrankWorker(id: string, worker: RetainedFrankWorker): Promise<void> {
+	if (retainedFrankWorkers.get(id) === worker) retainedFrankWorkers.delete(id);
+	if (worker.closed) return;
+	worker.closed = true;
+	await worker.handle.close();
+}
+
+function createFrankEventForwarder(
+	id: string,
+	eventBus?: EventBus,
+	subagentEventBus?: EventBus,
+): (event: FrankEvent) => void {
+	return event => emitSubagentFrame(eventBus, subagentEventBus, TASK_SUBAGENT_EVENT_CHANNEL, {
+		id,
+		event: event.event,
+	});
+}
+
+function finalizeFrankTerminal(result: FrankWorkerResult, monitor: SubagentRunMonitor): { exitCode: number; error?: string; aborted?: boolean; abortReason?: string } {
+	switch (result.terminal.terminal) {
+		case "Answer":
+			if (result.exitCode !== 0) throw new FrankWorkerExitError(result.exitCode, result.text);
+			return { exitCode: 0 };
+		case "Error":
+			return { exitCode: 1, error: result.terminal.error ?? "Frank worker reported an error" };
+		case "Cancelled":
+			return { exitCode: 1, aborted: true, abortReason: result.terminal.error ?? "Frank worker cancelled" };
+		case "BudgetExceeded": {
+			const error = result.terminal.error ?? "Frank worker budget exceeded";
+			monitor.progress.retryFailure = { attempt: 1, errorMessage: error };
+			return { exitCode: 1, error };
+		}
+		default: {
+			const exhaustive: never = result.terminal.terminal;
+			throw new Error(`Unhandled Frank terminal ${String(exhaustive)}`);
+		}
+	}
 }
 
 export type { YieldItem } from "./types";
@@ -2716,15 +2764,15 @@ export async function finalizeSubagentLifecycle(args: {
 export interface FollowUpTurnOptions {
 	/** Registry id of the (live or parked) subagent to continue. */
 	id: string;
-	/** Agent definition the session was originally spawned with (drives progress labels + finalize). */
+	/** Agent definition the session was originally spawned with. */
 	agent: AgentDefinition;
-	/** The follow-up message; sent as the turn's user prompt. */
+	/** The normal session follow-up message, retained for non-Frank callers. */
 	message: string;
+	followUpMessage?: string;
+	keepAlive?: boolean;
 	index?: number;
 	description?: string;
-	/** Explicit pre-expansion model role alias retained from the original run. */
 	modelRole?: string;
-	/** Structured-output state retained from the original invocation. */
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -2733,31 +2781,106 @@ export interface FollowUpTurnOptions {
 	eventBus?: EventBus;
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
-	/**
-	 * When set, a turn that produces a `yield` result (re)writes `<artifactsDir>/<id>.md`
-	 * so `agent://<id>` tracks the latest completion. A yield-less turn (e.g. a hub
-	 * wake answering a message) leaves the existing artifact intact (issue #9518).
-	 */
 	artifactsDir?: string;
-	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
 }
 
-/**
- * Continue a previously spawned (keep-alive) subagent with one more monitored
- * turn: revive it if parked, send `message` as a real prompt, drive it to
- * `yield`, and finalize a {@link SingleResult} exactly like a first run.
- *
- * The session's full conversation history is retained (live session, or JSONL
- * replay through the lifecycle reviver), so the turn sees all prior context.
- * Unlike {@link runSubprocess}, the session is NOT torn down afterwards — it
- * stays adopted by the {@link AgentLifecycleManager} (idle → TTL park →
- * revive), and an aborted turn only aborts the in-flight turn.
- */
-export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Promise<SingleResult> {
-	const { id, agent, message, signal } = options;
+async function runRetainedFrankFollowUpTurn(
+	options: FollowUpTurnOptions,
+	worker: RetainedFrankWorker,
+): Promise<SingleResult> {
+	const { id, agent, signal } = options;
+	const message = options.followUpMessage ?? options.message;
 	const index = options.index ?? 0;
 	const startTime = Date.now();
+	const monitor = createSubagentRunMonitor({
+		index,
+		id,
+		agent,
+		task: message,
+		description: options.description,
+		modelRole: options.modelRole,
+		signal,
+		onProgress: options.onProgress,
+		eventBus: options.eventBus,
+		subagentEventBus: options.subagentEventBus,
+		parentToolCallId: options.parentToolCallId,
+		detached: true,
+		sessionFile: AgentRegistry.global().get(id)?.sessionFile ?? undefined,
+		softRequestBudget: 0,
+		softRequestBudgetNotice: false,
+		maxRuntimeMs: options.maxRuntimeMs ?? 0,
+	});
+	monitor.progress.canDelegate = false;
+	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+		id,
+		agent: agent.name,
+		description: options.description,
+		status: "started",
+		parentToolCallId: options.parentToolCallId,
+		detached: true,
+		index,
+	});
+	let rawOutput = "";
+	let exitCode = 1;
+	let error: string | undefined;
+	let aborted = false;
+	let abortReason: string | undefined;
+	const abort = async () => {
+		aborted = true;
+		abortReason = signal?.reason instanceof Error ? signal.reason.message : String(signal?.reason ?? "Cancelled");
+		error = abortReason;
+		await closeRetainedFrankWorker(id, worker);
+	};
+	worker.setOnEvent(createFrankEventForwarder(id, options.eventBus, options.subagentEventBus));
+	try {
+		if (signal?.aborted) {
+			await abort();
+		} else {
+			const result = await worker.handle.runTurn(message);
+			rawOutput = result.text;
+			({ exitCode, error, aborted, abortReason } = finalizeFrankTerminal(result, monitor));
+		}
+	} catch (caught) {
+		error = caught instanceof Error ? caught.stack ?? caught.message : String(caught);
+		if (signal?.aborted) await abort();
+		else await closeRetainedFrankWorker(id, worker);
+	} finally {
+		monitor.finish();
+	}
+	return finalizeRunResult({
+		monitor: { ...monitor, rawOutput: () => rawOutput },
+		done: { exitCode, error, aborted, abortReason, durationMs: Date.now() - startTime },
+		index,
+		id,
+		agent,
+		task: message,
+		modelRole: options.modelRole,
+		outputSchema: options.outputSchema,
+		outputSchemaMode: options.outputSchemaMode,
+		outputSchemaSource: options.outputSchemaSource,
+		signal,
+		artifactsDir: options.artifactsDir,
+		eventBus: options.eventBus,
+		subagentEventBus: options.subagentEventBus,
+		parentToolCallId: options.parentToolCallId,
+		detached: true,
+		followUpTurn: true,
+		sessionFile: AgentRegistry.global().get(id)?.sessionFile ?? undefined,
+		startTime,
+	});
+}
+
+export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Promise<SingleResult> {
+	const { id, agent, message, signal } = options;
+
+	const retainedWorker = retainedFrankWorkers.get(id);
+	if (retainedWorker && options.keepAlive && options.followUpMessage !== undefined) {
+		return runRetainedFrankFollowUpTurn(options, retainedWorker);
+	}
+	const index = options.index ?? 0;
+	const startTime = Date.now();
+
 	const session = await AgentLifecycleManager.global().ensureLive(id);
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
@@ -2796,10 +2919,11 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	} as const;
 	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
-	monitor.setActiveSession(session);
-	const unsubscribe = monitor.attach(session);
 	let outcome: DriveOutcome;
+	let unsubscribe: (() => void) | undefined;
 	try {
+		monitor.setActiveSession(session);
+		unsubscribe = monitor.attach(session);
 		outcome = await driveSessionToYield(session, monitor, message);
 	} finally {
 		try {
@@ -2807,7 +2931,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		} catch {
 			// Ignore abort cleanup timeouts; the session stays adopted either way.
 		}
-		unsubscribe();
+		unsubscribe?.();
 		const active = monitor.takeActiveSession();
 		if (active) monitor.captureSalvage(active);
 		monitor.finish();
@@ -2880,22 +3004,31 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			aborted = true;
 			abortReason = signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? "Cancelled");
 		} else {
-			const result = await (options.runWorker ?? spawnFrankWorker)({
+			let forwardEvent = createFrankEventForwarder(id, options.eventBus, options.subagentEventBus);
+			const workerOptions: StartFrankWorkerOptions = {
 				exe: options.exe,
 				endpoint: options.endpoint,
 				model: options.model,
 				cwd: options.cwd,
 				budgets: options.budgets,
-				text: options.text,
 				apiKey: options.apiKey,
 				signal,
-				onEvent: async (event: FrankEvent) => {
-					emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_EVENT_CHANNEL, {
-						id,
-						event: event.event,
-					});
-				},
-			});
+				onEvent: event => forwardEvent(event),
+			};
+			let result: FrankWorkerResult;
+			if (options.keepAlive && !options.runWorker) {
+				const handle = await startFrankWorker(workerOptions);
+				retainedWorker = {
+					handle,
+					spawnOptions: workerOptions,
+					closed: false,
+					setOnEvent: callback => { forwardEvent = callback; },
+				};
+				retainedFrankWorkers.set(id, retainedWorker);
+				result = await handle.runTurn(options.text);
+			} else {
+				result = await (options.runWorker ?? spawnFrankWorker)({ ...workerOptions, text: options.text });
+			}
 			rawOutput = result.text;
 			exitCode = result.exitCode;
 			switch (result.terminal.terminal) {
@@ -2936,9 +3069,12 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			aborted = true;
 			abortReason = signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? "Cancelled");
 		}
-	} finally {
-		monitor.finish();
 	}
+	if (retainedWorker) {
+		if (options.keepAlive && exitCode === 0 && !aborted) retainedFrankWorkers.set(id, retainedWorker);
+		else await closeRetainedFrankWorker(id, retainedWorker);
+	}
+	monitor.finish();
 	const finalMonitor: SubagentRunMonitor = { ...monitor, rawOutput: () => rawOutput };
 	const result = await finalizeRunResult({
 		monitor: finalMonitor,
