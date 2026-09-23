@@ -160,7 +160,7 @@ describe("Frank worker transport", () => {
 	});
 
 	test("awaits trailing stdout callback and propagates its rejection", async () => {
-		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"trailing"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":0}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"trailing"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		let callbackStarted = false;
 		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, async () => {
 			callbackStarted = true;
