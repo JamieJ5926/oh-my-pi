@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { eventAssistantText } from "./frank-worker-fold";
+import { answerExitDecision, eventAssistantText, foldEventsToText, FrankWorkerExitError } from "./frank-worker-fold";
 import type { FrankEvent } from "./frank-worker";
 
 describe("Frank event assistant text", () => {
@@ -70,9 +70,8 @@ describe("Frank event assistant text", () => {
 			event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "complete answer" }] } },
 		};
 		const agentEnd: FrankEvent = { type: "event", seq: 7, event: { type: "agent_end" } };
-		const foldedText = [delta, messageEnd, agentEnd].map(eventAssistantText).join("");
-		 expect(foldedText).toBe("complete answercomplete answer");
-		 expect(eventAssistantText(agentEnd)).toBe("");
+		expect(foldEventsToText([delta, messageEnd, agentEnd])).toBe("complete answer");
+		expect(eventAssistantText(agentEnd)).toBe("");
 	});
 
 	test("ignores raw string and unrelated event payloads", () => {
@@ -86,5 +85,28 @@ describe("Frank event assistant text", () => {
 		 expect(eventAssistantText(rawString)).toBe("");
 		 expect(eventAssistantText(named)).toBe("");
 		 expect(eventAssistantText(malformedUpdate)).toBe("");
+	});
+});
+
+describe("Frank pure worker decisions", () => {
+	test("uses final message_end content when there are no deltas", () => {
+		const messageEnd: FrankEvent = {
+			type: "event",
+			seq: 1,
+			event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "final answer" }] } },
+		};
+		expect(foldEventsToText([messageEnd])).toBe("final answer");
+	});
+
+	test("allows an Answer only with a zero worker exit", () => {
+		expect(answerExitDecision("Answer", 0, "literal answer")).toEqual({ exitCode: 0 });
+	});
+
+	test("returns a typed error with exit code and folded text for nonzero exit", () => {
+		const decision = answerExitDecision("Answer", 7, "partial literal answer");
+		expect(decision.exitCode).toBe(7);
+		expect(decision.error).toBeInstanceOf(FrankWorkerExitError);
+		expect(decision.error?.exitCode).toBe(7);
+		expect(decision.error?.foldedText).toBe("partial literal answer");
 	});
 });

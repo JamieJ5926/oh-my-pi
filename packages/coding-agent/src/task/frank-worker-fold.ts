@@ -25,3 +25,37 @@ export function eventAssistantText(event: FrankEvent): string {
 	}
 	return "";
 }
+
+export function foldEventsToText(events: FrankEvent[]): string {
+	const deltas: string[] = [];
+	let finalText = "";
+	let hasDeltas = false;
+	for (const event of events) {
+		const value = event.event;
+		if (!isRecord(value)) continue;
+		if (value.type === "message_update") {
+			const text = eventAssistantText(event);
+			if (text !== "") {
+				deltas.push(text);
+				hasDeltas = true;
+			}
+		} else if (value.type === "message_end") {
+			const text = eventAssistantText(event);
+			if (text !== "") finalText = text;
+		}
+	}
+	return hasDeltas ? deltas.join("") : finalText;
+}
+
+export class FrankWorkerExitError extends Error {
+	constructor(readonly exitCode: number, readonly foldedText: string) {
+		super(`Frank worker exited with code ${exitCode}`);
+		this.name = "FrankWorkerExitError";
+	}
+}
+
+export function answerExitDecision(terminal: string, workerExitCode: number, foldedText: string): { exitCode: number; error?: FrankWorkerExitError } {
+	if (terminal === "Answer" && workerExitCode === 0) return { exitCode: 0 };
+	const exitCode = workerExitCode === 0 ? 1 : workerExitCode;
+	return { exitCode, error: new FrankWorkerExitError(exitCode, foldedText) };
+}
