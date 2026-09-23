@@ -40,8 +40,13 @@ export interface SpawnFrankWorkerOptions {
 	budgets: FrankWorkerBudgets;
 	text: string;
 	onEvent: (event: FrankEvent) => void | Promise<void>;
+	apiKey?: string;
 	signal?: AbortSignal;
 	timeoutMs?: number;
+}
+
+export function frankWorkerEndpoint(baseUrl: string): string {
+	return baseUrl.endsWith("/chat/completions") ? baseUrl : `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
 }
 
 export interface FrankWorkerResult {
@@ -114,10 +119,12 @@ function writeLine(stream: NodeJS.WritableStream, value: unknown): Promise<void>
 
 export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promise<FrankWorkerResult> {
 	if (options.signal?.aborted) throw options.signal.reason ?? new Error("Frank worker aborted");
+	const childEnv = { ...process.env };
+	if (options.apiKey) childEnv["PI_TRACK_API_KEY"] = options.apiKey;
 	const child = spawn(options.exe, [
 		"agent", "--endpoint", options.endpoint, "--model", options.model, "--cwd", options.cwd,
 		"--max-tool-calls", String(options.budgets.maxToolCalls), "--wall-secs", String(options.budgets.wallSecs),
-	], { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"] });
+	], { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"], env: childEnv });
 	const stdout = createInterface({ input: child.stdout });
 	const stderr = createInterface({ input: child.stderr });
 	const { promise: completion, resolve: settle, reject: fail } = Promise.withResolvers<FrankWorkerResult>();

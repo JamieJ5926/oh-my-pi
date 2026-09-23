@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "bun:test";
-import { FrankProtocolError, parseFrankControl, spawnFrankWorker, type FrankEvent } from "./frank-worker";
+import { FrankProtocolError, frankWorkerEndpoint, parseFrankControl, spawnFrankWorker, type FrankEvent } from "./frank-worker";
 
 let received: number[] = [];
 
@@ -26,6 +26,23 @@ function workerOptions(exe: string, cwd: string, onEvent: (event: FrankEvent) =>
 }
 
 describe("Frank worker transport", () => {
+	test("uses a full OpenAI chat completions endpoint and forwards the API key to the child", async () => {
+		expect(frankWorkerEndpoint("http://127.0.0.1:8317/v1")).toBe("http://127.0.0.1:8317/v1/chat/completions");
+		expect(frankWorkerEndpoint("http://127.0.0.1:8317/v1/chat/completions")).toBe("http://127.0.0.1:8317/v1/chat/completions");
+		const stub = await makeStub(`printf '%s\\n' "$PI_TRACK_API_KEY" > "$FRANK_KEY_FILE"; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		const keyFile = path.join(stub.cwd, "key");
+		process.env.FRANK_KEY_FILE = keyFile;
+		try {
+			const key = ["worker", "test", "key"].join("-");
+			const result = await spawnFrankWorker({ ...workerOptions(stub.exe, stub.cwd, () => {}), endpoint: frankWorkerEndpoint("http://127.0.0.1:8317/v1"), apiKey: key });
+			expect(result.exitCode).toBe(0);
+			expect(await Bun.file(keyFile).text()).toBe(`${key}\n`);
+		} finally {
+			delete process.env.FRANK_KEY_FILE;
+			await rm(stub.cwd, { recursive: true, force: true });
+		}
+	});
+
 	test("validates all controls, separates pipes, and awaits events through final_seq", async () => {
 		expect(parseFrankControl({ type: "ack", version: 1, turn_id: 1, accepted: true, pending_id: 4 })).toEqual({ kind: "ack", version: 1, turn_id: 1, accepted: true, pending_id: 4 });
 		expect(parseFrankControl({ type: "heartbeat", version: 1, at_ms: 20 })).toEqual({ kind: "heartbeat", version: 1, at_ms: 20 });

@@ -22,8 +22,8 @@ import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
-import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runFrankSubagent, runSubprocess } from "./executor";
+import { frankWorkerEndpoint } from "./frank-worker";
 import {
 	applyEligibleNestedPatches,
 	type IsolationContext,
@@ -52,11 +52,13 @@ async function frankWorkerOptions(options: ExecutorOptions, session: ToolSession
 	if (!model) throw new StructuredSubagentError("preflight", "No available model for the selected Frank worker seat.");
 	const endpoint = model.baseUrl ?? session.modelRegistry.getProviderBaseUrl(model.provider);
 	if (!endpoint) throw new StructuredSubagentError("preflight", `No provider base URL for Frank worker model ${model.provider}/${model.id}.`);
+	const apiKey = await session.modelRegistry.getApiKey(model, session.getSessionId?.() ?? undefined);
 	return {
 		...options,
 		exe: path.join(session.cwd, "target", "debug", "frank_accept"),
-		endpoint,
+		endpoint: frankWorkerEndpoint(endpoint),
 		model: model.id,
+		apiKey,
 		budgets: { maxToolCalls: 64, wallSecs: 600 },
 		text: options.task,
 	};

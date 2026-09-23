@@ -98,6 +98,7 @@ export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "t
 	endpoint: string;
 	model: string;
 	budgets: FrankWorkerBudgets;
+	apiKey?: string;
 	text: string;
 	runWorker?: (options: SpawnFrankWorkerOptions) => Promise<FrankWorkerResult>;
 }
@@ -2886,6 +2887,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				cwd: options.cwd,
 				budgets: options.budgets,
 				text: options.text,
+				apiKey: options.apiKey,
 				signal,
 				onEvent: async (event: FrankEvent) => {
 					emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_EVENT_CHANNEL, {
