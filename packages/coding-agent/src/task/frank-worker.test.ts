@@ -47,7 +47,7 @@ describe("Frank worker transport", () => {
 		await writeFile(inner, `#!/bin/sh\n${await Bun.file(stub.exe).text().then(text => text.slice(text.indexOf("\n") + 1))}\n`, { mode: 0o700 });
 		const proxy = path.join(stub.cwd, "proxy");
 		const linesFile = path.join(stub.cwd, "lines");
-		await writeFile(proxy, `#!/bin/sh\ntee -a ${JSON.stringify(linesFile)} | ${JSON.stringify(inner)} &\npipepid=$!\ninnerpid=$(pgrep -P "$pipepid" | tail -n 1)\ntrap 'kill -TERM "$innerpid"' TERM\nwait "$pipepid"\n`, { mode: 0o700 });
+		await writeFile(proxy, `#!/bin/sh\ntee -a ${JSON.stringify(linesFile)} | ${JSON.stringify(inner)} &\npipepid=$!\ntrap 'for p in $(pgrep -P "$pipepid"); do kill -TERM "$p"; done' TERM\nwait "$pipepid"\n`, { mode: 0o700 });
 		await chmod(proxy, 0o700);
 		const pidFile = path.join(stub.cwd, "pid");
 		const sigFile = path.join(stub.cwd, "sigterm");
@@ -55,18 +55,32 @@ describe("Frank worker transport", () => {
 		process.env.FRANK_SIGTERM_FILE = sigFile;
 		process.env.FRANK_LINES_FILE = linesFile;
 		const controller = new AbortController();
-		let resolveEvent: (() => void) | undefined;
-		const eventReceived = new Promise<void>(resolve => { resolveEvent = resolve; });
-		const worker = spawnFrankWorker({ ...workerOptions(proxy, stub.cwd, () => { resolveEvent?.(); }), signal: controller.signal });
-		await eventReceived;
-		const pid = await readPid(pidFile);
+		const worker = spawnFrankWorker({ ...workerOptions(proxy, stub.cwd, () => {}), signal: controller.signal });
+		let pid: number | undefined;
+		const pidDeadline = Date.now() + 2000;
+		while (pid === undefined && Date.now() < pidDeadline) {
+			try { pid = await readPid(pidFile); } catch { await Bun.sleep(10); }
+		}
+		if (pid === undefined) throw new Error("Frank child PID was not recorded");
 		const started = Date.now();
+		const cancelReceived = (async () => {
+			while (!(await Bun.file(linesFile).text().catch(() => "")).includes('{"op":"cancel","turn_id":1}')) await Bun.sleep(10);
+		})();
+		const workerSettled = worker.then(() => {}, () => {});
 		controller.abort(new Error("terminal shutdown cancellation"));
+		await cancelReceived;
 		await expect(worker).rejects.toMatchObject({ message: "terminal shutdown cancellation" });
 		const elapsedMs = Date.now() - started;
 		expect(await Bun.file(linesFile).text()).toContain('{"op":"cancel","turn_id":1}');
 		const escalationUpperBoundMs = 1500;
-		expect(Number(await Bun.file(`${sigFile}.alive`).text())).toBe(pid);
+		let signalled = false;
+		const signalDeadline = Date.now() + 2000;
+		while (!signalled && Date.now() < signalDeadline) {
+			signalled = await Bun.file(sigFile).exists();
+			if (!signalled) await Bun.sleep(10);
+		}
+		expect(signalled).toBe(true);
+		expect(Number(await Bun.file(sigFile).text())).toBe(pid);
 		expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
 		expect(elapsedMs).toBeLessThan(escalationUpperBoundMs);
 		delete process.env.FRANK_PID_FILE;
