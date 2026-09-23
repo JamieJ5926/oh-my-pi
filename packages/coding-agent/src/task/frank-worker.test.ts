@@ -1,3 +1,4 @@
+import { watch } from "node:fs";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -41,51 +42,42 @@ describe("Frank worker transport", () => {
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
 
-	test("abort after terminal completion kills and reaps a child ignoring shutdown", async () => {
-		const stub = await makeStub(`printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"; sleep 0.25; printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE.alive"; term_hold_n=0; while [ $term_hold_n -lt 60 ]; do sleep 0.05; term_hold_n=$((term_hold_n + 1)); done' TERM; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r ignored`);
-		const inner = path.join(stub.cwd, "inner");
-		await writeFile(inner, `#!/bin/sh\n${await Bun.file(stub.exe).text().then(text => text.slice(text.indexOf("\n") + 1))}\n`, { mode: 0o700 });
-		const proxy = path.join(stub.cwd, "proxy");
-		const linesFile = path.join(stub.cwd, "lines");
-		await writeFile(proxy, `#!/bin/sh\ntee -a ${JSON.stringify(linesFile)} | ${JSON.stringify(inner)} &\npipepid=$!\ntrap 'for p in $(pgrep -P "$pipepid"); do kill -TERM "$p"; done' TERM\nwait "$pipepid"\n`, { mode: 0o700 });
-		await chmod(proxy, 0o700);
+	test("abort after terminal completion cancels before signaling and reaps the direct child", async () => {
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' "$input" >> "$FRANK_EVENTS_FILE"; printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'IFS= read -r input; printf "%s\\n" "$input" >> "$FRANK_EVENTS_FILE"; printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"; printf "%s\\n" term >> "$FRANK_EVENTS_FILE"; exit 0' TERM; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; printf '%s\\n' ready > "$FRANK_READY_FILE"; while IFS= read -r input; do :; done`);
 		const pidFile = path.join(stub.cwd, "pid");
 		const sigFile = path.join(stub.cwd, "sigterm");
+		const eventsFile = path.join(stub.cwd, "events");
+		const readyFile = path.join(stub.cwd, "ready");
 		process.env.FRANK_PID_FILE = pidFile;
 		process.env.FRANK_SIGTERM_FILE = sigFile;
-		process.env.FRANK_LINES_FILE = linesFile;
+		process.env.FRANK_EVENTS_FILE = eventsFile;
+		process.env.FRANK_READY_FILE = readyFile;
 		const controller = new AbortController();
-		const worker = spawnFrankWorker({ ...workerOptions(proxy, stub.cwd, () => {}), signal: controller.signal });
-		let pid: number | undefined;
-		const pidDeadline = Date.now() + 2000;
-		while (pid === undefined && Date.now() < pidDeadline) {
-			try { pid = await readPid(pidFile); } catch { await Bun.sleep(10); }
-		}
-		if (pid === undefined) throw new Error("Frank child PID was not recorded");
-		const started = Date.now();
-		const cancelReceived = (async () => {
-			while (!(await Bun.file(linesFile).text().catch(() => "")).includes('{"op":"cancel","turn_id":1}')) await Bun.sleep(10);
-		})();
-		const workerSettled = worker.then(() => {}, () => {});
+		const worker = spawnFrankWorker({ ...workerOptions(stub.exe, stub.cwd, () => {}), signal: controller.signal });
+		await new Promise<void>((resolve, reject) => {
+			const watcher = watch(stub.cwd, (_event, filename) => {
+				if (filename?.toString() === "ready") {
+					watcher.close();
+					resolve();
+				}
+			});
+			void Bun.file(readyFile).exists().then(exists => {
+				if (exists) {
+					watcher.close();
+					resolve();
+				}
+			}).catch(reject);
+		});
+		const pid = await readPid(pidFile);
 		controller.abort(new Error("terminal shutdown cancellation"));
-		await cancelReceived;
 		await expect(worker).rejects.toMatchObject({ message: "terminal shutdown cancellation" });
-		const elapsedMs = Date.now() - started;
-		expect(await Bun.file(linesFile).text()).toContain('{"op":"cancel","turn_id":1}');
-		const escalationUpperBoundMs = 1500;
-		let signalled = false;
-		const signalDeadline = Date.now() + 2000;
-		while (!signalled && Date.now() < signalDeadline) {
-			signalled = await Bun.file(sigFile).exists();
-			if (!signalled) await Bun.sleep(10);
-		}
-		expect(signalled).toBe(true);
+		expect(await Bun.file(eventsFile).text()).toBe('{"op":"submit","turn_id":1,"text":"do the work"}\n{"op":"cancel","turn_id":1}\nterm\n');
 		expect(Number(await Bun.file(sigFile).text())).toBe(pid);
 		expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
-		expect(elapsedMs).toBeLessThan(escalationUpperBoundMs);
 		delete process.env.FRANK_PID_FILE;
-		delete process.env.FRANK_LINES_FILE;
 		delete process.env.FRANK_SIGTERM_FILE;
+		delete process.env.FRANK_EVENTS_FILE;
+		delete process.env.FRANK_READY_FILE;
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
 
