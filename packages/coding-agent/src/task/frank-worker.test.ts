@@ -187,4 +187,20 @@ describe("Frank worker transport", () => {
 		expect(received).toEqual([]);
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
+
+	test("rejects an event beyond the known terminal barrier", async () => {
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; sleep 0.3; printf '%s\\n' '{"type":"event","seq":2,"event":{"name":"late"}}'; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		received = [];
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, event => { received.push(event.seq); }));
+		let rejection: unknown;
+		try {
+			await worker;
+		} catch (error) {
+			rejection = error;
+		}
+		expect(rejection).toBeInstanceOf(FrankProtocolError);
+		expect(rejection instanceof Error ? rejection.message : undefined).toBe("Frank worker event out of contract");
+		expect(received).toEqual([]);
+		await rm(stub.cwd, { recursive: true, force: true });
+	});
 });
