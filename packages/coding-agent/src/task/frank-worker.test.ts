@@ -188,8 +188,8 @@ describe("Frank worker transport", () => {
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
 
-	test("rejects an event beyond the known terminal barrier", async () => {
-		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; sleep 0.3; printf '%s\\n' '{"type":"event","seq":2,"event":{"name":"late"}}'; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+	test("rejects over-barrier events before terminal", async () => {
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"a"}}' '{"type":"event","seq":2,"event":{"name":"b"}}'; sleep 0.3; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		received = [];
 		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, event => { received.push(event.seq); }));
 		let rejection: unknown;
@@ -198,9 +198,25 @@ describe("Frank worker transport", () => {
 		} catch (error) {
 			rejection = error;
 		}
+		expect(received).toEqual([1, 2]);
 		expect(rejection).toBeInstanceOf(FrankProtocolError);
-		expect(rejection instanceof Error ? rejection.message : undefined).toBe("Frank worker event out of contract");
-		expect(received).toEqual([]);
+		expect((rejection as FrankProtocolError).foldedText).toBe("a");
+		await rm(stub.cwd, { recursive: true, force: true });
+	});
+
+	test("rejects events beyond terminal barrier", async () => {
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"a"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; sleep 0.3; printf '%s\\n' '{"type":"event","seq":2,"event":{"name":"late"}}'; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		received = [];
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, event => { received.push(event.seq); }));
+		let rejection: unknown;
+		try {
+			await worker;
+		} catch (error) {
+			rejection = error;
+		}
+		expect(received).toEqual([1]);
+		expect(rejection).toBeInstanceOf(FrankProtocolError);
+		expect((rejection as FrankProtocolError).foldedText).toBe("a");
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
 });
