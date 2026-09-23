@@ -11,6 +11,13 @@ type FrankControl =
 
 export type { FrankControl };
 
+export class FrankProtocolError extends Error {
+	constructor() {
+		super("Frank worker event out of contract");
+		this.name = "FrankProtocolError";
+	}
+}
+
 export interface FrankEvent {
 	type: "event";
 	seq: number;
@@ -103,6 +110,7 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 	const { promise: completion, resolve: settle, reject: fail } = Promise.withResolvers<FrankWorkerResult>();
 	const { promise: closed, resolve: markClosed } = Promise.withResolvers<[number | null, NodeJS.Signals | null]>();
 	let deliveredSeq = 0;
+	let nextExpectedSeq = 1;
 	let accepted = false;
 	let terminal: Extract<FrankControl, { kind: "terminal" }> | undefined;
 	let failure: Error | undefined;
@@ -150,6 +158,11 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 	stdout.on("line", line => {
 		try {
 			const event = parseFrankEvent(parseLine(line));
+			if (event.seq !== nextExpectedSeq) {
+				rejectOnce(new FrankProtocolError());
+				return;
+			}
+			nextExpectedSeq++;
 			eventChain = eventChain.then(async () => {
 				await options.onEvent(event);
 				deliveredSeq = event.seq;
