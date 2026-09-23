@@ -50,10 +50,12 @@ async function frankWorkerOptions(options: ExecutorOptions, session: ToolSession
 	const selected = await resolveModelScope(Array.isArray(patterns) ? patterns : [patterns], session.modelRegistry, undefined, session.settings);
 	const model = selected[0]?.model;
 	if (!model) throw new StructuredSubagentError("preflight", "No available model for the selected Frank worker seat.");
+	const endpoint = model.baseUrl ?? session.modelRegistry.getProviderBaseUrl(model.provider);
+	if (!endpoint) throw new StructuredSubagentError("preflight", `No provider base URL for Frank worker model ${model.provider}/${model.id}.`);
 	return {
 		...options,
 		exe: path.join(session.cwd, "target", "debug", "frank_accept"),
-		endpoint: `${model.provider}/${model.id}`,
+		endpoint,
 		model: model.id,
 		budgets: { maxToolCalls: 64, wallSecs: 600 },
 		text: options.task,

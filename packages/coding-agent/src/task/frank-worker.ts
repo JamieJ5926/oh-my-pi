@@ -93,12 +93,20 @@ function parseFrankEvent(value: unknown): FrankEvent {
 	return { type: "event", seq: value.seq, event: value.event };
 }
 
+function isFrankBookkeepingEvent(event: FrankEvent): boolean {
+	const payload = event.event;
+	if (typeof payload !== "object" || payload === null || Array.isArray(payload) || !("kind" in payload)) return false;
+	const kind = payload.kind;
+	return typeof kind === "object" && kind !== null && ("TerminalDone" in kind || "Meter" in kind);
+}
+
 function parseLine(line: string): unknown {
 	return JSON.parse(line);
 }
 
 
 function writeLine(stream: NodeJS.WritableStream, value: unknown): Promise<void> {
+
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
 	stream.write(`${JSON.stringify(value)}\n`, error => error ? reject(error) : resolve());
 	return promise;
@@ -144,7 +152,7 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 			try {
 				await eventChain;
 				if (!failure) {
-					foldedText = foldEventsToText(admittedEvents.slice(0, terminal.final_seq));
+					foldedText = foldEventsToText(admittedEvents.filter((event): event is FrankEvent => event !== undefined && event.seq <= terminal.final_seq));
 					settled = true;
 					settle({ terminal, exitCode: 0, text: foldedText });
 				}
@@ -178,6 +186,7 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 	stdout.on("line", line => {
 		try {
 			const event = parseFrankEvent(parseLine(line));
+			if (terminal !== undefined && event.seq > terminal.final_seq) return;
 			if (seenSeqs.has(event.seq)) {
 				const error = new FrankProtocolError("Frank worker duplicate event sequence");
 				error.foldedText = foldedText;
@@ -186,18 +195,17 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 				return;
 			}
 			seenSeqs.add(event.seq);
-			if (terminal !== undefined && event.seq > terminal.final_seq) {
-				const error = new FrankProtocolError();
-				error.foldedText = foldedText;
-				protocolError = error;
-				if (!completionStarted) rejectOnce(error);
-				return;
-			}
 			if (event.seq !== nextExpectedSeq) {
 				const error = new FrankProtocolError();
 				error.foldedText = foldedText;
 				protocolError = error;
 				rejectOnce(error);
+				return;
+			}
+			if (isFrankBookkeepingEvent(event)) {
+				deliveredSeq = event.seq;
+				nextExpectedSeq = event.seq + 1;
+				void maybeComplete();
 				return;
 			}
 			nextExpectedSeq++;
@@ -228,15 +236,8 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 					return;
 				case "terminal":
 					if (control.turn_id !== 1) throw new Error(`Unexpected Frank terminal turn_id ${control.turn_id}`);
-					if (nextExpectedSeq - 1 > control.final_seq) {
-						const error = new FrankProtocolError();
-						error.foldedText = foldedText;
-						protocolError = error;
-						rejectOnce(error);
-						return;
-					}
 					terminal = control;
-					foldedText = foldEventsToText(admittedEvents.slice(0, control.final_seq));
+					foldedText = foldEventsToText(admittedEvents.filter((event): event is FrankEvent => event !== undefined && event.seq <= control.final_seq));
 					void maybeComplete();
 					return;
 				case "error":
