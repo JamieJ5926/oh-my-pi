@@ -42,27 +42,35 @@ describe("Frank worker transport", () => {
 	});
 
 	test("abort after terminal completion kills and reaps a child ignoring shutdown", async () => {
-		const stub = await makeStub(`printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"; sleep 0.25; printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE.alive"; term_hold_n=0; while [ $term_hold_n -lt 60 ]; do sleep 0.05; term_hold_n=$((term_hold_n + 1)); done' TERM; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ] || exit 4; IFS= read -r ignored`);
+		const stub = await makeStub(`printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"; sleep 0.25; printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE.alive"; term_hold_n=0; while [ $term_hold_n -lt 60 ]; do sleep 0.05; term_hold_n=$((term_hold_n + 1)); done' TERM; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r ignored`);
+		const inner = path.join(stub.cwd, "inner");
+		await writeFile(inner, `#!/bin/sh\n${await Bun.file(stub.exe).text().then(text => text.slice(text.indexOf("\n") + 1))}\n`, { mode: 0o700 });
+		const proxy = path.join(stub.cwd, "proxy");
+		const linesFile = path.join(stub.cwd, "lines");
+		await writeFile(proxy, `#!/bin/sh\ntee -a ${JSON.stringify(linesFile)} | ${JSON.stringify(inner)} &\npipepid=$!\ninnerpid=$(pgrep -P "$pipepid" | tail -n 1)\ntrap 'kill -TERM "$innerpid"' TERM\nwait "$pipepid"\n`, { mode: 0o700 });
+		await chmod(proxy, 0o700);
 		const pidFile = path.join(stub.cwd, "pid");
 		const sigFile = path.join(stub.cwd, "sigterm");
 		process.env.FRANK_PID_FILE = pidFile;
 		process.env.FRANK_SIGTERM_FILE = sigFile;
+		process.env.FRANK_LINES_FILE = linesFile;
 		const controller = new AbortController();
 		let resolveEvent: (() => void) | undefined;
 		const eventReceived = new Promise<void>(resolve => { resolveEvent = resolve; });
-		const worker = spawnFrankWorker({ ...workerOptions(stub.exe, stub.cwd, () => { resolveEvent?.(); }), signal: controller.signal });
+		const worker = spawnFrankWorker({ ...workerOptions(proxy, stub.cwd, () => { resolveEvent?.(); }), signal: controller.signal });
 		await eventReceived;
 		const pid = await readPid(pidFile);
 		const started = Date.now();
 		controller.abort(new Error("terminal shutdown cancellation"));
 		await expect(worker).rejects.toMatchObject({ message: "terminal shutdown cancellation" });
 		const elapsedMs = Date.now() - started;
+		expect(await Bun.file(linesFile).text()).toContain('{"op":"cancel","turn_id":1}');
 		const escalationUpperBoundMs = 1500;
-		expect(Number(await Bun.file(sigFile).text())).toBe(pid);
 		expect(Number(await Bun.file(`${sigFile}.alive`).text())).toBe(pid);
 		expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
 		expect(elapsedMs).toBeLessThan(escalationUpperBoundMs);
 		delete process.env.FRANK_PID_FILE;
+		delete process.env.FRANK_LINES_FILE;
 		delete process.env.FRANK_SIGTERM_FILE;
 		await rm(stub.cwd, { recursive: true, force: true });
 	});

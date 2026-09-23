@@ -155,16 +155,20 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 	};
 	const abort = () => {
 		abortReason = options.signal?.reason instanceof Error ? options.signal.reason : new Error("Frank worker aborted");
-		interruptShutdown?.();
-		rejectOnce(abortReason);
+		void writeLine(child.stdin, { op: "cancel", turn_id: 1 }).catch(() => {}).finally(() => {
+			interruptShutdown?.();
+			rejectOnce(abortReason!);
+		});
 	};
 	let eventChain = Promise.resolve();
 	options.signal?.addEventListener("abort", abort, { once: true });
 	if (options.timeoutMs !== undefined) {
 		timer = setTimeout(() => {
 			abortReason = new Error(`Frank worker timed out after ${options.timeoutMs}ms`);
-			interruptShutdown?.();
-			rejectOnce(abortReason);
+			void writeLine(child.stdin, { op: "cancel", turn_id: 1 }).catch(() => {}).finally(() => {
+				interruptShutdown?.();
+				rejectOnce(abortReason!);
+			});
 		}, options.timeoutMs);
 	}
 	stdout.on("close", () => {
