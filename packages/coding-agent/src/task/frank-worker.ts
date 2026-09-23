@@ -193,6 +193,7 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 				rejectOnce(error);
 				return;
 			}
+			nextExpectedSeq++;
 			eventChain = eventChain.then(async () => {
 				await options.onEvent(event);
 				deliveredSeq = event.seq;
