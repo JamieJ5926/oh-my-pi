@@ -235,7 +235,7 @@ export function parseModelList(value: unknown): string[] | undefined {
 /** Parsed agent fields from frontmatter (excludes source/filePath/systemPrompt) */
 export interface ParsedAgentFields {
 	name: string;
-	description: string;
+	runtime?: "frank";
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
@@ -260,6 +260,10 @@ export interface ParsedAgentFields {
  */
 export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAgentFields | null {
 	const name = typeof frontmatter.name === "string" ? frontmatter.name : undefined;
+	const runtime = frontmatter.runtime;
+	if (runtime !== undefined && runtime !== "frank") {
+		throw new Error(`Unknown agent runtime: ${String(runtime)}`);
+	}
 	const description = typeof frontmatter.description === "string" ? frontmatter.description : undefined;
 
 	if (!name || !description) {
@@ -337,6 +341,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	};
 	return {
 		name,
+		runtime,
 		description,
 		tools,
 		spawns,

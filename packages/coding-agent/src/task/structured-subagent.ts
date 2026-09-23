@@ -8,8 +8,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveAgentModelSelection } from "../config/model-resolver";
+import { resolveModelScope } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -23,7 +22,7 @@ import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
-import { type ExecutorOptions, runSubprocess } from "./executor";
+import { type ExecutorOptions, runFrankSubagent, runSubprocess } from "./executor";
 import {
 	applyEligibleNestedPatches,
 	type IsolationContext,
@@ -44,6 +43,20 @@ import {
 } from "./types";
 import { type NestedRepoPatch, parseIsolationMode } from "./worktree";
 
+async function frankWorkerOptions(options: ExecutorOptions, session: ToolSession, modelPattern: string | string[] | undefined) {
+	const patterns = modelPattern ?? options.modelOverride ?? options.agent.model ?? [session.getModelString?.()].filter((value): value is string => !!value);
+	const selected = await resolveModelScope(Array.isArray(patterns) ? patterns : [patterns], session.modelRegistry, undefined, session.settings);
+	const model = selected[0]?.model;
+	if (!model) throw new StructuredSubagentError("preflight", "No available model for the selected Frank worker seat.");
+	return {
+		...options,
+		exe: path.join(session.cwd, "target", "debug", "frank_accept"),
+		endpoint: `${model.provider}/${model.id}`,
+		model: model.id,
+		budgets: { maxToolCalls: 64, wallSecs: 600 },
+		text: options.task,
+	};
+}
 /** Validation behavior requested for an effective output schema. */
 export type StructuredSubagentSchemaMode = "permissive" | "strict";
 
@@ -625,8 +638,12 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				);
 			}
 		}
-		let result: SingleResult;
-		if (!isolationContext) {
+		if (policy.effectiveAgent.runtime === "frank") {
+			result = await runFrankSubagent(
+				await frankWorkerOptions(baseOptions, request.session, policy.modelOverride),
+			);
+			onSubprocessResult?.(result);
+		} else if (!isolationContext) {
 			result = await runSubprocess(baseOptions);
 			onSubprocessResult?.(result);
 		} else {

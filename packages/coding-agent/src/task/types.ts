@@ -361,6 +361,7 @@ export interface AgentDefinition {
 	name: string;
 	description: string;
 	systemPrompt: string;
+	runtime?: "frank";
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
