@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { eventAssistantText } from "./frank-worker-fold";
+import { answerExitDecision, foldEventsToText, FrankWorkerExitError } from "./frank-worker-fold";
 
 type FrankControl =
 	| { kind: "ack"; version: 1; turn_id: number; accepted: boolean; pending_id?: number; error?: string }
@@ -128,12 +128,9 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 	let interruptShutdown: (() => void) | undefined;
 	let stdoutClosed = false;
 	let foldedText = "";
-	const eventTextBySeq: string[] = [];
+	const admittedEvents: FrankEvent[] = [];
 	let protocolError: FrankProtocolError | undefined;
 	const seenSeqs = new Set<number>();
-	const updateFoldedText = () => {
-		foldedText = eventTextBySeq.slice(0, terminal?.final_seq ?? deliveredSeq).join("");
-	};
 	const rejectOnce = (error: Error) => {
 		if (settled) return;
 		failure = error;
@@ -147,6 +144,7 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 			try {
 				await eventChain;
 				if (!failure) {
+					foldedText = foldEventsToText(admittedEvents.slice(0, terminal.final_seq));
 					settled = true;
 					settle({ terminal, exitCode: 0, text: foldedText });
 				}
@@ -201,9 +199,8 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 			nextExpectedSeq++;
 			eventChain = eventChain.then(async () => {
 				await options.onEvent(event);
-				eventTextBySeq[event.seq - 1] = eventAssistantText(event);
+				admittedEvents[event.seq - 1] = event;
 				deliveredSeq = event.seq;
-				updateFoldedText();
 				void maybeComplete();
 			});
 			eventChain.catch(error => rejectOnce(error instanceof Error ? error : new Error(String(error))));
@@ -235,7 +232,7 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 						return;
 					}
 					terminal = control;
-					updateFoldedText();
+					foldedText = foldEventsToText(admittedEvents.slice(0, control.final_seq));
 					void maybeComplete();
 					return;
 				case "error":
@@ -278,7 +275,10 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 		}), deadline, interrupted]);
 		const [code, signal] = await Promise.race([closed, deadline, interrupted]);
 		if (protocolError) throw protocolError;
-		return { ...result, exitCode: code ?? (signal === "SIGKILL" ? 137 : 1) };
+		const childCode = code ?? (signal === "SIGKILL" ? 137 : 1);
+		const decision = answerExitDecision(result.terminal.terminal, childCode, result.text);
+		if (decision.error instanceof FrankWorkerExitError) throw decision.error;
+		return { ...result, exitCode: decision.exitCode };
 	} catch (error) {
 		if (child.exitCode === null && child.signalCode === null) {
 			child.kill("SIGTERM");

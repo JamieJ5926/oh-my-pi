@@ -67,4 +67,68 @@ describe("Frank task return integration", () => {
 		expect(lifecycleStatuses).toEqual(["started", "completed"]);
 		expect(AgentRegistry.global().get(id)?.history?.outputPath).toBe(outputPath);
 	});
+
+	test("preserves a nonzero worker exit after Answer as a typed error with folded text", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const id = "FrankReturnNonzero";
+		const result = await runFrankSubagent({
+			id,
+			task: "return a literal answer",
+			assignment: "answer precisely",
+			index: 0,
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			cwd: process.cwd(),
+			exe: "unused",
+			endpoint: "http://127.0.0.1:1",
+			model: "test-model",
+			budgets: { maxToolCalls: 3, wallSecs: 5 },
+			text: "request",
+			runWorker: async () => ({
+				terminal: { kind: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 0 },
+				exitCode: 7,
+				text: "folded answer text",
+			}),
+		});
+		expect(result.exitCode).toBe(7);
+		expect(result.error).toContain("Frank worker exited with code 7");
+		expect(result.output).toBe("folded answer text");
+		expect(AgentRegistry.global().get(id)?.status).toBe("parked");
+		expect(AgentRegistry.global().listVisibleTo("Main").find(ref => ref.id === id)).toBeUndefined();
+	});
+
+	test("registry visibility hides parked completed and failed statuses", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const completedId = "FrankReturnCompleted";
+		const failedId = "FrankReturnFailed";
+		const artifactsDir = await mkdtemp(path.join(os.tmpdir(), "frank-return-status-"));
+		artifactDirs.push(artifactsDir);
+		const run = (id: string, exitCode: number) => runFrankSubagent({
+			id,
+			task: "return an answer",
+			assignment: "answer",
+			index: 0,
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			cwd: process.cwd(),
+			exe: "unused",
+			artifactsDir,
+			endpoint: "http://127.0.0.1:1",
+			model: "test-model",
+			budgets: { maxToolCalls: 3, wallSecs: 5 },
+			text: "request",
+			runWorker: async () => ({
+				terminal: { kind: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 0 },
+				exitCode,
+				text: "answer",
+			}),
+		});
+		await run(completedId, 0);
+		await run(failedId, 9);
+		const visible = AgentRegistry.global().listVisibleTo("Main");
+		expect(AgentRegistry.global().get(completedId)?.status).toBe("parked");
+		expect(AgentRegistry.global().get(failedId)?.status).toBe("parked");
+		expect(AgentRegistry.global().get(completedId)?.history?.outputPath).toBe(path.join(artifactsDir, `${completedId}.md`));
+		expect(AgentRegistry.global().get(failedId)?.history?.outputPath).toBe(path.join(artifactsDir, `${failedId}.md`));
+		expect(visible.map(ref => ref.id)).not.toContain(completedId);
+		expect(visible.map(ref => ref.id)).not.toContain(failedId);
+	});
 });

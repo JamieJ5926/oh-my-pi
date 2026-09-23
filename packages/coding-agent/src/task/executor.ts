@@ -90,6 +90,7 @@ import { arrayValuedLabels, assembleYieldResult } from "./yield-assembly";
 
 import type { FrankEvent, FrankWorkerBudgets, FrankWorkerResult, SpawnFrankWorkerOptions } from "./frank-worker";
 import { spawnFrankWorker } from "./frank-worker";
+import { FrankWorkerExitError } from "./frank-worker-fold";
 
 export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "task" | "assignment" | "index" | "id" | "description" | "modelOverride" | "modelRole" | "signal" | "onProgress" | "eventBus" | "subagentEventBus" | "parentToolCallId" | "detached" | "artifactsDir" | "outputSchema" | "outputSchemaMode" | "outputSchemaSource"> {
 	cwd: string;
@@ -2872,6 +2873,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 	let error: string | undefined;
 	let aborted = false;
 	let abortReason: string | undefined;
+	let workerExitError: FrankWorkerExitError | undefined;
 	try {
 		if (signal?.aborted) {
 			aborted = true;
@@ -2896,6 +2898,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			exitCode = result.exitCode;
 			switch (result.terminal.terminal) {
 				case "Answer":
+					if (result.exitCode !== 0) throw new FrankWorkerExitError(result.exitCode, result.text);
 					exitCode = 0;
 					break;
 				case "Error":
@@ -2919,7 +2922,14 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			}
 		}
 	} catch (caught) {
-		error = caught instanceof Error ? caught.stack ?? caught.message : String(caught);
+		if (caught instanceof FrankWorkerExitError) {
+			workerExitError = caught;
+			exitCode = caught.exitCode;
+			error = caught.message;
+			rawOutput = caught.foldedText;
+		} else {
+			error = caught instanceof Error ? caught.stack ?? caught.message : String(caught);
+		}
 		if (signal?.aborted) {
 			aborted = true;
 			abortReason = signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? "Cancelled");
@@ -2949,7 +2959,13 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 		detached: options.detached,
 		startTime,
 	});
+	if (workerExitError) {
+		result.output = workerExitError.foldedText;
+		result.error = workerExitError.message;
+		result.exitCode = workerExitError.exitCode;
+	}
 	registry.setHistory(id, { outputPath: result.outputPath });
+	registry.setStatus(id, "parked");
 	return result;
 }
 
