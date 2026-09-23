@@ -158,6 +158,10 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 	stdout.on("line", line => {
 		try {
 			const event = parseFrankEvent(parseLine(line));
+			if (terminal !== undefined && event.seq > terminal.final_seq) {
+				rejectOnce(new FrankProtocolError());
+				return;
+			}
 			if (event.seq !== nextExpectedSeq) {
 				rejectOnce(new FrankProtocolError());
 				return;
@@ -189,6 +193,10 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 					return;
 				case "terminal":
 					if (control.turn_id !== 1) throw new Error(`Unexpected Frank terminal turn_id ${control.turn_id}`);
+					if (nextExpectedSeq - 1 > control.final_seq) {
+						rejectOnce(new FrankProtocolError());
+						return;
+					}
 					terminal = control;
 					void maybeComplete();
 					return;
