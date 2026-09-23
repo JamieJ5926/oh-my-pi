@@ -224,6 +224,7 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 					return;
 				case "terminal":
 					if (control.turn_id !== 1) throw new Error(`Unexpected Frank terminal turn_id ${control.turn_id}`);
+					foldedText = eventTextBySeq.slice(0, control.final_seq).join("");
 					if (nextExpectedSeq - 1 > control.final_seq) {
 						const error = new FrankProtocolError();
 						error.foldedText = foldedText;
@@ -232,7 +233,6 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 						return;
 					}
 					terminal = control;
-					foldedText = eventTextBySeq.slice(0, control.final_seq).join("");
 					void maybeComplete();
 					return;
 				case "error":
