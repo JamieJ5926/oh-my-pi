@@ -2,7 +2,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "bun:test";
-import { parseFrankControl, spawnFrankWorker, type FrankEvent } from "./frank-worker";
+import { FrankProtocolError, parseFrankControl, spawnFrankWorker, type FrankEvent } from "./frank-worker";
 
 let received: number[] = [];
 
@@ -169,6 +169,22 @@ describe("Frank worker transport", () => {
 		}));
 		await expect(worker).rejects.toThrow("trailing callback failed");
 		expect(callbackStarted).toBe(true);
+		await rm(stub.cwd, { recursive: true, force: true });
+	});
+
+	test("rejects a gapped event sequence before delivery", async () => {
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":2,"event":{"name":"gap"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":2}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		received = [];
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, event => { received.push(event.seq); }));
+		let rejection: unknown;
+		try {
+			await worker;
+		} catch (error) {
+			rejection = error;
+		}
+		expect(rejection).toBeInstanceOf(FrankProtocolError);
+		expect(rejection instanceof Error ? rejection.message : undefined).toBe("Frank worker event out of contract");
+		expect(received).toEqual([]);
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
 });
