@@ -12,8 +12,10 @@ type FrankControl =
 export type { FrankControl };
 
 export class FrankProtocolError extends Error {
-	constructor() {
-		super("Frank worker event out of contract");
+	foldedText = "";
+
+	constructor(message = "Frank worker event out of contract") {
+		super(message);
 		this.name = "FrankProtocolError";
 	}
 }
@@ -44,6 +46,7 @@ export interface SpawnFrankWorkerOptions {
 export interface FrankWorkerResult {
 	terminal: Extract<FrankControl, { kind: "terminal" }>;
 	exitCode: number;
+	text: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -121,9 +124,15 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 	const closeTimeoutMs = 500;
 	let completionStarted = false;
 	let interruptShutdown: (() => void) | undefined;
+	let stdoutClosed = false;
+	let foldedText = "";
+	const eventTextBySeq: string[] = [];
+	let protocolError: FrankProtocolError | undefined;
+	const seenSeqs = new Set<number>();
 	const rejectOnce = (error: Error) => {
 		if (settled) return;
 		failure = error;
+		if (error instanceof FrankProtocolError) error.foldedText = foldedText;
 		settled = true;
 		fail(error);
 	};
@@ -134,7 +143,7 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 				await eventChain;
 				if (!failure) {
 					settled = true;
-					settle({ terminal, exitCode: 0 });
+					settle({ terminal, exitCode: 0, text: foldedText });
 				}
 			} catch (error) {
 				rejectOnce(error instanceof Error ? error : new Error(String(error)));
@@ -155,21 +164,42 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 			rejectOnce(abortReason);
 		}, options.timeoutMs);
 	}
+	stdout.on("close", () => {
+		stdoutClosed = true;
+		void maybeComplete();
+	});
 	stdout.on("line", line => {
 		try {
 			const event = parseFrankEvent(parseLine(line));
+			if (seenSeqs.has(event.seq)) {
+				const error = new FrankProtocolError("Frank worker duplicate event sequence");
+				error.foldedText = foldedText;
+				protocolError = error;
+				if (!completionStarted) rejectOnce(error);
+				return;
+			}
+			seenSeqs.add(event.seq);
 			if (terminal !== undefined && event.seq > terminal.final_seq) {
-				rejectOnce(new FrankProtocolError());
+				const error = new FrankProtocolError();
+				error.foldedText = foldedText;
+				protocolError = error;
+				if (!completionStarted) rejectOnce(error);
 				return;
 			}
 			if (event.seq !== nextExpectedSeq) {
-				rejectOnce(new FrankProtocolError());
+				const error = new FrankProtocolError();
+				error.foldedText = foldedText;
+				protocolError = error;
+				rejectOnce(error);
 				return;
 			}
-			nextExpectedSeq++;
 			eventChain = eventChain.then(async () => {
 				await options.onEvent(event);
 				deliveredSeq = event.seq;
+				eventTextBySeq[event.seq - 1] = typeof event.event === "string" ? event.event : (event.event?.name ?? JSON.stringify(event.event));
+				if (terminal !== undefined && event.seq <= terminal.final_seq) {
+					foldedText = eventTextBySeq.slice(0, terminal.final_seq).join("");
+				}
 				void maybeComplete();
 			});
 			eventChain.catch(error => rejectOnce(error instanceof Error ? error : new Error(String(error))));
@@ -194,10 +224,14 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 				case "terminal":
 					if (control.turn_id !== 1) throw new Error(`Unexpected Frank terminal turn_id ${control.turn_id}`);
 					if (nextExpectedSeq - 1 > control.final_seq) {
-						rejectOnce(new FrankProtocolError());
+						const error = new FrankProtocolError();
+						error.foldedText = foldedText;
+						protocolError = error;
+						rejectOnce(error);
 						return;
 					}
 					terminal = control;
+					foldedText = eventTextBySeq.slice(0, control.final_seq).join("");
 					void maybeComplete();
 					return;
 				case "error":
@@ -235,6 +269,7 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 			if (!settled && child.exitCode === null && child.signalCode === null) throw error;
 		}), deadline, interrupted]);
 		const [code, signal] = await Promise.race([closed, deadline, interrupted]);
+		if (protocolError) throw protocolError;
 		return { ...result, exitCode: code ?? (signal === "SIGKILL" ? 137 : 1) };
 	} catch (error) {
 		if (child.exitCode === null && child.signalCode === null) {
