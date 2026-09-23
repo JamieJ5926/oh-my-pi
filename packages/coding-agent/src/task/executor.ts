@@ -88,6 +88,19 @@ import {
 } from "./types";
 import { arrayValuedLabels, assembleYieldResult } from "./yield-assembly";
 
+import type { FrankEvent, FrankWorkerBudgets, FrankWorkerResult, SpawnFrankWorkerOptions } from "./frank-worker";
+import { spawnFrankWorker } from "./frank-worker";
+
+export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "task" | "assignment" | "index" | "id" | "description" | "modelOverride" | "modelRole" | "signal" | "onProgress" | "eventBus" | "subagentEventBus" | "parentToolCallId" | "detached" | "artifactsDir" | "outputSchema" | "outputSchemaMode" | "outputSchemaSource"> {
+	cwd: string;
+	exe: string;
+	endpoint: string;
+	model: string;
+	budgets: FrankWorkerBudgets;
+	text: string;
+	runWorker?: (options: SpawnFrankWorkerOptions) => Promise<FrankWorkerResult>;
+}
+
 export type { YieldItem } from "./types";
 
 const MCP_CALL_TIMEOUT_MS = 60_000;
@@ -2819,6 +2832,125 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		sessionFile,
 		startTime,
 	});
+}
+
+export async function runFrankSubagent(options: FrankExecutorOptions): Promise<SingleResult> {
+	const { id, agent, task, assignment, index, signal } = options;
+	const startTime = Date.now();
+	const monitor = createSubagentRunMonitor({
+		index,
+		id,
+		agent,
+		task,
+		assignment,
+		description: options.description,
+		modelOverride: options.modelOverride,
+		modelRole: options.modelRole,
+		signal,
+		onProgress: options.onProgress,
+		eventBus: options.eventBus,
+		subagentEventBus: options.subagentEventBus,
+		parentToolCallId: options.parentToolCallId,
+		detached: options.detached,
+		softRequestBudget: 0,
+		softRequestBudgetNotice: false,
+		maxRuntimeMs: 0,
+	});
+	const registry = AgentRegistry.global();
+	if (!registry.get(id)) registry.register({ id, displayName: agent.name, kind: "sub", session: null, status: "running" });
+	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+		id,
+		agent: agent.name,
+		description: options.description,
+		status: "started",
+		parentToolCallId: options.parentToolCallId,
+		detached: options.detached,
+		index,
+	});
+	let rawOutput = "";
+	let exitCode = 1;
+	let error: string | undefined;
+	let aborted = false;
+	let abortReason: string | undefined;
+	try {
+		if (signal?.aborted) {
+			aborted = true;
+			abortReason = signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? "Cancelled");
+		} else {
+			const result = await (options.runWorker ?? spawnFrankWorker)({
+				exe: options.exe,
+				endpoint: options.endpoint,
+				model: options.model,
+				cwd: options.cwd,
+				budgets: options.budgets,
+				text: options.text,
+				signal,
+				onEvent: async (event: FrankEvent) => {
+					emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_EVENT_CHANNEL, {
+						id,
+						event: event.event,
+					});
+				},
+			});
+			rawOutput = result.text;
+			exitCode = result.exitCode;
+			switch (result.terminal.terminal) {
+				case "Answer":
+					exitCode = 0;
+					break;
+				case "Error":
+					exitCode = 1;
+					error = result.terminal.error ?? "Frank worker reported an error";
+					break;
+				case "Cancelled":
+					exitCode = 1;
+					aborted = true;
+					abortReason = result.terminal.error ?? "Frank worker cancelled";
+					break;
+				case "BudgetExceeded":
+					exitCode = 1;
+					error = result.terminal.error ?? "Frank worker budget exceeded";
+					monitor.progress.retryFailure = { attempt: 1, errorMessage: error };
+					break;
+				default: {
+					const exhaustive: never = result.terminal.terminal;
+					throw new Error(`Unhandled Frank terminal ${String(exhaustive)}`);
+				}
+			}
+		}
+	} catch (caught) {
+		error = caught instanceof Error ? caught.stack ?? caught.message : String(caught);
+		if (signal?.aborted) {
+			aborted = true;
+			abortReason = signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? "Cancelled");
+		}
+	} finally {
+		monitor.finish();
+	}
+	const finalMonitor: SubagentRunMonitor = { ...monitor, rawOutput: () => rawOutput };
+	const result = await finalizeRunResult({
+		monitor: finalMonitor,
+		done: { exitCode, error, aborted, abortReason, durationMs: Date.now() - startTime },
+		index,
+		id,
+		agent,
+		task,
+		assignment,
+		modelOverride: options.modelOverride,
+		modelRole: options.modelRole,
+		outputSchema: options.outputSchema,
+		outputSchemaMode: options.outputSchemaMode,
+		outputSchemaSource: options.outputSchemaSource,
+		signal,
+		artifactsDir: options.artifactsDir,
+		eventBus: options.eventBus,
+		subagentEventBus: options.subagentEventBus,
+		parentToolCallId: options.parentToolCallId,
+		detached: options.detached,
+		startTime,
+	});
+	registry.setHistory(id, { outputPath: result.outputPath });
+	return result;
 }
 
 /**

@@ -21,15 +21,7 @@ async function readPid(file: string): Promise<number> {
 }
 
 function workerOptions(exe: string, cwd: string, onEvent: (event: FrankEvent) => void | Promise<void>) {
-	return {
-		exe,
-		endpoint: "http://127.0.0.1:1",
-		model: "test-model",
-		cwd,
-		budgets: { maxToolCalls: 12, wallSecs: 9 },
-		text: "do the work",
-		onEvent,
-	};
+	return { exe, endpoint: "http://127.0.0.1:1", model: "test-model", cwd, budgets: { maxToolCalls: 12, wallSecs: 9 }, text: "do the work", onEvent };
 }
 
 describe("Frank worker transport", () => {
@@ -42,10 +34,7 @@ describe("Frank worker transport", () => {
 		expect(parseFrankControl({ type: "error", version: 1, message: "problem" })).toEqual({ kind: "error", version: 1, message: "problem" });
 		const stub = await makeStub(`IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"do the work"}' ] || exit 4; printf '%s\\n' '{"type":"heartbeat","version":1,"at_ms":20}' '{"type":"saved","version":1,"path":"/tmp/session.jsonl"}' '{"type":"cancelled","version":1,"turn_id":1}' >&2; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' >&2; printf '%s\\n' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		received = [];
-		const result = await spawnFrankWorker(workerOptions(stub.exe, stub.cwd, async event => {
-			await Promise.resolve();
-			received.push(event.seq);
-		}));
+		const result = await spawnFrankWorker(workerOptions(stub.exe, stub.cwd, async event => { await Promise.resolve(); received.push(event.seq); }));
 		expect(result.terminal.final_seq).toBe(1);
 		expect(result.exitCode).toBe(0);
 		expect(received).toEqual([1]);
@@ -111,23 +100,14 @@ describe("Frank worker transport", () => {
 		let callbackCompleted = false;
 		const started = new Promise<void>(resolve => { callbackStarted = resolve; });
 		const callbackReleased = new Promise<void>(resolve => { releaseCallback = resolve; });
-		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, async () => {
-			callbackStarted?.();
-			await callbackReleased;
-			callbackCompleted = true;
-		}));
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, async () => { callbackStarted?.(); await callbackReleased; callbackCompleted = true; }));
 		await started;
 		const pid = await readPid(pidFile);
 		let settled = false;
 		void worker.then(() => { settled = true; }, () => { settled = true; });
 		const reapDeadline = Date.now() + 1000;
 		while (Date.now() < reapDeadline) {
-			try {
-				process.kill(pid, 0);
-			} catch (error) {
-				if (error instanceof Error && "code" in error && error.code === "ESRCH") break;
-				throw error;
-			}
+			try { process.kill(pid, 0); } catch (error) { if (error instanceof Error && "code" in error && error.code === "ESRCH") break; throw error; }
 			await Bun.sleep(10);
 		}
 		expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
@@ -147,10 +127,7 @@ describe("Frank worker transport", () => {
 		let callbackStarted: (() => void) | undefined;
 		const started = new Promise<void>(resolve => { callbackStarted = resolve; });
 		const callbackReleased = new Promise<void>(resolve => { releaseCallback = resolve; });
-		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, async () => {
-			callbackStarted?.();
-			await callbackReleased;
-		}));
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, async () => { callbackStarted?.(); await callbackReleased; }));
 		await started;
 		releaseCallback?.();
 		const result = await worker;
@@ -162,11 +139,7 @@ describe("Frank worker transport", () => {
 	test("awaits trailing stdout callback and propagates its rejection", async () => {
 		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"trailing"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		let callbackStarted = false;
-		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, async () => {
-			callbackStarted = true;
-			await Promise.resolve();
-			throw new Error("trailing callback failed");
-		}));
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, async () => { callbackStarted = true; await Promise.resolve(); throw new Error("trailing callback failed"); }));
 		await expect(worker).rejects.toThrow("trailing callback failed");
 		expect(callbackStarted).toBe(true);
 		await rm(stub.cwd, { recursive: true, force: true });
@@ -177,11 +150,7 @@ describe("Frank worker transport", () => {
 		received = [];
 		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, event => { received.push(event.seq); }));
 		let rejection: unknown;
-		try {
-			await worker;
-		} catch (error) {
-			rejection = error;
-		}
+		try { await worker; } catch (error) { rejection = error; }
 		expect(rejection).toBeInstanceOf(FrankProtocolError);
 		expect(rejection instanceof Error ? rejection.message : undefined).toBe("Frank worker event out of contract");
 		expect(received).toEqual([]);
@@ -193,14 +162,10 @@ describe("Frank worker transport", () => {
 		received = [];
 		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, event => { received.push(event.seq); }));
 		let rejection: unknown;
-		try {
-			await worker;
-		} catch (error) {
-			rejection = error;
-		}
+		try { await worker; } catch (error) { rejection = error; }
 		expect(received).toEqual([1, 2]);
 		expect(rejection).toBeInstanceOf(FrankProtocolError);
-		expect((rejection as FrankProtocolError).foldedText).toBe("a");
+		expect((rejection as FrankProtocolError).foldedText).toBe("");
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
 
@@ -209,16 +174,13 @@ describe("Frank worker transport", () => {
 		received = [];
 		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, event => { received.push(event.seq); }));
 		let rejection: unknown;
-		try {
-			await worker;
-		} catch (error) {
-			rejection = error;
-		}
+		try { await worker; } catch (error) { rejection = error; }
 		expect(received).toEqual([1]);
 		expect(rejection).toBeInstanceOf(FrankProtocolError);
-		expect((rejection as FrankProtocolError).foldedText).toBe("a");
+		expect((rejection as FrankProtocolError).foldedText).toBe("");
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
+
 	test("clean run remains unsettled until stdout closes", async () => {
 		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"a"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]; sleep 0.3`);
 		let settled = false;
@@ -227,24 +189,42 @@ describe("Frank worker transport", () => {
 		await Bun.sleep(150);
 		expect(settled).toBe(false);
 		const result = await worker;
-		expect(result.text).toBe("a");
+		expect(result.text).toBe("");
 		expect(result.exitCode).toBe(0);
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
+
+	test("folds assistant text in exact event sequence order through final_seq", async () => {
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"Hello "}]},"assistantMessageEvent":{"type":"text_delta","delta":"Hello "}}}' '{"type":"event","seq":2,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"Hello from "}]},"assistantMessageEvent":{"type":"text_delta","delta":"from "}}}' '{"type":"event","seq":3,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"Hello from Frank"}]},"assistantMessageEvent":{"type":"text_delta","delta":"Frank"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":3}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		const result = await spawnFrankWorker(workerOptions(stub.exe, stub.cwd, () => {}));
+		expect(result.text).toBe("Hello from Frank");
+		expect(result.terminal.final_seq).toBe(3);
+		await rm(stub.cwd, { recursive: true, force: true });
+	});
+
+	test("rejects stdout closing before terminal final_seq is delivered", async () => {
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":"partial"}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":2}' >&2; exit 0`);
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, () => {}));
+		await expect(worker).rejects.toThrow("Frank exited before completing the turn");
+		await rm(stub.cwd, { recursive: true, force: true });
+	});
+
+	test("rejects a gapped event sequence instead of completing its terminal barrier", async () => {
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":"first"}' '{"type":"event","seq":3,"event":"third"}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":3}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, () => {}));
+		await expect(worker).rejects.toBeInstanceOf(FrankProtocolError);
+	});
+
 	test("rejects duplicate sequence with typed error and specific message", async () => {
 		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"a"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; sleep 0.3; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"dup"}}'; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		received = [];
 		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, event => { received.push(event.seq); }));
 		let rejection: unknown;
-		try {
-			await worker;
-		} catch (error) {
-			rejection = error;
-		}
+		try { await worker; } catch (error) { rejection = error; }
 		expect(received).toEqual([1]);
 		expect(rejection).toBeInstanceOf(FrankProtocolError);
 		expect((rejection as Error).message).toBe("Frank worker duplicate event sequence");
-		expect((rejection as FrankProtocolError).foldedText).toBe("a");
+		expect((rejection as FrankProtocolError).foldedText).toBe("");
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
 });
