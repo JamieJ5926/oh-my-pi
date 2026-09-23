@@ -219,4 +219,32 @@ describe("Frank worker transport", () => {
 		expect((rejection as FrankProtocolError).foldedText).toBe("a");
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
+	test("clean run remains unsettled until stdout closes", async () => {
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"a"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]; sleep 0.3`);
+		let settled = false;
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, () => {}));
+		void worker.then(() => { settled = true; }, () => { settled = true; });
+		await Bun.sleep(150);
+		expect(settled).toBe(false);
+		const result = await worker;
+		expect(result.text).toBe("a");
+		expect(result.exitCode).toBe(0);
+		await rm(stub.cwd, { recursive: true, force: true });
+	});
+	test("rejects duplicate sequence with typed error and specific message", async () => {
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"a"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; sleep 0.3; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"dup"}}'; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		received = [];
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, event => { received.push(event.seq); }));
+		let rejection: unknown;
+		try {
+			await worker;
+		} catch (error) {
+			rejection = error;
+		}
+		expect(received).toEqual([1]);
+		expect(rejection).toBeInstanceOf(FrankProtocolError);
+		expect((rejection as Error).message).toBe("Frank worker duplicate event sequence");
+		expect((rejection as FrankProtocolError).foldedText).toBe("a");
+		await rm(stub.cwd, { recursive: true, force: true });
+	});
 });
