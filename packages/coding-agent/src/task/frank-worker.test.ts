@@ -53,7 +53,7 @@ describe("Frank worker transport", () => {
 	});
 
 	test("abort after terminal completion kills and reaps a child ignoring shutdown", async () => {
-		const stub = await makeStub(`printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"' TERM; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ] || exit 4; IFS= read -r ignored`);
+		const stub = await makeStub(`printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"; sleep 0.25; printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE.alive"; term_hold_n=0; while [ $term_hold_n -lt 60 ]; do sleep 0.05; term_hold_n=$((term_hold_n + 1)); done' TERM; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ] || exit 4; IFS= read -r ignored`);
 		const pidFile = path.join(stub.cwd, "pid");
 		const sigFile = path.join(stub.cwd, "sigterm");
 		process.env.FRANK_PID_FILE = pidFile;
@@ -70,6 +70,7 @@ describe("Frank worker transport", () => {
 		const elapsedMs = Date.now() - started;
 		const escalationUpperBoundMs = 1500;
 		expect(Number(await Bun.file(sigFile).text())).toBe(pid);
+		expect(Number(await Bun.file(`${sigFile}.alive`).text())).toBe(pid);
 		expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
 		expect(elapsedMs).toBeLessThan(escalationUpperBoundMs);
 		delete process.env.FRANK_PID_FILE;
@@ -78,7 +79,7 @@ describe("Frank worker transport", () => {
 	});
 
 	test("bounds ignored shutdown and reaps the child without abort", async () => {
-		const stub = await makeStub(`printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"' TERM; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ] || exit 4; printf '%s\\n' '{"type":"shutdown-seen"}' >&2; IFS= read -r ignored`);
+		const stub = await makeStub(`printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"; sleep 0.25; printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE.alive"; term_hold_n=0; while [ $term_hold_n -lt 60 ]; do sleep 0.05; term_hold_n=$((term_hold_n + 1)); done' TERM; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ] || exit 4; printf '%s\\n' '{"type":"shutdown-seen"}' >&2; IFS= read -r ignored`);
 		const pidFile = path.join(stub.cwd, "pid");
 		const sigFile = path.join(stub.cwd, "sigterm");
 		process.env.FRANK_PID_FILE = pidFile;
@@ -93,6 +94,7 @@ describe("Frank worker transport", () => {
 		const elapsedMs = Date.now() - started;
 		const escalationUpperBoundMs = 1500;
 		expect(Number(await Bun.file(sigFile).text())).toBe(pid);
+		expect(Number(await Bun.file(`${sigFile}.alive`).text())).toBe(pid);
 		expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
 		expect(elapsedMs).toBeLessThan(escalationUpperBoundMs);
 		delete process.env.FRANK_PID_FILE;
