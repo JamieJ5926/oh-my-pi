@@ -147,14 +147,15 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 		fail(error);
 	};
 	const maybeComplete = async () => {
-		if (!completionStarted && accepted && terminal && deliveredSeq >= terminal.final_seq) {
+		const completedTerminal = terminal;
+		if (!completionStarted && accepted && completedTerminal && deliveredSeq >= completedTerminal.final_seq) {
 			completionStarted = true;
 			try {
 				await eventChain;
 				if (!failure) {
-					foldedText = foldEventsToText(admittedEvents.filter((event): event is FrankEvent => event !== undefined && event.seq <= terminal.final_seq));
+					foldedText = foldEventsToText(admittedEvents.filter((event): event is FrankEvent => event !== undefined && event.seq <= completedTerminal.final_seq));
 					settled = true;
-					settle({ terminal, exitCode: 0, text: foldedText });
+					settle({ terminal: completedTerminal, exitCode: 0, text: foldedText });
 				}
 			} catch (error) {
 				rejectOnce(error instanceof Error ? error : new Error(String(error)));
@@ -212,7 +213,7 @@ export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promis
 			eventChain = eventChain.then(async () => {
 				await options.onEvent(event);
 				admittedEvents[event.seq - 1] = event;
-				deliveredSeq = event.seq;
+				deliveredSeq = Math.max(deliveredSeq, event.seq);
 				void maybeComplete();
 			});
 			eventChain.catch(error => rejectOnce(error instanceof Error ? error : new Error(String(error))));
