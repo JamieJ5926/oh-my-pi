@@ -15,7 +15,13 @@ function extractMessageText(message: unknown): string {
 
 export function eventAssistantText(event: FrankEvent): string {
 	const value = event.event;
-	if (!isRecord(value) || (value.type !== "message_update" && value.type !== "message_end")) return "";
+	if (!isRecord(value)) return "";
+	const kind = value.kind;
+	if (isRecord(kind) && typeof kind.AssistantDelta === "string") return kind.AssistantDelta;
+	if (isRecord(kind) && isRecord(kind.AssistantDelta) && typeof kind.AssistantDelta.value === "string") {
+		return kind.AssistantDelta.value;
+	}
+	if (value.type !== "message_update" && value.type !== "message_end") return "";
 	const message = value.message;
 	if (!isRecord(message) || message.role !== "assistant") return "";
 	if (value.type === "message_end") return extractMessageText(message);
@@ -33,15 +39,12 @@ export function foldEventsToText(events: FrankEvent[]): string {
 	for (const event of events) {
 		const value = event.event;
 		if (!isRecord(value)) continue;
-		if (value.type === "message_update") {
-			const text = eventAssistantText(event);
-			if (text !== "") {
-				deltas.push(text);
-				hasDeltas = true;
-			}
-		} else if (value.type === "message_end") {
-			const text = eventAssistantText(event);
-			if (text !== "") finalText = text;
+		const text = eventAssistantText(event);
+		if (text === "") continue;
+		if (value.type === "message_end") finalText = text;
+		else {
+			deltas.push(text);
+			hasDeltas = true;
 		}
 	}
 	return hasDeltas ? deltas.join("") : finalText;
@@ -55,7 +58,6 @@ export class FrankWorkerExitError extends Error {
 }
 
 export function answerExitDecision(terminal: string, workerExitCode: number, foldedText: string): { exitCode: number; error?: FrankWorkerExitError } {
-	if (terminal === "Answer" && workerExitCode === 0) return { exitCode: 0 };
-	const exitCode = workerExitCode === 0 ? 1 : workerExitCode;
-	return { exitCode, error: new FrankWorkerExitError(exitCode, foldedText) };
+	if (terminal !== "Answer" || workerExitCode === 0) return { exitCode: workerExitCode };
+	return { exitCode: workerExitCode, error: new FrankWorkerExitError(workerExitCode, foldedText) };
 }
