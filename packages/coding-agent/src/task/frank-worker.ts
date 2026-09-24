@@ -133,7 +133,7 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 	const executable = options.exe.includes(path.sep) && !path.isAbsolute(options.exe) ? path.resolve(options.cwd, options.exe) : options.exe;
 	const child = spawn(executable, [
 		"agent", "--endpoint", options.endpoint, "--model", options.model, "--cwd", options.cwd,
-		"--max-tool-calls", String(options.budgets.maxToolCalls), "--wall-secs", String(options.budgets.wallSecs),
+		"--max-tool-calls", String(options.budgets.maxToolCalls), "--wall-secs", String(options.budgets.wallSecs), "--tool-choice", "auto",
 	], { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"], env: childEnv });
 	const stdout = createInterface({ input: child.stdout });
 	const stderr = createInterface({ input: child.stderr });
