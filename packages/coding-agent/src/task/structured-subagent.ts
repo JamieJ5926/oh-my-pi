@@ -109,7 +109,6 @@ async function frankWorkerOptions(
 		transport: options.frankTransport ?? session.settings.get("task.frankTransport"),
 		frankBin: await resolveFrankBin(session.cwd),
 		apiKeyEnv: "PI_TRACK_API_KEY",
-		budgets: { maxToolCalls: 20, wallSecs: 600 },
 		text: options.context ? `${options.context}\n\n${options.task}` : options.task,
 	};
 }
