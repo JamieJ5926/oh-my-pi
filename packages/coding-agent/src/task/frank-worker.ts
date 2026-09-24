@@ -44,6 +44,8 @@ export interface SpawnFrankWorkerOptions {
 	apiKey?: string;
 	signal?: AbortSignal;
 	timeoutMs?: number;
+	/** Frank writes its full event stream here (tool calls, results, faults, token meters). */
+	eventsPath?: string;
 }
 export type StartFrankWorkerOptions = Omit<SpawnFrankWorkerOptions, "text">;
 
@@ -134,6 +136,7 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 	const child = spawn(executable, [
 		"agent", "--endpoint", options.endpoint, "--model", options.model, "--cwd", options.cwd,
 		"--max-tool-calls", String(options.budgets.maxToolCalls), "--wall-secs", String(options.budgets.wallSecs), "--tool-choice", "auto",
+		...(options.eventsPath ? ["--events-path", options.eventsPath] : []),
 	], { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"], env: childEnv });
 	const stdout = createInterface({ input: child.stdout });
 	const stderr = createInterface({ input: child.stderr });

@@ -3021,6 +3021,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			const events: FrankEvent[] = [];
 			let forwardEvent = createFrankEventForwarder(id, options.eventBus, options.subagentEventBus);
 			const workerOptions: StartFrankWorkerOptions = {
+				...(options.artifactsDir ? { eventsPath: path.join(options.artifactsDir, `${id}.frank.jsonl`) } : {}),
 				exe: options.exe,
 				endpoint: options.endpoint,
 				model: options.model,
