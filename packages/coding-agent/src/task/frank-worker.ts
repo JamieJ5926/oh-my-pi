@@ -46,6 +46,8 @@ export interface SpawnFrankWorkerOptions {
 	timeoutMs?: number;
 	/** Frank writes its full event stream here (tool calls, results, faults, token meters). */
 	eventsPath?: string;
+	/** Role instructions: Frank loads <root>/roles/<name>/instructions/<name>.md as its role layer. */
+	role?: { root: string; name: string };
 }
 export type StartFrankWorkerOptions = Omit<SpawnFrankWorkerOptions, "text">;
 
@@ -138,6 +140,7 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 		"agent", "--endpoint", options.endpoint, "--model", options.model, "--cwd", options.cwd,
 		"--max-tool-calls", String(options.budgets.maxToolCalls), "--wall-secs", String(options.budgets.wallSecs), "--tool-choice", "auto",
 		...(options.eventsPath ? ["--events-path", options.eventsPath] : []),
+		...(options.role ? ["--instructions-root", options.role.root, "--instructions-role", options.role.name] : []),
 	], { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"], env: childEnv });
 	const stdout = createInterface({ input: child.stdout });
 	const stderr = createInterface({ input: child.stderr });

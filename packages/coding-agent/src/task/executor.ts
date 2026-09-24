@@ -3020,8 +3020,17 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 		} else {
 			const events: FrankEvent[] = [];
 			let forwardEvent = createFrankEventForwarder(id, options.eventBus, options.subagentEventBus);
+			let role: StartFrankWorkerOptions["role"];
+			const rolePrompt = options.agent.systemPrompt.trim();
+			if (rolePrompt && options.artifactsDir) {
+				const root = path.join(options.artifactsDir, `${id}.frank-profiles`);
+				const name = options.agent.name.replace(/[^A-Za-z0-9_-]/g, "-");
+				await Bun.write(path.join(root, "roles", name, "instructions", `${name}.md`), `${rolePrompt}\n`);
+				role = { root, name };
+			}
 			const workerOptions: StartFrankWorkerOptions = {
 				...(options.artifactsDir ? { eventsPath: path.join(options.artifactsDir, `${id}.frank.jsonl`) } : {}),
+				...(role ? { role } : {}),
 				exe: options.exe,
 				endpoint: options.endpoint,
 				model: options.model,
