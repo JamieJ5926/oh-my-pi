@@ -2857,6 +2857,7 @@ async function runRetainedFrankFollowUpTurn(
 				? await Promise.race([worker.handle.runTurn(message), abortPromise])
 				: await worker.handle.runTurn(message);
 			if (result !== abortedTurn) {
+				rawOutput = result.text;
 				({ exitCode, error, aborted: abortedResult, abortReason } = finalizeFrankTerminal(result, monitor));
 				aborted = abortedResult ?? false;
 			}
