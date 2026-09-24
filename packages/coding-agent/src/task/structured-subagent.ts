@@ -108,6 +108,7 @@ async function frankWorkerOptions(
 		transport: options.frankTransport ?? session.settings.get("task.frankTransport"),
 		frankBin: await resolveFrankBin(session.cwd),
 		apiKeyEnv: "PI_TRACK_API_KEY",
+		budgets: { maxToolCalls: 20, wallSecs: 600 },
 		text: options.context ? `${options.context}\n\n${options.task}` : options.task,
 	};
 }
@@ -448,7 +449,7 @@ async function resolveRoleInputs(session: ToolSession, agent: AgentDefinition) {
 		file => [file.path, path.basename(file.path)],
 	);
 	const rules = select(agent.instructions, session.rules ?? [], rule => [rule.name, rule.path]);
-	const skills = select(agent.skills, session.skills ?? [], skill => [skill.name, skill.filePath]);
+	const skills = select(agent.skills, [...(session.skills ?? [])], skill => [skill.name, skill.filePath]);
 	const autoloadSkills = agent.autoloadSkills?.flatMap(name => skills.filter(skill => skill.name === name)) ?? [];
 	const roleHooks = Array.isArray(agent.hooks)
 		? agent.hooks.map(hook => path.resolve(agent.filePath ? path.dirname(agent.filePath) : session.cwd, hook))
