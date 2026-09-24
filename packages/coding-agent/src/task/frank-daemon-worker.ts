@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { answerExitDecision, foldEventsToText } from "./frank-worker-fold";
 import type { FrankControl, FrankEvent, FrankWorkerResult, StartFrankWorkerOptions } from "./frank-worker";
 
