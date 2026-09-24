@@ -57,6 +57,18 @@ async function resolveFrankAcceptExe(cwd: string): Promise<string> {
 	}
 }
 
+async function resolveFrankBin(cwd: string): Promise<string> {
+	const pinned = process.env.FRANK_BIN?.trim();
+	if (pinned) return pinned;
+	const repoBuild = path.join(cwd, "target", "debug", "frank");
+	try {
+		await fs.access(repoBuild, fs.constants.X_OK);
+		return repoBuild;
+	} catch {
+		return "frank";
+	}
+}
+
 async function frankWorkerOptions(
 	options: ExecutorOptions,
 	session: ToolSession,
@@ -86,7 +98,7 @@ async function frankWorkerOptions(
 			"preflight",
 			`No provider base URL for Frank worker model ${model.provider}/${model.id}.`,
 		);
-	const apiKey = await session.modelRegistry.getApiKey(model, session.getSessionId?.() ?? undefined);
+	const apiKey = await session.modelRegistry.getApiKey(model);
 	return {
 		...options,
 		exe: await resolveFrankAcceptExe(session.cwd),
@@ -94,6 +106,9 @@ async function frankWorkerOptions(
 		model: model.id,
 		apiKey,
 		budgets: resolveFrankWorkerBudgets(options.agent),
+		transport: options.frankTransport ?? session.settings.get("task.frankTransport"),
+		frankBin: await resolveFrankBin(session.cwd),
+		apiKeyEnv: "PI_TRACK_API_KEY",
 		text: options.context ? `${options.context}\n\n${options.task}` : options.task,
 	};
 }
@@ -163,6 +178,7 @@ export interface StructuredSubagentRequest {
 	followUpMessage?: string;
 	/** Task UI agents keep live registry references; eval one-shots normally do not. */
 	keepAlive?: boolean;
+	frankTransport?: "process" | "daemon";
 	/** Task subagents share their parent's eval kernel; eval bridge children must not. */
 	shareEvalSession?: boolean;
 	/** Task frontends may inherit LSP; eval frontends normally set this false. */
@@ -518,6 +534,7 @@ async function buildExecutorOptions(
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
 		restrictToolNames,
+		frankTransport: request.frankTransport ?? session.settings.get("task.frankTransport"),
 		keepAlive: request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,
