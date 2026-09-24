@@ -76,14 +76,14 @@ describe("Frank pure worker decisions", () => {
 
 describe("Frank structured yield extraction", () => {
 	test("extracts a single yield object as one terminal item", () => {
-		const events = [{ event: { kind: { Yield: { data: { answer: 42 } } } } }];
+		const events: FrankEvent[] = [{ type: "event", seq: 1, event: { kind: { Yield: { data: { answer: 42 } } } } }];
 		expect(extractFrankYieldItems(events)).toEqual([{ data: { answer: 42 } }]);
 	});
 
 	test("preserves incremental yield sections in event order", () => {
-		const events = [
-			{ event: { kind: { Yield: { type: ["steps"], data: { steps: ["first"] } } } } },
-			{ event: { kind: { Yield: { type: ["steps"], data: { steps: ["second"] } } } } },
+		const events: FrankEvent[] = [
+			{ type: "event", seq: 1, event: { kind: { Yield: { type: ["steps"], data: { steps: ["first"] } } } } },
+			{ type: "event", seq: 2, event: { kind: { Yield: { type: ["steps"], data: { steps: ["second"] } } } } },
 		];
 		expect(extractFrankYieldItems(events)).toEqual([
 			{ type: ["steps"], data: { steps: ["first"] } },
@@ -92,7 +92,7 @@ describe("Frank structured yield extraction", () => {
 	});
 
 	test("extracts a terminal result envelope without nesting its data", () => {
-		const events = [{ event: { kind: { Yield: { type: "result", data: { answer: 42 } } } } }];
+		const events: FrankEvent[] = [{ type: "event", seq: 1, event: { kind: { Yield: { type: "result", data: { answer: 42 } } } } }];
 		expect(extractFrankYieldItems(events)).toEqual([{ type: "result", data: { answer: 42 } }]);
 	});
 });

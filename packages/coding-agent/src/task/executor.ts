@@ -136,19 +136,19 @@ function createFrankEventForwarder(
 	});
 }
 
-function finalizeFrankTerminal(result: FrankWorkerResult, monitor: SubagentRunMonitor): { exitCode: number; error?: string; aborted?: boolean; abortReason?: string } {
+function finalizeFrankTerminal(result: FrankWorkerResult, monitor: SubagentRunMonitor): { exitCode: number; error?: string; aborted: boolean; abortReason?: string } {
 	switch (result.terminal.terminal) {
 		case "Answer":
 			if (result.exitCode !== 0) throw new FrankWorkerExitError(result.exitCode, result.text);
-			return { exitCode: 0 };
+			return { exitCode: 0, aborted: false };
 		case "Error":
-			return { exitCode: 1, error: result.terminal.error ?? "Frank worker reported an error" };
+			return { exitCode: 1, error: result.terminal.error ?? "Frank worker reported an error", aborted: false };
 		case "Cancelled":
 			return { exitCode: 1, aborted: true, abortReason: result.terminal.error ?? "Frank worker cancelled" };
 		case "BudgetExceeded": {
 			const error = result.terminal.error ?? "Frank worker budget exceeded";
 			monitor.progress.retryFailure = { attempt: 1, errorMessage: error };
-			return { exitCode: 1, error };
+			return { exitCode: 1, error, aborted: false };
 		}
 		default: {
 			const exhaustive: never = result.terminal.terminal;
@@ -2832,6 +2832,7 @@ async function runRetainedFrankFollowUpTurn(
 	let exitCode = 1;
 	let error: string | undefined;
 	let aborted = false;
+	let abortedResult = false;
 	let abortReason: string | undefined;
 	const abort = async () => {
 		aborted = true;
@@ -2856,8 +2857,8 @@ async function runRetainedFrankFollowUpTurn(
 				? await Promise.race([worker.handle.runTurn(message), abortPromise])
 				: await worker.handle.runTurn(message);
 			if (result !== abortedTurn) {
-				rawOutput = result.text;
-				({ exitCode, error, aborted, abortReason } = finalizeFrankTerminal(result, monitor));
+				({ exitCode, error, aborted: abortedResult, abortReason } = finalizeFrankTerminal(result, monitor));
+				aborted = abortedResult ?? false;
 			}
 		}
 	} catch (caught) {
