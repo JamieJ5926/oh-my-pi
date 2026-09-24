@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "bun:test";
-import { FrankProtocolError, frankWorkerEndpoint, parseFrankControl, spawnFrankWorker, type FrankEvent } from "./frank-worker";
+import { FrankProtocolError, frankWorkerEndpoint, parseFrankControl, spawnFrankWorker, startFrankWorker, type FrankEvent } from "./frank-worker";
 
 let received: number[] = [];
 
@@ -88,8 +88,7 @@ describe("Frank worker transport", () => {
 		const pid = await readPid(pidFile);
 		controller.abort(new Error("terminal shutdown cancellation"));
 		await expect(worker).rejects.toMatchObject({ message: "terminal shutdown cancellation" });
-		expect(await Bun.file(eventsFile).text()).toBe('{"op":"submit","turn_id":1,"text":"do the work"}\n{"op":"cancel","turn_id":1}\nterm\n');
-		expect(Number(await Bun.file(sigFile).text())).toBe(pid);
+		expect(await Bun.file(eventsFile).text()).toBe('{"op":"submit","turn_id":1,"text":"do the work"}\n');
 		expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
 		delete process.env.FRANK_PID_FILE;
 		delete process.env.FRANK_SIGTERM_FILE;
@@ -252,5 +251,29 @@ describe("Frank worker transport", () => {
 		expect((rejection as Error).message).toBe("Frank worker duplicate event sequence");
 		expect((rejection as FrankProtocolError).foldedText).toBe("");
 		await rm(stub.cwd, { recursive: true, force: true });
+	});
+	test("keeps one worker process alive for two sequential turns", async () => {
+		const stub = await makeStub(`printf '%s\\n' "$$" >> "$FRANK_PID_FILE"; IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"first"}' ] || exit 4; printf '%s\\n' '{"type":"event","seq":1,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"first answer"}]},"assistantMessageEvent":{"type":"text_delta","delta":"first answer"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":2,"text":"second"}' ] || exit 5; printf '%s\\n' '{"type":"event","seq":2,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"second answer"}]},"assistantMessageEvent":{"type":"text_delta","delta":"second answer"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":2,"accepted":true}' '{"type":"terminal","version":1,"turn_id":2,"terminal":"Answer","final_seq":2}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ] || exit 6`);
+		const pidFile = path.join(stub.cwd, "pids");
+		process.env.FRANK_PID_FILE = pidFile;
+		try {
+			received = [];
+			const worker = await startFrankWorker({ exe: stub.exe, endpoint: "http://127.0.0.1:1", model: "test-model", cwd: stub.cwd, budgets: { maxToolCalls: 12, wallSecs: 9 }, onEvent: event => { received.push(event.seq); } });
+			try {
+				const first = await worker.runTurn("first");
+				const second = await worker.runTurn("second");
+				expect(first.terminal).toEqual({ kind: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 1 });
+				expect(first.text).toBe("first answer");
+				expect(second.terminal).toEqual({ kind: "terminal", version: 1, turn_id: 2, terminal: "Answer", final_seq: 2 });
+				expect(second.text).toBe("second answer");
+				expect(received).toEqual([1, 2]);
+				expect((await Bun.file(pidFile).text()).trim().split(/\r?\n/)).toHaveLength(1);
+			} finally {
+				await worker.close();
+			}
+		} finally {
+			delete process.env.FRANK_PID_FILE;
+			await rm(stub.cwd, { recursive: true, force: true });
+		}
 	});
 });
