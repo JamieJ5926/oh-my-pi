@@ -91,6 +91,7 @@ import { arrayValuedLabels, assembleYieldResult } from "./yield-assembly";
 import type { FrankEvent, FrankWorkerBudgets, FrankWorkerHandle, FrankWorkerResult, SpawnFrankWorkerOptions, StartFrankWorkerOptions } from "./frank-worker";
 import { spawnFrankWorker, startFrankWorker } from "./frank-worker";
 import { FrankWorkerExitError, extractFrankYieldItems } from "./frank-worker-fold";
+import type { FrankHostToolService } from "./frank-host-tools";
 
 export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "task" | "assignment" | "index" | "id" | "description" | "modelOverride" | "modelRole" | "signal" | "onProgress" | "eventBus" | "subagentEventBus" | "parentToolCallId" | "detached" | "artifactsDir" | "outputSchema" | "outputSchemaMode" | "outputSchemaSource" | "keepAlive"> {
 	cwd: string;
@@ -101,6 +102,8 @@ export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "t
 	apiKey?: string;
 	text: string;
 	runWorker?: (options: SpawnFrankWorkerOptions) => Promise<FrankWorkerResult>;
+	session?: ToolSession;
+	hostToolService?: FrankHostToolService;
 }
 
 interface RetainedFrankWorker {
@@ -2997,6 +3000,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 	});
 	const registry = AgentRegistry.global();
 	if (!registry.get(id)) registry.register({ id, displayName: agent.name, kind: "sub", session: null, status: "running" });
+	const hostToolService = options.hostToolService;
 	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
 		id,
 		agent: agent.name,
@@ -3037,6 +3041,8 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				cwd: options.cwd,
 				budgets: options.budgets,
 				apiKey: options.apiKey,
+				hostTools: hostToolService ? ["task", "hub"] : [],
+				onToolRequest: hostToolService ? req => hostToolService.handle(req.name, req.args) : undefined,
 				signal,
 				onEvent: event => {
 					events.push(event);

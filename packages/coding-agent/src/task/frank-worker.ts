@@ -10,7 +10,21 @@ type FrankControl =
 	| { kind: "terminal"; version: 1; turn_id: number; terminal: "Answer" | "Error" | "Cancelled" | "BudgetExceeded"; final_seq: number; error?: string }
 	| { kind: "saved"; version: 1; path: string }
 	| { kind: "cancelled"; version: 1; turn_id: number }
-	| { kind: "error"; version: 1; message: string; turn_id?: number };
+	| { kind: "error"; version: 1; message: string; turn_id?: number }
+	| { kind: "tool_request"; version: 1; call_id: number; turn_id: number; name: string; args: unknown };
+
+export interface FrankToolRequest {
+	call_id: number;
+	turn_id: number;
+	name: string;
+	args: unknown;
+}
+
+export interface FrankToolResult {
+	ok: boolean;
+	content?: string;
+	error?: string;
+}
 
 export type { FrankControl };
 
@@ -63,6 +77,8 @@ export interface SpawnFrankWorkerOptions {
 	eventsPath?: string;
 	/** Role instructions: Frank loads <root>/roles/<name>/instructions/<name>.md as its role layer. */
 	role?: { root: string; name: string };
+	hostTools?: string[];
+	onToolRequest?: (req: FrankToolRequest) => Promise<FrankToolResult>;
 }
 export type StartFrankWorkerOptions = Omit<SpawnFrankWorkerOptions, "text">;
 
@@ -115,6 +131,9 @@ export function parseFrankControl(value: unknown): FrankControl {
 		case "error":
 			if (typeof value.message !== "string" || (value.turn_id !== undefined && !positiveInteger(value.turn_id))) throw new Error("Invalid Frank error control");
 			return { kind: "error", version: 1, message: value.message, ...(value.turn_id === undefined ? {} : { turn_id: value.turn_id }) };
+		case "tool_request":
+			if (!positiveInteger(value.call_id) || !positiveInteger(value.turn_id) || typeof value.name !== "string" || value.name.length === 0 || !("args" in value)) throw new Error("Invalid Frank tool_request control");
+			return { kind: "tool_request", version: 1, call_id: value.call_id, turn_id: value.turn_id, name: value.name, args: value.args };
 		default:
 			throw new Error(`Unknown Frank control type ${value.type}`);
 	}
@@ -160,6 +179,7 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 		"--read-root", FRANK_READ_ROOT,
 		...(options.eventsPath ? ["--events-path", options.eventsPath] : []),
 		...(options.role ? ["--instructions-root", options.role.root, "--instructions-role", options.role.name] : []),
+		...(options.hostTools?.length ? ["--host-tools", options.hostTools.join(",")] : []),
 	], { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"], env: childEnv });
 	const stdout = createInterface({ input: child.stdout });
 	const stderr = createInterface({ input: child.stderr });
@@ -301,6 +321,19 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 				}
 				case "error":
 					throw new FrankProtocolError(control.message);
+				case "tool_request": {
+					const request: FrankToolRequest = { call_id: control.call_id, turn_id: control.turn_id, name: control.name, args: control.args };
+					void (async () => {
+						const result: FrankToolResult = await (options.onToolRequest
+							? options.onToolRequest(request)
+							: Promise.resolve({ ok: false, error: "host tools are not enabled for this worker" }));
+						const response = result.ok
+							? { op: "tool_result", call_id: control.call_id, ok: true, content: result.content ?? "" }
+							: { op: "tool_result", call_id: control.call_id, ok: false, error: result.error ?? "host tool failed" };
+						await writeLine(child.stdin, response);
+					})().catch(error => failTurn(error instanceof Error ? error : new Error(String(error))));
+					return;
+				}
 				default: {
 					const exhaustive: never = control;
 					throw new Error(`Unhandled Frank control ${String(exhaustive)}`);

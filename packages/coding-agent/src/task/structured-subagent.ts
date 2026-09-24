@@ -19,6 +19,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { TaskEffort } from "../thinking";
 import type { ToolSession } from "../tools";
+import { createFrankHostToolService } from "./frank-host-tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -61,6 +62,7 @@ async function frankWorkerOptions(
 	options: ExecutorOptions,
 	session: ToolSession,
 	modelPattern: string | string[] | undefined,
+	signal?: AbortSignal,
 ) {
 	const patterns =
 		modelPattern ??
@@ -86,7 +88,7 @@ async function frankWorkerOptions(
 			"preflight",
 			`No provider base URL for Frank worker model ${model.provider}/${model.id}.`,
 		);
-	const apiKey = await session.modelRegistry.getApiKey(model, session.getSessionId?.() ?? undefined);
+	const apiKey = await session.modelRegistry.getApiKey(model, undefined, { signal });
 	return {
 		...options,
 		exe: await resolveFrankAcceptExe(session.cwd),
@@ -95,9 +97,10 @@ async function frankWorkerOptions(
 		apiKey,
 		budgets: resolveFrankWorkerBudgets(options.agent),
 		text: options.context ? `${options.context}\n\n${options.task}` : options.task,
+		session,
+		hostToolService: createFrankHostToolService({ session, agentId: options.id, signal }),
 	};
 }
-
 /** Validation behavior requested for an effective output schema. */
 export type StructuredSubagentSchemaMode = "permissive" | "strict";
 
@@ -728,6 +731,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 					request.cwd ? { ...baseOptions, cwd: path.resolve(request.session.cwd, request.cwd) } : baseOptions,
 					request.session,
 					policy.modelOverride,
+					request.signal,
 				),
 			);
 			onSubprocessResult?.(result);
@@ -754,6 +758,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 										{ ...isolatedOptions, cwd: isolatedOptions.worktree ?? isolatedOptions.cwd },
 										request.session,
 										policy.modelOverride,
+										request.signal,
 									),
 								),
 						}

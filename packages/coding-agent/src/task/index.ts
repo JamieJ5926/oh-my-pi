@@ -297,6 +297,10 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
 	if (item.name !== undefined) spawn.name = item.name;
 	if (item.task !== undefined) spawn.task = item.task;
+	spawn.seat = item.seat ?? spawn.agent;
+	spawn.delegable = item.delegable ?? "none";
+	spawn.width = item.width ?? 1;
+	spawn.childrenReadOnly = item.childrenReadOnly ?? false;
 	if (params.context !== undefined) spawn.context = params.context;
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;

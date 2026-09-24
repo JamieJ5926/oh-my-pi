@@ -76,6 +76,41 @@ describe("Frank worker transport", () => {
 		expect(received).toEqual([1]);
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
+	test("services host tool requests over stdin and rejects malformed requests", async () => {
+		const args = { agent: "frank-explorer", task: "inspect this" };
+		const request = JSON.stringify({ type: "tool_request", version: 1, call_id: 7, turn_id: 1, name: "task", args });
+		const successStub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"tool_request","version":1,"call_id":7,"turn_id":1,"name":"task","args":{"agent":"frank-explorer","task":"inspect this"}}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; printf '%s\\n' "$input" > "$FRANK_TOOL_RESULT_FILE"; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		const resultFile = path.join(successStub.cwd, "tool-result");
+		process.env.FRANK_TOOL_RESULT_FILE = resultFile;
+		try {
+			const calls: unknown[] = [];
+			const result = await spawnFrankWorker({ ...workerOptions(successStub.exe, successStub.cwd, () => {}), hostTools: ["task", "hub"], onToolRequest: async req => { calls.push(req.args); return { ok: true, content: "task accepted" }; } });
+			expect(calls).toEqual([args]);
+			expect(await Bun.file(resultFile).text()).toBe('{"op":"tool_result","call_id":7,"ok":true,"content":"task accepted"}\n');
+			expect(result.exitCode).toBe(0);
+		} finally {
+			delete process.env.FRANK_TOOL_RESULT_FILE;
+			await rm(successStub.cwd, { recursive: true, force: true });
+		}
+
+		const disabledStub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"tool_request","version":1,"call_id":8,"turn_id":1,"name":"hub","args":{}}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; printf '%s\\n' "$input" > "$FRANK_TOOL_RESULT_FILE"; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		const disabledFile = path.join(disabledStub.cwd, "tool-result");
+		process.env.FRANK_TOOL_RESULT_FILE = disabledFile;
+		try {
+			await spawnFrankWorker(workerOptions(disabledStub.exe, disabledStub.cwd, () => {}));
+			expect(await Bun.file(disabledFile).text()).toBe('{"op":"tool_result","call_id":8,"ok":false,"error":"host tools are not enabled for this worker"}\n');
+		} finally {
+			delete process.env.FRANK_TOOL_RESULT_FILE;
+			await rm(disabledStub.cwd, { recursive: true, force: true });
+		}
+
+		const malformedStub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"tool_request","version":1,"turn_id":1,"name":"task","args":{}}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		try {
+			await expect(spawnFrankWorker(workerOptions(malformedStub.exe, malformedStub.cwd, () => {}))).rejects.toThrow("Invalid Frank tool_request control");
+		} finally {
+			await rm(malformedStub.cwd, { recursive: true, force: true });
+		}
+	});
 
 	test("abort after terminal completion cancels before signaling and reaps the direct child", async () => {
 		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' "$input" >> "$FRANK_EVENTS_FILE"; printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'IFS= read -r input; printf "%s\\n" "$input" >> "$FRANK_EVENTS_FILE"; printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"; printf "%s\\n" term >> "$FRANK_EVENTS_FILE"; exit 0' TERM; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; printf '%s\\n' ready > "$FRANK_READY_FILE"; while IFS= read -r input; do :; done`);

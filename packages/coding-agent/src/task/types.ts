@@ -119,6 +119,10 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"cwd?": "string",
+	"seat?": "string",
+	"delegable?": "string",
+	"width?": "number",
+	"childrenReadOnly?": "boolean",
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -128,6 +132,10 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"cwd?": "string",
+	"seat?": "string",
+	"delegable?": "string",
+	"width?": "number",
+	"childrenReadOnly?": "boolean",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -140,6 +148,11 @@ export interface TaskItem {
 	agent?: string;
 	/** The work; required by the schema. */
 	task?: string;
+	/** Orchestration seat and delegable sub-scope carried into the spawned child's brief. */
+	seat?: string;
+	delegable?: string;
+	width?: number;
+	childrenReadOnly?: boolean;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
 	effort?: TaskEffort;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
@@ -151,7 +164,6 @@ export interface TaskItem {
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
 }
-
 export const taskSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
@@ -159,6 +171,10 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"cwd?": "string",
+	"seat?": "string",
+	delegable: "string = 'none'",
+	width: "number = 1",
+	childrenReadOnly: "boolean = false",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -169,8 +185,12 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"cwd?": "string",
-	"+": "delete",
+	"seat?": "string",
+	delegable: "string = 'none'",
+	width: "number = 1",
+	childrenReadOnly: "boolean = false",
 });
+
 const taskSchemaBatch = type({
 	context: "string",
 	tasks: taskItemSchemaIsolated.array(),
@@ -184,6 +204,7 @@ const taskSchemaBatchNoIsolation = type({
 const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
 
 type DynamicTaskSchema = (typeof ALL_TASK_SCHEMAS)[number];
+
 export type TaskSchema = typeof taskSchema;
 /** Active task tool parameter schema for the current isolation / batch flags */
 export type TaskToolSchemaInstance = DynamicTaskSchema | BaseType;
@@ -208,24 +229,6 @@ function createTaskSchema(options: {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
 	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
 	if (options.batchEnabled) {
-		if (options.isolationEnabled) {
-			const item = type.raw({
-				"name?": "string",
-				agent,
-				task: "string",
-				...effortField,
-				"outputSchema?": outputSchemaInputSchema,
-				"schemaMode?": '"permissive" | "strict"',
-				"cwd?": "string",
-				"isolated?": "boolean",
-				"+": "delete",
-			});
-			return type.raw({
-				context: "string",
-				tasks: item.array(),
-				"+": "delete",
-			});
-		}
 		const item = type.raw({
 			"name?": "string",
 			agent,
@@ -234,26 +237,14 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			"cwd?": "string",
+			"seat?": "string",
+			"delegable?": "string",
+			"width?": "number",
+			"childrenReadOnly?": "boolean",
+			...(options.isolationEnabled ? { "isolated?": "boolean" } : {}),
 			"+": "delete",
 		});
-		return type.raw({
-			context: "string",
-			tasks: item.array(),
-			"+": "delete",
-		});
-	}
-	if (options.isolationEnabled) {
-		return type.raw({
-			"name?": "string",
-			agent,
-			task: "string",
-			...effortField,
-			"outputSchema?": outputSchemaInputSchema,
-			"schemaMode?": '"permissive" | "strict"',
-			"cwd?": "string",
-			"isolated?": "boolean",
-			"+": "delete",
-		});
+		return type.raw({ context: "string", tasks: item.array(), "+": "delete" });
 	}
 	return type.raw({
 		"name?": "string",
@@ -263,10 +254,14 @@ function createTaskSchema(options: {
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		"cwd?": "string",
+		"seat?": "string",
+		"delegable?": "string",
+		"width?": "number",
+		"childrenReadOnly?": "boolean",
+		...(options.isolationEnabled ? { "isolated?": "boolean" } : {}),
 		"+": "delete",
 	});
 }
-
 /** Build the task wire schema for the current settings and spawn policy. */
 export function getTaskSchema(options: {
 	isolationEnabled: boolean;
@@ -301,6 +296,10 @@ export interface TaskParams {
 	agent?: string;
 	/** The work (flat form). */
 	task?: string;
+	seat?: string;
+	delegable?: string;
+	width?: number;
+	childrenReadOnly?: boolean;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
 	effort?: TaskEffort;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
