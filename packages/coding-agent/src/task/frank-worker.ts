@@ -131,6 +131,7 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 	if (options.signal?.aborted) throw options.signal.reason ?? new Error("Frank worker aborted");
 	const childEnv = { ...process.env };
 	delete childEnv["PI_TRACK_API_KEY"];
+	childEnv["WEBFETCH_POLICY"] ??= "on";
 	if (options.apiKey && options.apiKey !== "N/A") childEnv["PI_TRACK_API_KEY"] = options.apiKey;
 	const executable = options.exe.includes(path.sep) && !path.isAbsolute(options.exe) ? path.resolve(options.cwd, options.exe) : options.exe;
 	const child = spawn(executable, [
