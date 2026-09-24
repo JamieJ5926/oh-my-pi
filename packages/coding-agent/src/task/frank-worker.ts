@@ -1,3 +1,4 @@
+import { spawnFrankDaemonWorker } from "./frank-daemon-worker";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -42,12 +43,17 @@ export interface SpawnFrankWorkerOptions {
 	text: string;
 	onEvent: (event: FrankEvent) => void | Promise<void>;
 	apiKey?: string;
+	apiKeyEnv?: string;
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	/** Frank writes its full event stream here (tool calls, results, faults, token meters). */
 	eventsPath?: string;
 	/** Role instructions: Frank loads <root>/roles/<name>/instructions/<name>.md as its role layer. */
 	role?: { root: string; name: string };
+	transport?: "process" | "daemon";
+	frankBin?: string;
+	sessionId?: string;
+	artifactsDir?: string;
 }
 export type StartFrankWorkerOptions = Omit<SpawnFrankWorkerOptions, "text">;
 
@@ -337,8 +343,11 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 		close: closeWorker,
 	};
 }
-
 export async function spawnFrankWorker(options: SpawnFrankWorkerOptions): Promise<FrankWorkerResult> {
+	if (options.transport === "daemon") {
+		if (!options.eventsPath) throw new Error("Frank daemon transport requires an events path");
+		return spawnFrankDaemonWorker({ ...options, artifactsDir: path.dirname(options.eventsPath), id: options.sessionId ?? path.basename(options.eventsPath, ".frank.jsonl") });
+	}
 	const worker = await startFrankWorker(options);
 	try {
 		return await worker.runTurn(options.text);

@@ -4974,6 +4974,22 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.frankTransport": {
+		type: "enum",
+		values: ["process", "daemon"] as const,
+		default: "process",
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Frank Transport",
+			description: "Run Frank workers as attached processes or detached per-lane daemons",
+			options: [
+				{ value: "process", label: "Process", description: "Run the Frank worker as a child process" },
+				{ value: "daemon", label: "Daemon", description: "Run the Frank worker in a detached daemon" },
+			],
+		},
+	},
+
 	"task.batch": {
 		type: "boolean",
 		default: true,

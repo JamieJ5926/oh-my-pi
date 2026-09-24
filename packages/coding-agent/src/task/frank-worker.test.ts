@@ -1,5 +1,6 @@
+import { attachFrankDaemonLane, readFrankLaneResult, spawnFrankDaemonWorker } from "./frank-daemon-worker";
 import { watch } from "node:fs";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -274,6 +275,55 @@ describe("Frank worker transport", () => {
 		} finally {
 			delete process.env.FRANK_PID_FILE;
 			await rm(stub.cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+
+describe("Frank daemon lane reader", () => {
+	test("reads a finished lane answer from the mirrored attach stream", async () => {
+		const directory = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-reader-"));
+		const event = { seq: 2, kind: { TerminalDone: { seq: 2, outcome: "Answer" } } };
+		await writeFile(path.join(directory, "FrankSurvivalProof.frank.jsonl"), `${JSON.stringify(event)}\n${JSON.stringify({ details: "Recovered answer" })}\nattach=done session=FrankSurvivalProof from_seq=0 events=1\n`);
+		try {
+			const result = await readFrankLaneResult(directory, "FrankSurvivalProof");
+			expect(result).toEqual({ terminal: { kind: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 2 }, exitCode: 0, text: "Recovered answer" });
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("Frank daemon transport", () => {
+	test("mirrors the daemon attach output and forwards transcript events", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-cli-"));
+		const bin = path.join(cwd, "frank");
+		const artifactsDir = path.join(cwd, "artifacts");
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "daemon" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
+		const delivered: FrankEvent[] = [];
+		try {
+			const result = await spawnFrankDaemonWorker({ exe: bin, frankBin: bin, endpoint: "http://127.0.0.1:1", model: "test-model", cwd, budgets: { maxToolCalls: 4, wallSecs: 9 }, text: "inspect", id: "lane-1", artifactsDir, onEvent: event => { delivered.push(event); } });
+			expect(result.text).toBe("daemon answer");
+			expect(result.exitCode).toBe(0);
+			expect(delivered.map(event => event.seq)).toEqual([1, 2]);
+			expect((await readFrankLaneResult(artifactsDir, "lane-1")).text).toBe("daemon answer");
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+	test("reattaches to a completed daemon lane when the local mirror is incomplete", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-reattach-"));
+		const bin = path.join(cwd, "frank");
+		const artifactsDir = path.join(cwd, "artifacts");
+		await mkdir(artifactsDir, { recursive: true });
+		await Bun.write(path.join(artifactsDir, "lane-recover.frank.jsonl"), "{\"seq\":1,\"kind\":{\"AssistantDelta\":\"incomplete\"}}\n");
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-recover from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
+		try {
+			const result = await attachFrankDaemonLane({ artifactsDir, id: "lane-recover", cwd, frankBin: bin });
+			expect(result.text).toBe("daemon answer");
+			expect((await readFrankLaneResult(artifactsDir, "lane-recover", { cwd, frankBin: bin })).text).toBe("daemon answer");
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
 		}
 	});
 });

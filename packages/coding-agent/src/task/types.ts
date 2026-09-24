@@ -119,6 +119,7 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"cwd?": "string",
+	"frankTransport?": '"process" | "daemon"',
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -128,6 +129,7 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"cwd?": "string",
+	"frankTransport?": '"process" | "daemon"',
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -150,6 +152,8 @@ export interface TaskItem {
 	cwd?: string;
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
+	/** Transport used for a runtime Frank spawn. */
+	frankTransport?: "process" | "daemon";
 }
 
 export const taskSchema = type({
@@ -159,6 +163,7 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"cwd?": "string",
+	"frankTransport?": '"process" | "daemon"',
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -169,16 +174,36 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"cwd?": "string",
+	"frankTransport?": '"process" | "daemon"',
 	"+": "delete",
 });
 const taskSchemaBatch = type({
 	context: "string",
-	tasks: taskItemSchemaIsolated.array(),
+	tasks: type({
+		"name?": "string",
+		agent: "string = 'task'",
+		task: "string",
+		"outputSchema?": outputSchemaInputSchema,
+		"schemaMode?": '"permissive" | "strict"',
+		"cwd?": "string",
+		"frankTransport?": '"process" | "daemon"',
+		"isolated?": "boolean",
+		"+": "delete",
+	}).array(),
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
 	context: "string",
-	tasks: taskItemSchema.array(),
+	tasks: type({
+		"name?": "string",
+		agent: "string = 'task'",
+		task: "string",
+		"outputSchema?": outputSchemaInputSchema,
+		"schemaMode?": '"permissive" | "strict"',
+		"cwd?": "string",
+		"frankTransport?": '"process" | "daemon"',
+		"+": "delete",
+	}).array(),
 	"+": "delete",
 });
 const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
@@ -217,6 +242,7 @@ function createTaskSchema(options: {
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
 				"cwd?": "string",
+				"frankTransport?": '"process" | "daemon"',
 				"isolated?": "boolean",
 				"+": "delete",
 			});
@@ -233,6 +259,7 @@ function createTaskSchema(options: {
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
+			"frankTransport?": '"process" | "daemon"',
 			"cwd?": "string",
 			"+": "delete",
 		});
@@ -249,6 +276,7 @@ function createTaskSchema(options: {
 			task: "string",
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
+			"frankTransport?": '"process" | "daemon"',
 			"schemaMode?": '"permissive" | "strict"',
 			"cwd?": "string",
 			"isolated?": "boolean",
@@ -262,6 +290,7 @@ function createTaskSchema(options: {
 		...effortField,
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
+		"frankTransport?": '"process" | "daemon"',
 		"cwd?": "string",
 		"+": "delete",
 	});
@@ -314,6 +343,8 @@ export interface TaskParams {
 	/** Batch form: shared background prepended to every assignment; required by the batch schema. */
 	context?: string;
 	/** Run in an isolated worktree (flat form; per-item in batch form). */
+	/** Transport for runtime Frank tasks. */
+	frankTransport?: "process" | "daemon";
 	isolated?: boolean;
 }
 
