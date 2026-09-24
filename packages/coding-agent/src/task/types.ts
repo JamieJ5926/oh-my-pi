@@ -118,6 +118,7 @@ export const taskItemSchema = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"cwd?": "string",
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -126,6 +127,7 @@ const taskItemSchemaIsolated = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"cwd?": "string",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -144,6 +146,8 @@ export interface TaskItem {
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
 	schemaMode?: "permissive" | "strict";
+	/** Working directory for a runtime-frank spawn; absolute, or relative to the session cwd. */
+	cwd?: string;
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
 }
@@ -154,6 +158,7 @@ export const taskSchema = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"cwd?": "string",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -163,6 +168,7 @@ const taskSchemaNoIsolation = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"cwd?": "string",
 	"+": "delete",
 });
 const taskSchemaBatch = type({
@@ -210,6 +216,7 @@ function createTaskSchema(options: {
 				...effortField,
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
+				"cwd?": "string",
 				"isolated?": "boolean",
 				"+": "delete",
 			});
@@ -226,6 +233,7 @@ function createTaskSchema(options: {
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
+			"cwd?": "string",
 			"+": "delete",
 		});
 		return type.raw({
@@ -242,6 +250,7 @@ function createTaskSchema(options: {
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
+			"cwd?": "string",
 			"isolated?": "boolean",
 			"+": "delete",
 		});
@@ -253,6 +262,7 @@ function createTaskSchema(options: {
 		...effortField,
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
+		"cwd?": "string",
 		"+": "delete",
 	});
 }
@@ -297,6 +307,8 @@ export interface TaskParams {
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
 	schemaMode?: "permissive" | "strict";
+	/** Working directory for a runtime-frank spawn; absolute, or relative to the session cwd. */
+	cwd?: string;
 	/** Batch form (`task.batch`): one subagent per item. */
 	tasks?: TaskItem[];
 	/** Batch form: shared background prepended to every assignment; required by the batch schema. */

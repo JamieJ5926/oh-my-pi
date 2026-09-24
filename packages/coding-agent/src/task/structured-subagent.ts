@@ -144,6 +144,8 @@ export interface StructuredSubagentRequest {
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
 	outputSchema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
+	/** Working directory for a runtime-frank spawn; absolute, or relative to the session cwd. */
+	cwd?: string;
 	/** Per-spawn thinking effort mapped onto the resolved model's supported range; overrides the agent's default selector. */
 	effort?: TaskEffort;
 	identity?: StructuredSubagentIdentity;
@@ -721,7 +723,13 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				maxRuntimeMs: request.maxRuntimeMs,
 			});
 		} else if (!isolationContext && policy.effectiveAgent.runtime === "frank") {
-			result = await runFrankSubagent(await frankWorkerOptions(baseOptions, request.session, policy.modelOverride));
+			result = await runFrankSubagent(
+				await frankWorkerOptions(
+					request.cwd ? { ...baseOptions, cwd: path.resolve(request.session.cwd, request.cwd) } : baseOptions,
+					request.session,
+					policy.modelOverride,
+				),
+			);
 			onSubprocessResult?.(result);
 		} else if (!isolationContext) {
 			result = await runSubprocess(baseOptions);
