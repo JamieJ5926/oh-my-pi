@@ -253,6 +253,10 @@ export interface ParsedAgentFields {
 	prewalk?: boolean | string;
 	/** `true` = advise with the default advisor-role model; string = advise with that model pattern. */
 	advisor?: boolean | string;
+	/** Frank worker budget: max tool calls per turn. Absent = host default. */
+	maxToolCalls?: number;
+	/** Frank worker budget: wall-clock seconds per turn. Absent = host default. */
+	wallSecs?: number;
 }
 
 /**
@@ -327,6 +331,10 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
+	const positiveInteger = (value: unknown): number | undefined => {
+		const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value.trim()) : Number.NaN;
+		return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+	};
 	const selector = (value: unknown): "shared" | string[] | undefined => {
 		if (value === undefined || value === null) return undefined;
 		if (typeof value === "string") {
@@ -358,6 +366,8 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		readSummarize,
 		prewalk,
 		advisor,
+		maxToolCalls: positiveInteger(frontmatter.maxToolCalls),
+		wallSecs: positiveInteger(frontmatter.wallSecs),
 	};
 }
 

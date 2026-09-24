@@ -3,7 +3,8 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "bun:test";
-import { FrankProtocolError, frankWorkerEndpoint, parseFrankControl, spawnFrankWorker, startFrankWorker, type FrankEvent } from "./frank-worker";
+import { parseAgent } from "./agents";
+import { DEFAULT_FRANK_WORKER_BUDGETS, FrankProtocolError, frankWorkerEndpoint, parseFrankControl, resolveFrankWorkerBudgets, spawnFrankWorker, startFrankWorker, type FrankEvent } from "./frank-worker";
 
 let received: number[] = [];
 
@@ -273,6 +274,49 @@ describe("Frank worker transport", () => {
 			}
 		} finally {
 			delete process.env.FRANK_PID_FILE;
+			await rm(stub.cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("Frank worker seat budgets", () => {
+	const seat = (frontmatter: string) =>
+		parseAgent("memory:frank-budget-seat.md", `---\n${frontmatter}---\nWork.\n`, "project");
+
+	test("a seat's declared maxToolCalls and wallSecs reach the worker budget", () => {
+		const agent = seat(
+			'name: frank-coordinator\ndescription: "test seat"\nruntime: frank\nmodel: cli-proxy/test\nmaxToolCalls: 256\nwallSecs: 1800\n',
+		);
+		expect(resolveFrankWorkerBudgets(agent)).toEqual({ maxToolCalls: 256, wallSecs: 1800 });
+	});
+
+	test("an undeclared field falls back to the host default", () => {
+		const partial = seat('name: frank-plain\ndescription: "test seat"\nruntime: frank\nmodel: cli-proxy/test\nmaxToolCalls: 256\n');
+		expect(resolveFrankWorkerBudgets(partial)).toEqual({
+			maxToolCalls: 256,
+			wallSecs: DEFAULT_FRANK_WORKER_BUDGETS.wallSecs,
+		});
+		const bare = seat('name: frank-bare\ndescription: "test seat"\nruntime: frank\nmodel: cli-proxy/test\n');
+		expect(resolveFrankWorkerBudgets(bare)).toEqual({ maxToolCalls: 64, wallSecs: 600 });
+	});
+
+	test("the resolved budget reaches the worker argv", async () => {
+		const stub = await makeStub(`printf '%s\\n' "$@" > "$FRANK_ARGV_FILE"; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		const argvFile = path.join(stub.cwd, "argv");
+		process.env.FRANK_ARGV_FILE = argvFile;
+		try {
+			const agent = seat(
+				'name: frank-coordinator\ndescription: "test seat"\nruntime: frank\nmodel: cli-proxy/test\nmaxToolCalls: 256\nwallSecs: 1800\n',
+			);
+			await spawnFrankWorker({
+				...workerOptions(stub.exe, stub.cwd, () => {}),
+				budgets: resolveFrankWorkerBudgets(agent),
+			}).catch(() => {});
+			const argv = (await Bun.file(argvFile).text()).trim().split(/\r?\n/);
+			expect(argv[argv.indexOf("--max-tool-calls") + 1]).toBe("256");
+			expect(argv[argv.indexOf("--wall-secs") + 1]).toBe("1800");
+		} finally {
+			delete process.env.FRANK_ARGV_FILE;
 			await rm(stub.cwd, { recursive: true, force: true });
 		}
 	});

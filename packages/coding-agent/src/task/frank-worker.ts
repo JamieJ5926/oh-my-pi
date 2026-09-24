@@ -2,6 +2,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { answerExitDecision, foldEventsToText, FrankWorkerExitError } from "./frank-worker-fold";
+import type { AgentDefinition } from "./types";
 
 type FrankControl =
 	| { kind: "ack"; version: 1; turn_id: number; accepted: boolean; pending_id?: number; error?: string }
@@ -31,6 +32,20 @@ export interface FrankEvent {
 export interface FrankWorkerBudgets {
 	maxToolCalls: number;
 	wallSecs: number;
+}
+
+/** Budget applied to a seat whose frontmatter declares none. */
+export const DEFAULT_FRANK_WORKER_BUDGETS: FrankWorkerBudgets = { maxToolCalls: 64, wallSecs: 600 };
+
+/**
+ * Resolve a seat's Frank worker budget from its agent definition.
+ * A declared field wins; an absent one falls back to {@link DEFAULT_FRANK_WORKER_BUDGETS}.
+ */
+export function resolveFrankWorkerBudgets(agent: Pick<AgentDefinition, "maxToolCalls" | "wallSecs">): FrankWorkerBudgets {
+	return {
+		maxToolCalls: agent.maxToolCalls ?? DEFAULT_FRANK_WORKER_BUDGETS.maxToolCalls,
+		wallSecs: agent.wallSecs ?? DEFAULT_FRANK_WORKER_BUDGETS.wallSecs,
+	};
 }
 
 export interface SpawnFrankWorkerOptions {

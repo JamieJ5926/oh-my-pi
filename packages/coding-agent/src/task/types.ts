@@ -391,6 +391,10 @@ export interface AgentDefinition {
 	prewalk?: boolean | string;
 	/** Advisor for spawned sessions of this agent: `true` = advise with the default advisor-role model, string = advise with that model pattern (optional `:level` suffix). Absent/`false` = no advisor. */
 	advisor?: boolean | string;
+	/** Frank worker budget: max tool calls per turn. Absent = host default. */
+	maxToolCalls?: number;
+	/** Frank worker budget: wall-clock seconds per turn. Absent = host default. */
+	wallSecs?: number;
 	source: AgentSource;
 	filePath?: string;
 }

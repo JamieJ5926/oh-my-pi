@@ -24,7 +24,7 @@ import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runFrankSubagent, runSubagentFollowUpTurn, runSubprocess } from "./executor";
-import { frankWorkerEndpoint } from "./frank-worker";
+import { frankWorkerEndpoint, resolveFrankWorkerBudgets } from "./frank-worker";
 import {
 	applyEligibleNestedPatches,
 	type IsolationContext,
@@ -93,7 +93,7 @@ async function frankWorkerOptions(
 		endpoint: frankWorkerEndpoint(endpoint),
 		model: model.id,
 		apiKey,
-		budgets: { maxToolCalls: 64, wallSecs: 600 },
+		budgets: resolveFrankWorkerBudgets(options.agent),
 		text: options.context ? `${options.context}\n\n${options.task}` : options.task,
 	};
 }
