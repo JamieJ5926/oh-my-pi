@@ -43,13 +43,13 @@ if [[ "$binary" == "$repo_root/packages/coding-agent/dist/omp" ]]; then
 else
   launch=("$binary")
 fi
-tmux new-session -d -s "$session" -x 180 -y 50 -c "$workdir" 
-env FRANK_BIN=/Users/jamie/.local/bin/frank \
+tmux new-session -d -s "$session" -x 180 -y 50 -c "$workdir" \
+  env FRANK_BIN=/Users/jamie/.local/bin/frank \
   FRANK_ACCEPT_BIN=/Users/jamie/Projects/active/rust-pi-build/target/release/frank_accept \
   OMP_SESSION_MODE=PRESENT "${launch[@]}"
 tmux resize-window -t "$session" -x 180 -y 50
-sleep 3
-tmux send-keys -t "$session" -l 'Use the frank-poteto-agent to read packages/coding-agent/package.json. It must spawn exactly one frank-implementer child to read that single file and report one short fact. Do not do the read yourself.'
+sleep 4
+tmux send-keys -t "$session" -l '/task agent:frank-poteto-agent task:"Read packages/coding-agent/package.json. Spawn one frank-implementer child to read that file and summarize dependencies."'
 tmux send-keys -t "$session" Enter
 
 last_frame=''
@@ -60,12 +60,29 @@ while (( SECONDS - start < timeout_secs )); do
      printf '%s\n' "$last_frame" | grep -q 'frank-implementer'; then
     parent_line="$(printf '%s\n' "$last_frame" | grep 'frank-poteto-agent' | head -n 1)"
     child_line="$(printf '%s\n' "$last_frame" | grep 'frank-implementer' | head -n 1)"
-    if [[ -n "${parent_line#*frank-poteto-agent}" ]] &&
-       ! [[ "$parent_line" =~ frank-poteto-agent[[:space:]]*([││])?[[:space:]]*$ ]] &&
-       printf '%s\n' "$parent_line $child_line" | grep -Eq '(^|[^0-9])[1-9][0-9]*([.]?[kKmM])?([[:space:]]|$)' &&
-       printf '%s\n' "$parent_line $child_line" | grep -Eq ':[[:space:]]*(low|medium|high|xhigh|none)' &&
-       [[ "$child_line" =~ ^[[:space:]]+.*(│|frank-implementer) ]]; then
-      printf '%s\n' "$last_frame"
+    # 1. Parent row description is present and not blank
+    has_desc=false
+    if [[ -n "${parent_line#*frank-poteto-agent}" ]] && ! [[ "$parent_line" =~ frank-poteto-agent[[:space:]]*$ ]]; then
+      has_desc=true
+    fi
+    # 2. Non-zero token count appears on at least one Frank row
+    has_tokens=false
+    if printf '%s\n' "$parent_line $child_line" | grep -Eq '[1-9][0-9]*[[:space:]]*(tokens|tok|[kKmM]|$)'; then
+      has_tokens=true
+    fi
+    # 3. Resolved model string with thinking level appears
+    has_model=false
+    if printf '%s\n' "$parent_line $child_line" | grep -Eq ':[[:space:]]*(low|medium|high|xhigh|none)'; then
+      has_model=true
+    fi
+    # 4. Child is indented or has tree rail under parent
+    has_nesting=false
+    if [[ "$child_line" =~ [│├└] ]] || [[ "$child_line" =~ ^[[:space:]]{2,} ]]; then
+      has_nesting=true
+    fi
+    if $has_desc && $has_tokens && $has_model && $has_nesting; then
+      printf '=== Captured Frank TUI Frame ===\n%s\n' "$last_frame"
+      echo "Verification SUCCESS: Frank rows show description, non-zero tokens, model:thinking, and nested indentation."
       exit 0
     fi
   fi

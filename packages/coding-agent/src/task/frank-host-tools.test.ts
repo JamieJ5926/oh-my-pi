@@ -147,4 +147,20 @@ describe("Frank host tool service: child drain", () => {
 
 		expect(result.content ?? "").not.toContain("FOREIGN_BODY");
 	});
+
+	test("a settled child owned by the Frank parent reaches the worker", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		manager.register("task", "FrankChild", async () => "FRANK_CHILD_BODY", {
+			id: "FrankChild",
+			agentId: "FrankChild",
+			ownerId: "frank-test",
+		});
+		await manager.getJob("FrankChild")?.promise;
+		manager.consumeJobResults(["FrankChild"]);
+
+		const result = await bridge(manager).handle("hub", { op: "wait", to: "FrankChild", timeoutMs: 5_000 });
+
+		expect(result.ok).toBe(true);
+		expect(result.content).toContain("FRANK_CHILD_BODY");
+	});
 });

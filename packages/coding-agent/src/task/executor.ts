@@ -3023,7 +3023,8 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 		softRequestBudgetNotice: false,
 		maxRuntimeMs: 0,
 	});
-	monitor.progress.task = options.description ?? options.task;
+	const taskDescription = options.description ?? options.assignment ?? options.task;
+	monitor.progress.task = taskDescription;
 	monitor.progress.resolvedModel = options.model;
 	monitor.scheduleProgress(true);
 	const registry = AgentRegistry.global();
@@ -3033,7 +3034,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			displayName: agent.name,
 			kind: "sub",
 			parentId: options.parentAgentId,
-			activity: options.description ?? options.task,
+			activity: taskDescription,
 			session: null,
 			status: "running",
 		});
@@ -3042,7 +3043,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
 		id,
 		agent: agent.name,
-		description: options.description ?? options.task,
+		description: taskDescription,
 		status: "started",
 		parentToolCallId: options.parentToolCallId,
 		detached: options.detached,

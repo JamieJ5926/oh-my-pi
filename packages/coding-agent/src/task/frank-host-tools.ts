@@ -59,7 +59,9 @@ export function createFrankHostToolService(options: {
 		getAgentId: () => options.agentId,
 	};
 	const manager = options.session.asyncJobManager;
-	const ownerId = options.session.getAgentId?.() ?? undefined;
+	const hostOwnerId = options.session.getAgentId?.() ?? undefined;
+	const isMatchingOwner = (job: AsyncJob): boolean =>
+		job.ownerId === options.agentId || (hostOwnerId !== undefined && job.ownerId === hostOwnerId);
 	/** Child ids this bridge dispatched, so an `inbox` drain cannot read a sibling's child. */
 	const dispatched = new Set<string>();
 	const enabled: Record<string, true> = Object.fromEntries(
@@ -74,7 +76,7 @@ export function createFrankHostToolService(options: {
 		{ once: true },
 	);
 
-	const ownedJobs = (): AsyncJob[] => manager?.getAllJobs(ownerId ? { ownerId } : undefined) ?? [];
+	const ownedJobs = (): AsyncJob[] => manager?.getAllJobs().filter(isMatchingOwner) ?? [];
 
 	/**
 	 * Children this worker can drain from the job rows: the ones it names for a
@@ -97,7 +99,7 @@ export function createFrankHostToolService(options: {
 				if (typeof raw !== "string") continue;
 				const job = manager.getJob(raw.trim());
 				if (!job) continue;
-				if (ownerId !== undefined && job.ownerId !== ownerId) continue;
+				if (!isMatchingOwner(job)) continue;
 				jobs.set(job.id, job);
 			}
 			return [...jobs.values()];
