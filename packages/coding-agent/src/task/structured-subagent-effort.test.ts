@@ -22,4 +22,8 @@ describe("Frank worker model hop", () => {
 			"openrouter/z-ai/glm-5.3-flash:high",
 		);
 	});
+
+	test("an id with a non-level colon keeps its raw id instead of a second colon", () => {
+		expect(frankModelHop({ provider: "openrouter", id: "foo:beta" }, ThinkingLevel.High)).toBe("foo:beta");
+	});
 });

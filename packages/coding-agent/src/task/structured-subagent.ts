@@ -61,9 +61,10 @@ async function resolveFrankAcceptExe(cwd: string): Promise<string> {
 
 /**
  * Frank reads reasoning effort off its `provider/alias:effort` model hop, so the
- * hop is the only place a seat's resolved level can travel. Without a level the
- * bare id goes out unchanged; with one, a literal level already on the id is
- * dropped first so the hop never carries two.
+ * hop is the only place a seat's resolved level can travel. Frank splits the
+ * alias at the first colon, so a level is appended only to an id that carries no
+ * colon of its own; a literal level already on the id is replaced rather than
+ * doubled, and any other suffixed id keeps the bare-id behavior.
  */
 export function frankModelHop(
 	model: Pick<Model<Api>, "provider" | "id">,
@@ -74,6 +75,7 @@ export function frankModelHop(
 	const colon = model.id.lastIndexOf(":");
 	const literal = colon > 0 ? model.id.slice(colon + 1) : "";
 	const id = literal && parseThinkingLevel(literal) !== undefined ? model.id.slice(0, colon) : model.id;
+	if (id.includes(":")) return model.id;
 	return `${model.provider}/${id}:${effort}`;
 }
 
