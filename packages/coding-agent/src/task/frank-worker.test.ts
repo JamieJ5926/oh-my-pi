@@ -43,6 +43,23 @@ describe("Frank worker transport", () => {
 			await rm(stub.cwd, { recursive: true, force: true });
 		}
 	});
+	test("passes the absolute read root to the Frank child", async () => {
+		const stub = await makeStub(`printf '%s\\n' "$@" > "$FRANK_ARGV_FILE"; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		const argvFile = path.join(stub.cwd, "argv");
+		process.env.FRANK_ARGV_FILE = argvFile;
+		try {
+			const result = await spawnFrankWorker(workerOptions(stub.exe, stub.cwd, () => {}));
+			const argv = (await Bun.file(argvFile).text()).trim().split(/\r?\n/);
+			const readRootIndex = argv.findIndex((arg, index) => arg === "--read-root" && argv[index + 1] === "any");
+			expect(readRootIndex).toBeGreaterThanOrEqual(0);
+			expect(argv.slice(readRootIndex, readRootIndex + 2)).toEqual(["--read-root", "any"]);
+			expect(result.exitCode).toBe(0);
+		} finally {
+			delete process.env.FRANK_ARGV_FILE;
+			await rm(stub.cwd, { recursive: true, force: true });
+		}
+	});
+
 
 	test("validates all controls, separates pipes, and awaits events through final_seq", async () => {
 		expect(parseFrankControl({ type: "ack", version: 1, turn_id: 1, accepted: true, pending_id: 4 })).toEqual({ kind: "ack", version: 1, turn_id: 1, accepted: true, pending_id: 4 });

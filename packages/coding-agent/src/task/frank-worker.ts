@@ -144,6 +144,9 @@ function writeLine(stream: NodeJS.WritableStream, value: unknown): Promise<void>
 	return promise;
 }
 
+// Frank seats mirror native seats, which may read absolute paths outside the session cwd, while Frank writes stay cwd-confined by its own Cwd checks.
+export const FRANK_READ_ROOT = "any";
+
 export async function startFrankWorker(options: StartFrankWorkerOptions): Promise<FrankWorkerHandle> {
 	if (options.signal?.aborted) throw options.signal.reason ?? new Error("Frank worker aborted");
 	const childEnv = { ...process.env };
@@ -154,6 +157,7 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 	const child = spawn(executable, [
 		"agent", "--endpoint", options.endpoint, "--model", options.model, "--cwd", options.cwd,
 		"--max-tool-calls", String(options.budgets.maxToolCalls), "--wall-secs", String(options.budgets.wallSecs), "--tool-choice", "auto",
+		"--read-root", FRANK_READ_ROOT,
 		...(options.eventsPath ? ["--events-path", options.eventsPath] : []),
 		...(options.role ? ["--instructions-root", options.role.root, "--instructions-role", options.role.name] : []),
 	], { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"], env: childEnv });

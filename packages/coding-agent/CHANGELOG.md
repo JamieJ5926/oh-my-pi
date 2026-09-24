@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Frank worker seats may now read absolute paths outside their working directory, matching native seats; Frank writes, edits and the run directory stay confined to the worker cwd.
+
 - Completed subagents now appear under an explicit Completed heading as one outcome-dot and name chain in task order above Todo and Subagents. The chain restores its names after terminal expansion. Child details remain in Agent Hub, active delegators retain named hierarchy rows, and HUD token displays use compact k/m/b units. Direct compact rows omit redundant role badges and task prompt excerpts.
 
 ### Fixed
