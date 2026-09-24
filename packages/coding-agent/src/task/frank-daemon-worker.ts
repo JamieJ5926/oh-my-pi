@@ -46,6 +46,8 @@ function daemonEnvironment(options: DaemonOptions, daemonDir: string): NodeJS.Pr
 		FRANK_DAEMON_ENDPOINT: options.endpoint,
 		FRANK_DAEMON_MODEL: options.model,
 		FRANK_DAEMON_KEY_ENV: keyName,
+		FRANK_DAEMON_TOOL_CHOICE: "auto",
+		FRANK_DAEMON_READ_ROOT: "any",
 		...(options.apiKey && options.apiKey !== "N/A" ? { [keyName]: options.apiKey } : {}),
 		FRANK_DAEMON_WALL_SECS: String(options.budgets.wallSecs),
 		FRANK_DAEMON_MAX_TOOL_CALLS: String(options.budgets.maxToolCalls),
