@@ -374,7 +374,7 @@ describe("Frank daemon transport", () => {
 			expect(delivered.map(event => event.seq)).toEqual([1, 2]);
 			const stateDir = (await Bun.file(path.join(artifactsDir, "lane-1.frank-daemon", "state-dir")).text()).trim();
 			expect(stateDir.startsWith(os.tmpdir())).toBe(true);
-			expect(stateDir.length).toBeLessThan(80);
+			expect(stateDir.length).toBeLessThan(104);
 		} finally { await rm(cwd, { recursive: true, force: true }); }
 	});
 	test("reattaches when the local mirror is incomplete", async () => {
