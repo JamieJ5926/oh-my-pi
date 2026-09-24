@@ -93,7 +93,7 @@ import { spawnFrankWorker, startFrankWorker } from "./frank-worker";
 import { FrankWorkerExitError, extractFrankYieldItems } from "./frank-worker-fold";
 import type { FrankHostToolService } from "./frank-host-tools";
 
-export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "task" | "assignment" | "index" | "id" | "description" | "modelOverride" | "modelRole" | "signal" | "onProgress" | "eventBus" | "subagentEventBus" | "parentToolCallId" | "detached" | "artifactsDir" | "outputSchema" | "outputSchemaMode" | "outputSchemaSource" | "keepAlive"> {
+export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "task" | "assignment" | "index" | "id" | "description" | "modelOverride" | "modelRole" | "signal" | "onProgress" | "eventBus" | "subagentEventBus" | "parentToolCallId" | "detached" | "artifactsDir" | "outputSchema" | "outputSchemaMode" | "outputSchemaSource" | "keepAlive" | "frankTransport"> {
 	cwd: string;
 	exe: string;
 	endpoint: string;
@@ -101,6 +101,9 @@ export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "t
 	budgets: FrankWorkerBudgets;
 	apiKey?: string;
 	text: string;
+	frankBin?: string;
+	transport?: "process" | "daemon";
+	apiKeyEnv?: string;
 	runWorker?: (options: SpawnFrankWorkerOptions) => Promise<FrankWorkerResult>;
 	session?: ToolSession;
 	hostToolService?: FrankHostToolService;
@@ -543,6 +546,7 @@ export interface ExecutorOptions {
 	 * tool, suppressing discovered and always-included capabilities.
 	 */
 	restrictToolNames?: boolean;
+	frankTransport?: "process" | "daemon";
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 	/**
@@ -3030,16 +3034,19 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				const root = path.join(options.artifactsDir, `${id}.frank-profiles`);
 				const name = options.agent.name.replace(/[^A-Za-z0-9_-]/g, "-");
 				await Bun.write(path.join(root, "roles", name, "instructions", `${name}.md`), `${rolePrompt}\n`);
+				await Bun.write(path.join(root, "system", "instructions", "default.md"), "Use the provided role instructions.\n");
 				role = { root, name };
 			}
 			const workerOptions: StartFrankWorkerOptions = {
 				...(options.artifactsDir ? { eventsPath: path.join(options.artifactsDir, `${id}.frank.jsonl`) } : {}),
 				...(role ? { role } : {}),
+				frankBin: options.frankBin,
+				model: options.model,
 				exe: options.exe,
 				endpoint: options.endpoint,
-				model: options.model,
 				cwd: options.cwd,
 				budgets: options.budgets,
+				apiKeyEnv: options.apiKeyEnv,
 				apiKey: options.apiKey,
 				hostTools: hostToolService ? ["task", "hub"] : [],
 				onToolRequest: hostToolService ? req => hostToolService.handle(req.name, req.args) : undefined,
@@ -3048,9 +3055,13 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 					events.push(event);
 					return forwardEvent(event);
 				},
+				transport: options.transport ?? "process",
+				...(options.artifactsDir ? { sessionId: id } : {}),
 			};
 			let result: FrankWorkerResult;
-			if (options.keepAlive && !options.runWorker) {
+			if (options.transport === "daemon") {
+				result = await spawnFrankWorker({ ...workerOptions, text: options.text });
+			} else if (options.keepAlive && !options.runWorker) {
 				const handle = await startFrankWorker(workerOptions);
 				retainedWorker = {
 					handle,
@@ -3063,7 +3074,6 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			} else {
 				result = await (options.runWorker ?? spawnFrankWorker)({ ...workerOptions, text: options.text });
 			}
-			rawOutput = result.text;
 			monitor.progress.extractedToolData = monitor.progress.extractedToolData ?? {};
 			monitor.progress.extractedToolData.yield = extractFrankYieldItems(events);
 			exitCode = result.exitCode;

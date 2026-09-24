@@ -280,6 +280,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("cwd" in params) item.cwd = params.cwd;
 	if ("effort" in params) item.effort = params.effort;
+	if ("frankTransport" in params) item.frankTransport = params.frankTransport;
 	if ("isolated" in params) item.isolated = params.isolated;
 	return [item];
 }
@@ -304,6 +305,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if (params.context !== undefined) spawn.context = params.context;
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
+	if (item.frankTransport !== undefined) spawn.frankTransport = item.frankTransport;
 	if (item.cwd !== undefined) spawn.cwd = item.cwd;
 	if ("effort" in item) spawn.effort = item.effort;
 	if (item.isolated !== undefined) {
@@ -1439,6 +1441,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				context,
 				agent: params.agent,
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
+				...(params.frankTransport !== undefined ? { frankTransport: params.frankTransport } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.cwd !== undefined ? { cwd: params.cwd } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),

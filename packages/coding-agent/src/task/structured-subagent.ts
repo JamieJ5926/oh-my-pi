@@ -59,6 +59,18 @@ async function resolveFrankAcceptExe(cwd: string): Promise<string> {
 	}
 }
 
+async function resolveFrankBin(cwd: string): Promise<string> {
+	const pinned = process.env.FRANK_BIN?.trim();
+	if (pinned) return pinned;
+	const repoBuild = path.join(cwd, "target", "debug", "frank");
+	try {
+		await fs.access(repoBuild, fs.constants.X_OK);
+		return repoBuild;
+	} catch {
+		return "frank";
+	}
+}
+
 /**
  * Frank reads reasoning effort off its `provider/alias:effort` model hop, so the
  * hop is the only place a seat's resolved level can travel. Frank splits the
@@ -119,6 +131,8 @@ async function frankWorkerOptions(
 		model: frankModelHop(model, scope.thinkingLevel),
 		apiKey,
 		budgets: resolveFrankWorkerBudgets(options.agent),
+		transport: options.frankTransport ?? session.settings.get("task.frankTransport"),
+		frankBin: await resolveFrankBin(session.cwd),
 		text: options.context ? `${options.context}\n\n${options.task}` : options.task,
 		session,
 		hostToolService: createFrankHostToolService({ session, agentId: options.id, signal }),
