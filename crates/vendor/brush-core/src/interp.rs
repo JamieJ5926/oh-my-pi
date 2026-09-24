@@ -292,7 +292,16 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 	if params.is_cancelled() {
 		return Err(error::ErrorKind::Interrupted.into());
 	}
+
 	Ok(())
+}
+
+/// Releases the runtime worker for one scheduler turn so cancellation and the
+/// command deadline can be serviced. A loop whose body is builtins only never
+/// awaits anything that returns `Pending`, so without this it monopolizes its
+/// worker and neither the cancel bridge nor the timeout task can run.
+async fn cooperative_yield() {
+	tokio::task::yield_now().await;
 }
 
 
@@ -373,6 +382,7 @@ impl Execute for ast::CompoundList {
 
 		for ast::CompoundListItem(ao_list, sep) in &self.0 {
 			ensure_not_cancelled(params)?;
+			cooperative_yield().await;
 			let run_async = matches!(sep, ast::SeparatorOperator::Async);
 
 			if run_async {
@@ -1158,6 +1168,7 @@ impl Execute for ast::ForClauseCommand {
 
 		for value in expanded_values {
 			ensure_not_cancelled(params)?;
+			cooperative_yield().await;
 			if shell.options().print_commands_and_arguments {
 				if let Some(unexpanded_values) = &self.values {
 					shell
@@ -1352,6 +1363,7 @@ impl Execute for (WhileOrUntil, &ast::WhileOrUntilClauseCommand) {
 
 		loop {
 			ensure_not_cancelled(params)?;
+			cooperative_yield().await;
 			let condition_result = test_condition.execute(shell, &condition_params).await?;
 
 			// Update status for condition
@@ -1425,6 +1437,7 @@ impl Execute for ast::ArithmeticForClauseCommand {
 
 		loop {
 			ensure_not_cancelled(params)?;
+			cooperative_yield().await;
 			if let Some(condition) = &self.condition {
 				// An empty condition (e.g., `for (( ; ; ))`) means "always true".
 				if !condition.value.is_empty() && condition.eval(shell, params, true).await? == 0 {
