@@ -148,6 +148,7 @@ export async function spawnFrankDaemonWorker(options: DaemonOptions): Promise<Fr
 					events.push(event);
 					terminal = terminalResult(parsed.event) ?? terminal;
 					await options.onEvent(event);
+					options.onMeter?.(event);
 				} else if (parsed?.kind === "envelope") envelopeText = parsed.text;
 			}).catch(error => { streamError = error instanceof Error ? error : new Error(String(error)); });
 		});

@@ -54,6 +54,10 @@ export function createFrankHostToolService(options: {
 	signal?: AbortSignal;
 	names?: string[];
 }): FrankHostToolService {
+	const bridgedSession: ToolSession = {
+		...options.session,
+		getAgentId: () => options.agentId,
+	};
 	const manager = options.session.asyncJobManager;
 	const ownerId = options.session.getAgentId?.() ?? undefined;
 	/** Child ids this bridge dispatched, so an `inbox` drain cannot read a sibling's child. */
@@ -194,14 +198,14 @@ export function createFrankHostToolService(options: {
 			if (!factory) return { ok: false, error: `unknown host tool: ${name}` };
 			try {
 				const beforeDispatch = name === "task" && manager ? new Set(ownedJobs().map(job => job.id)) : undefined;
-				const tool = await factory(options.session);
+				const tool = await factory(bridgedSession);
 				if (!tool) return { ok: false, error: `host tool is unavailable: ${name}` };
 				const result = await tool.execute(
 					options.agentId,
 					args,
 					options.signal,
 					undefined,
-					options.session.getToolContext?.(),
+					bridgedSession.getToolContext?.(),
 				);
 				let text = result.content
 					.filter((part): part is { type: "text"; text: string } => part.type === "text")
