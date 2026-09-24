@@ -330,14 +330,16 @@ describe("Frank daemon transport", () => {
 		const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-cli-"));
 		const bin = path.join(cwd, "frank");
 		const artifactsDir = path.join(cwd, "artifacts");
-		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "daemon" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "daemon" ]; then exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
 		const delivered: FrankEvent[] = [];
 		try {
 			const result = await spawnFrankDaemonWorker({ exe: bin, frankBin: bin, endpoint: "http://127.0.0.1:1", model: "test-model", cwd, budgets: { maxToolCalls: 4, wallSecs: 9 }, text: "inspect", id: "lane-1", artifactsDir, onEvent: event => { delivered.push(event); } });
 			expect(result.text).toBe("daemon answer");
 			expect(result.exitCode).toBe(0);
 			expect(delivered.map(event => event.seq)).toEqual([1, 2]);
-			expect((await readFrankLaneResult(artifactsDir, "lane-1")).text).toBe("daemon answer");
+			const stateDir = (await Bun.file(path.join(artifactsDir, "lane-1.frank-daemon", "state-dir")).text()).trim();
+			expect(stateDir.startsWith(os.tmpdir())).toBe(true);
+			expect(stateDir.length).toBeLessThan(80);
 		} finally { await rm(cwd, { recursive: true, force: true }); }
 	});
 	test("reattaches when the local mirror is incomplete", async () => {

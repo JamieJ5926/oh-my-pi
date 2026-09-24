@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { createInterface } from "node:readline";
 import { answerExitDecision, foldEventsToText } from "./frank-worker-fold";
 import type { FrankControl, FrankEvent, FrankWorkerResult, StartFrankWorkerOptions } from "./frank-worker";
 
@@ -64,33 +65,56 @@ function waitForClose(child: ReturnType<typeof spawn>): Promise<number | null> {
 	});
 }
 
-async function admitRun(options: DaemonOptions, env: NodeJS.ProcessEnv): Promise<void> {
-	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
-	const args = ["daemon", "start", "--task", options.text, "--session", options.id, "--allow", "all", "--json"];
-	const first = runCli(bin, args, { cwd: options.cwd, env, stdio: "ignore" });
-	if (await waitForClose(first) === 0) return;
-	const daemon = runCli(bin, ["__daemon-run"], { cwd: options.cwd, env, detached: true, stdio: "ignore" });
-	daemon.unref();
-	const deadline = Date.now() + 5000;
-	while (Date.now() < deadline) {
-		const status = runCli(bin, ["daemon", "status"], { cwd: options.cwd, env, stdio: "ignore" });
-		if (await waitForClose(status) === 0) break;
-		await Bun.sleep(100);
+function daemonStateDir(artifactsDir: string, id: string): string {
+	const key = createHash("sha1").update(`${artifactsDir}:${id}`).digest("hex").slice(0, 16);
+	return path.join(os.tmpdir(), "omp-frank-daemon", key);
+}
+
+async function runLoggedCli(executable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; logPath: string; detached?: boolean }): Promise<number | null> {
+	if (options.detached) {
+		const child = runCli(executable, args, { cwd: options.cwd, env: options.env, detached: true, stdio: "ignore" });
+		child.unref();
+		return null;
 	}
-	if (Date.now() >= deadline) throw new Error("Frank daemon did not start");
-	const retry = runCli(bin, args, { cwd: options.cwd, env, stdio: "ignore" });
-	const retryCode = await waitForClose(retry);
-	if (retryCode !== 0) throw new Error(`Frank daemon start failed with exit code ${retryCode}`);
+	const child = runCli(executable, args, { cwd: options.cwd, env: options.env, detached: false });
+	const writes: Promise<void>[] = [];
+	for (const [stream, label] of [[child.stdout, "stdout"], [child.stderr, "stderr"]] as const) {
+		stream?.on("data", chunk => { writes.push(appendFile(options.logPath, `[${label}] ${chunk.toString()}`)); });
+	}
+	const code = await waitForClose(child);
+	await Promise.all(writes);
+	return code;
+}
+
+async function admitRun(options: DaemonOptions, env: NodeJS.ProcessEnv, stateDir: string): Promise<void> {
+	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
+	const logPath = path.join(stateDir, "cli.log");
+	const args = ["daemon", "start", "--task", options.text, "--session", options.id, "--allow", "all", "--json"];
+	if (await runLoggedCli(bin, args, { cwd: options.cwd, env, logPath }) === 0) return;
+	const daemonCode = await runLoggedCli(bin, ["__daemon-run"], { cwd: options.cwd, env, logPath, detached: true });
+	if (daemonCode !== null) throw new Error(`Frank daemon process exited before detach (code ${daemonCode}); see ${logPath}`);
+	const deadline = Date.now() + 20_000;
+	while (Date.now() < deadline) {
+		const status = await runLoggedCli(bin, ["daemon", "status"], { cwd: options.cwd, env, logPath });
+		if (status === 0) break;
+		await Bun.sleep(250);
+	}
+	if (Date.now() >= deadline) throw new Error(`Frank daemon did not start; see ${logPath}`);
+	const retry = await runLoggedCli(bin, args, { cwd: options.cwd, env, logPath });
+	if (retry !== 0) throw new Error(`Frank daemon start failed with exit code ${retry}; see ${logPath}`);
 }
 
 export async function spawnFrankDaemonWorker(options: DaemonOptions): Promise<FrankWorkerResult> {
 	if (options.signal?.aborted) throw options.signal.reason ?? new Error("Frank worker aborted");
 	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
 	const daemonDir = path.join(options.artifactsDir, `${options.id}.frank-daemon`);
+	const stateDir = daemonStateDir(options.artifactsDir, options.id);
 	const eventsPath = options.eventsPath ?? path.join(options.artifactsDir, `${options.id}.frank.jsonl`);
 	await mkdir(daemonDir, { recursive: true });
-	const env = daemonEnvironment(options, daemonDir);
-	await admitRun(options, env);
+	await mkdir(stateDir, { recursive: true });
+	await writeFile(path.join(daemonDir, "state-dir"), `${stateDir}\n`);
+	const env = daemonEnvironment(options, stateDir);
+	await admitRun(options, env, stateDir);
 	const child = runCli(bin, ["attach", "--session", options.id, "--json"], { cwd: options.cwd, env });
 	if (!child.stdout) throw new Error("Frank attach did not provide stdout");
 	const events: FrankEvent[] = [];
@@ -152,8 +176,10 @@ export async function readFrankLaneResult(artifactsDir: string, id: string, opti
 }
 
 export async function attachFrankDaemonLane(options: { artifactsDir: string; id: string; cwd: string; frankBin?: string; env?: NodeJS.ProcessEnv }): Promise<FrankWorkerResult> {
-	const daemonDir = path.join(options.artifactsDir, `${options.id}.frank-daemon`);
-	const env = { ...process.env, ...options.env, FRANK_DAEMON_DIR: daemonDir };
+	const markerDir = path.join(options.artifactsDir, `${options.id}.frank-daemon`);
+	let stateDir = daemonStateDir(options.artifactsDir, options.id);
+	try { stateDir = (await readFile(path.join(markerDir, "state-dir"), "utf8")).trim() || stateDir; } catch {}
+	const env = { ...process.env, ...options.env, FRANK_DAEMON_DIR: stateDir };
 	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
 	const child = runCli(bin, ["attach", "--session", options.id, "--json"], { cwd: options.cwd, env });
 	if (!child.stdout) throw new Error("Frank attach did not provide stdout");
