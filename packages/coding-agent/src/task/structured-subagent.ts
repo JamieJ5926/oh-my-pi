@@ -193,6 +193,7 @@ export interface StructuredSubagentRequest {
 	index?: number;
 	parentToolCallId?: string;
 	detached?: boolean;
+	frankTransport?: "process" | "daemon";
 	invokedAt?: number;
 	acquiredAt?: number;
 	isolation?: StructuredSubagentIsolationControls;
@@ -544,6 +545,7 @@ async function buildExecutorOptions(
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
+		frankTransport: request.frankTransport ?? session.settings.get("task.frankTransport"),
 		...(policy.schema.source === "none"
 			? {}
 			: {
