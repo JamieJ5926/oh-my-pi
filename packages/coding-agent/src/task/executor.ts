@@ -3069,6 +3069,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			} else {
 				result = await (options.runWorker ?? spawnFrankWorker)({ ...workerOptions, text: options.text });
 			}
+			rawOutput = result.text;
 			monitor.progress.extractedToolData = monitor.progress.extractedToolData ?? {};
 			monitor.progress.extractedToolData.yield = extractFrankYieldItems(events);
 			exitCode = result.exitCode;

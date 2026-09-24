@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { answerExitDecision, foldEventsToText } from "./frank-worker-fold";
@@ -68,7 +67,7 @@ function waitForClose(child: ReturnType<typeof spawn>): Promise<number | null> {
 
 function daemonStateDir(artifactsDir: string, id: string): string {
 	const key = createHash("sha1").update(`${artifactsDir}:${id}`).digest("hex").slice(0, 16);
-	return path.join(os.tmpdir(), "omp-frank-daemon", key);
+	return path.join("/tmp", "omp-frank-daemon", key);
 }
 
 async function runLoggedCli(executable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; logPath: string; detached?: boolean }): Promise<number | null> {
@@ -90,10 +89,12 @@ async function runLoggedCli(executable: string, args: string[], options: { cwd: 
 async function admitRun(options: DaemonOptions, env: NodeJS.ProcessEnv, stateDir: string): Promise<void> {
 	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
 	const logPath = path.join(stateDir, "cli.log");
-	const args = ["daemon", "start", "--task", options.text, "--session", options.id, "--allow", "all", "--json"];
-	if (await runLoggedCli(bin, args, { cwd: options.cwd, env, logPath }) === 0) return;
-	const daemonCode = await runLoggedCli(bin, ["__daemon-run"], { cwd: options.cwd, env, logPath, detached: true });
-	if (daemonCode !== null) throw new Error(`Frank daemon process exited before detach (code ${daemonCode}); see ${logPath}`);
+	const args = ["daemon", "start", "--task", options.text, "--session", options.id, "--allow", "all", "--key-env", options.apiKeyEnv ?? "PI_TRACK_API_KEY", "--json"];
+	const startCode = await runLoggedCli(bin, args, { cwd: options.cwd, env, logPath });
+	if (startCode === 0) return;
+	const existingStatus = await runLoggedCli(bin, ["daemon", "status"], { cwd: options.cwd, env, logPath });
+	if (existingStatus === 0) throw new Error(`Frank daemon rejected run admission (exit code ${startCode}); see ${logPath}`);
+	await runLoggedCli(bin, ["__daemon-run"], { cwd: options.cwd, env, logPath, detached: true });
 	const deadline = Date.now() + 20_000;
 	while (Date.now() < deadline) {
 		const status = await runLoggedCli(bin, ["daemon", "status"], { cwd: options.cwd, env, logPath });
@@ -115,40 +116,50 @@ export async function spawnFrankDaemonWorker(options: DaemonOptions): Promise<Fr
 	await mkdir(stateDir, { recursive: true });
 	await writeFile(path.join(daemonDir, "state-dir"), `${stateDir}\n`);
 	const env = daemonEnvironment(options, stateDir);
-	await admitRun(options, env, stateDir);
-	const child = runCli(bin, ["attach", "--session", options.id, "--json"], { cwd: options.cwd, env });
-	if (!child.stdout) throw new Error("Frank attach did not provide stdout");
-	const events: FrankEvent[] = [];
-	let envelopeText: string | undefined;
-	let terminal: Extract<FrankControl, { kind: "terminal" }> | undefined;
-	let chain = Promise.resolve();
-	let streamError: Error | undefined;
-	const output = createInterface({ input: child.stdout });
-	output.on("line", line => {
-		chain = chain.then(async () => {
-			await appendFile(eventsPath, `${line}\n`);
-			const parsed = parseAttachLine(line);
-			if (parsed?.kind === "event") {
-				const event = eventFromAttach(parsed);
-				events.push(event);
-				terminal = terminalResult(parsed.event) ?? terminal;
-				await options.onEvent(event);
-			} else if (parsed?.kind === "envelope") envelopeText = parsed.text;
-		}).catch(error => { streamError = error instanceof Error ? error : new Error(String(error)); });
-	});
 	const abortListener = () => {
 		const stop = runCli(bin, ["daemon", "stop", "--json"], { cwd: options.cwd, env, stdio: "ignore" });
 		stop.once("error", () => {});
 	};
 	options.signal?.addEventListener("abort", abortListener, { once: true });
-	const code = await waitForClose(child);
-	options.signal?.removeEventListener("abort", abortListener);
-	await chain;
-	if (!terminal) throw new Error(`Frank daemon attach ended without TerminalDone (code ${code})`);
-	const text = envelopeText ?? foldEventsToText(events);
-	const exitCode = terminal.terminal === "Answer" ? 0 : 1;
-	answerExitDecision(terminal.terminal, exitCode, text);
-	return { terminal, exitCode, text };
+	try {
+		await admitRun(options, env, stateDir);
+		if (options.signal?.aborted) {
+			const stop = runCli(bin, ["daemon", "stop", "--json"], { cwd: options.cwd, env, stdio: "ignore" });
+			stop.once("error", () => {});
+			throw options.signal.reason ?? new Error("Frank worker aborted");
+		}
+		const child = runCli(bin, ["attach", "--session", options.id, "--json"], { cwd: options.cwd, env });
+		if (!child.stdout) throw new Error("Frank attach did not provide stdout");
+		const events: FrankEvent[] = [];
+		let envelopeText: string | undefined;
+		let terminal: Extract<FrankControl, { kind: "terminal" }> | undefined;
+		let chain = Promise.resolve();
+		let streamError: Error | undefined;
+		const output = createInterface({ input: child.stdout });
+		output.on("line", line => {
+			chain = chain.then(async () => {
+				// The mirror is complete only when its writer sees TerminalDone; post-crash recovery attaches to the live daemon.
+				await appendFile(eventsPath, `${line}\n`);
+				const parsed = parseAttachLine(line);
+				if (parsed?.kind === "event") {
+					const event = eventFromAttach(parsed);
+					events.push(event);
+					terminal = terminalResult(parsed.event) ?? terminal;
+					await options.onEvent(event);
+				} else if (parsed?.kind === "envelope") envelopeText = parsed.text;
+			}).catch(error => { streamError = error instanceof Error ? error : new Error(String(error)); });
+		});
+		const code = await waitForClose(child);
+		await chain;
+		if (streamError) throw streamError;
+		if (!terminal) throw new Error(`Frank daemon attach ended without TerminalDone (code ${code})`);
+		const text = envelopeText ?? foldEventsToText(events);
+		const exitCode = terminal.terminal === "Answer" ? 0 : 1;
+		answerExitDecision(terminal.terminal, exitCode, text);
+		return { terminal, exitCode, text };
+	} finally {
+		options.signal?.removeEventListener("abort", abortListener);
+	}
 }
 
 export async function readFrankLaneResult(artifactsDir: string, id: string, options?: { cwd?: string; frankBin?: string }): Promise<FrankWorkerResult> {
@@ -197,7 +208,8 @@ export async function attachFrankDaemonLane(options: { artifactsDir: string; id:
 			const event = eventFromAttach(parsed);
 			events.push(event);
 			terminal = terminalResult(parsed.event) ?? terminal;
-			if (terminal) output.close();
+			// Mirror recovery is complete only while the original writer saw TerminalDone; this reattach reads the live daemon.
+			await appendFile(path.join(options.artifactsDir, `${options.id}.frank.jsonl`), `${JSON.stringify(parsed)}\n`);
 		}
 	}
 	const code = await closed;
