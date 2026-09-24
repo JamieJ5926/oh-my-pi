@@ -8,8 +8,9 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveAgentModelSelection, resolveModelScope } from "../config/model-resolver";
+import { resolveAgentModelSelection, resolveModelScope, type ScopedModel } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -17,7 +18,7 @@ import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import type { TaskEffort } from "../thinking";
+import { parseThinkingLevel, type TaskEffort, toReasoningEffort } from "../thinking";
 import type { ToolSession } from "../tools";
 import { createFrankHostToolService } from "./frank-host-tools";
 import { isIrcEnabled } from "../tools/hub";
@@ -58,6 +59,24 @@ async function resolveFrankAcceptExe(cwd: string): Promise<string> {
 	}
 }
 
+/**
+ * Frank reads reasoning effort off its `provider/alias:effort` model hop, so the
+ * hop is the only place a seat's resolved level can travel. Without a level the
+ * bare id goes out unchanged; with one, a literal level already on the id is
+ * dropped first so the hop never carries two.
+ */
+export function frankModelHop(
+	model: Pick<Model<Api>, "provider" | "id">,
+	thinkingLevel: ScopedModel["thinkingLevel"],
+): string {
+	const effort = toReasoningEffort(thinkingLevel);
+	if (effort === undefined) return model.id;
+	const colon = model.id.lastIndexOf(":");
+	const literal = colon > 0 ? model.id.slice(colon + 1) : "";
+	const id = literal && parseThinkingLevel(literal) !== undefined ? model.id.slice(0, colon) : model.id;
+	return `${model.provider}/${id}:${effort}`;
+}
+
 async function frankWorkerOptions(
 	options: ExecutorOptions,
 	session: ToolSession,
@@ -80,8 +99,10 @@ async function frankWorkerOptions(
 		undefined,
 		session.settings,
 	);
-	const model = selected[0]?.model;
-	if (!model) throw new StructuredSubagentError("preflight", "No available model for the selected Frank worker seat.");
+	const scope = selected[0];
+	const model = scope?.model;
+	if (!scope || !model)
+		throw new StructuredSubagentError("preflight", "No available model for the selected Frank worker seat.");
 	const endpoint = model.baseUrl ?? session.modelRegistry.getProviderBaseUrl(model.provider);
 	if (!endpoint)
 		throw new StructuredSubagentError(
@@ -93,7 +114,7 @@ async function frankWorkerOptions(
 		...options,
 		exe: await resolveFrankAcceptExe(session.cwd),
 		endpoint: frankWorkerEndpoint(endpoint),
-		model: model.id,
+		model: frankModelHop(model, scope.thinkingLevel),
 		apiKey,
 		budgets: resolveFrankWorkerBudgets(options.agent),
 		text: options.context ? `${options.context}\n\n${options.task}` : options.task,
