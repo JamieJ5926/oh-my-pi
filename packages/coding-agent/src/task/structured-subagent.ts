@@ -94,7 +94,7 @@ async function frankWorkerOptions(
 		model: model.id,
 		apiKey,
 		budgets: { maxToolCalls: 64, wallSecs: 600 },
-		text: options.task,
+		text: options.context ? `${options.context}\n\n${options.task}` : options.task,
 	};
 }
 
