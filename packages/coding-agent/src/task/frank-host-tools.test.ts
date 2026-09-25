@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { AsyncJobManager } from "../async";
-import { createFrankHostToolService } from "./frank-host-tools";
+import { BUILTIN_TOOLS } from "../tools";
 import type { ToolSession } from "../tools";
+import { createFrankHostToolService } from "./frank-host-tools";
 
 describe("Frank host tool service", () => {
 	const session = {} as ToolSession;
@@ -26,6 +27,32 @@ describe("Frank host tool service", () => {
 
 		expect(result.ok).toBe(false);
 		expect(result.error).toBe("host tool is not enabled: hub");
+	});
+
+	test("task bridge runs the tool with the Frank parent identity", async () => {
+		let factorySession: ToolSession | undefined;
+		const hostSession = {
+			getAgentId: () => "FrankParent",
+			getToolContext: () => undefined,
+		} as unknown as ToolSession;
+		const original = BUILTIN_TOOLS.task;
+		BUILTIN_TOOLS.task = async session => {
+			factorySession = session;
+			return {
+				name: "task",
+				label: "Task",
+				description: "",
+				parameters: {},
+				execute: async () => ({ content: [{ type: "text", text: "spawned" }] }),
+			} as never;
+		};
+		try {
+			const service = createFrankHostToolService({ session: hostSession, agentId: "FrankParent" });
+			await service.handle("task", { task: "child" });
+			expect(factorySession?.getAgentId?.()).toBe("FrankParent");
+		} finally {
+			BUILTIN_TOOLS.task = original;
+		}
 	});
 });
 
@@ -119,5 +146,21 @@ describe("Frank host tool service: child drain", () => {
 		}).handle("hub", { op: "wait", to: "Foreign", timeoutMs: 5_000 });
 
 		expect(result.content ?? "").not.toContain("FOREIGN_BODY");
+	});
+
+	test("a settled child owned by the Frank parent reaches the worker", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		manager.register("task", "FrankChild", async () => "FRANK_CHILD_BODY", {
+			id: "FrankChild",
+			agentId: "FrankChild",
+			ownerId: "frank-test",
+		});
+		await manager.getJob("FrankChild")?.promise;
+		manager.consumeJobResults(["FrankChild"]);
+
+		const result = await bridge(manager).handle("hub", { op: "wait", to: "FrankChild", timeoutMs: 5_000 });
+
+		expect(result.ok).toBe(true);
+		expect(result.content).toContain("FRANK_CHILD_BODY");
 	});
 });

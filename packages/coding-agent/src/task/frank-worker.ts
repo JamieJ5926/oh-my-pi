@@ -86,6 +86,7 @@ export interface SpawnFrankWorkerOptions {
 	frankBin?: string;
 	sessionId?: string;
 	artifactsDir?: string;
+	onMeter?: (event: FrankEvent) => void;
 }
 export type StartFrankWorkerOptions = Omit<SpawnFrankWorkerOptions, "text">;
 
@@ -288,6 +289,7 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 			nextExpectedSeq++;
  			if (isFrankBookkeepingEvent(event)) {
  				eventChain = eventChain.then(() => {
+ 					options.onMeter?.(event);
  					deliveredSeq = event.seq;
  					completeTurn();
  				});

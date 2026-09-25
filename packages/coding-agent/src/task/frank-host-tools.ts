@@ -54,8 +54,14 @@ export function createFrankHostToolService(options: {
 	signal?: AbortSignal;
 	names?: string[];
 }): FrankHostToolService {
+	const bridgedSession: ToolSession = {
+		...options.session,
+		getAgentId: () => options.agentId,
+	};
 	const manager = options.session.asyncJobManager;
-	const ownerId = options.session.getAgentId?.() ?? undefined;
+	const hostOwnerId = options.session.getAgentId?.() ?? undefined;
+	const isMatchingOwner = (job: AsyncJob): boolean =>
+		job.ownerId === options.agentId || (hostOwnerId !== undefined && job.ownerId === hostOwnerId);
 	/** Child ids this bridge dispatched, so an `inbox` drain cannot read a sibling's child. */
 	const dispatched = new Set<string>();
 	const enabled: Record<string, true> = Object.fromEntries(
@@ -70,7 +76,7 @@ export function createFrankHostToolService(options: {
 		{ once: true },
 	);
 
-	const ownedJobs = (): AsyncJob[] => manager?.getAllJobs(ownerId ? { ownerId } : undefined) ?? [];
+	const ownedJobs = (): AsyncJob[] => manager?.getAllJobs().filter(isMatchingOwner) ?? [];
 
 	/**
 	 * Children this worker can drain from the job rows: the ones it names for a
@@ -93,7 +99,7 @@ export function createFrankHostToolService(options: {
 				if (typeof raw !== "string") continue;
 				const job = manager.getJob(raw.trim());
 				if (!job) continue;
-				if (ownerId !== undefined && job.ownerId !== ownerId) continue;
+				if (!isMatchingOwner(job)) continue;
 				jobs.set(job.id, job);
 			}
 			return [...jobs.values()];
@@ -194,14 +200,14 @@ export function createFrankHostToolService(options: {
 			if (!factory) return { ok: false, error: `unknown host tool: ${name}` };
 			try {
 				const beforeDispatch = name === "task" && manager ? new Set(ownedJobs().map(job => job.id)) : undefined;
-				const tool = options.session.toolRegistry?.get(name) ?? (await factory(options.session));
+				const tool = options.session.toolRegistry?.get(name) ?? (await factory(bridgedSession));
 				if (!tool) return { ok: false, error: `host tool is unavailable: ${name}` };
 				const result = await tool.execute(
 					toolCallId ?? `frank-bridge:${name}`,
 					args,
 					options.signal,
 					undefined,
-					options.session.getToolContext?.(),
+					bridgedSession.getToolContext?.(),
 				);
 				let text = result.content
 					.filter((part): part is { type: "text"; text: string } => part.type === "text")

@@ -1,4 +1,6 @@
 import { attachFrankDaemonLane, readFrankLaneResult, spawnFrankDaemonWorker } from "./frank-daemon-worker";
+import { AgentRegistry } from "../registry/agent-registry";
+import { runFrankSubagent } from "./executor";
 import { watch } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -395,5 +397,57 @@ describe("Frank daemon transport", () => {
 			expect(result.text).toBe("daemon answer");
 			expect((await readFrankLaneResult(artifactsDir, "lane-recover", { cwd, frankBin: bin })).text).toBe("daemon answer");
 		} finally { await rm(cwd, { recursive: true, force: true }); }
+	});
+});
+
+describe("Frank TUI row progress and nesting", () => {
+	test("registers parentId, description, resolvedModel and accumulates Meter tokens", async () => {
+		const registry = AgentRegistry.global();
+		const laneId = `frank-test-${Date.now()}`;
+		const parentId = "FrankParent";
+		const taskText = "test frank task description";
+		const resolvedModel = "cli-proxy/test-model:high";
+
+		const agent = parseAgent("test.md", "---\nname: frank-test-agent\ndescription: test agent\nruntime: frank\nmodel: cli-proxy/test-model\n---\nTask\n", "project");
+
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"kind":{"Meter":{"input_tokens":150,"output_tokens":50}}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		try {
+			let capturedProgressTokens = 0;
+			let capturedResolvedModel: string | undefined;
+			let capturedTask: string | undefined;
+			let capturedRunningActivity: string | undefined;
+
+			await runFrankSubagent({
+				id: laneId,
+				parentAgentId: parentId,
+				agent,
+				task: taskText,
+				description: taskText,
+				index: 0,
+				cwd: stub.cwd,
+				exe: stub.exe,
+				endpoint: "http://127.0.0.1:1",
+				model: resolvedModel,
+				budgets: { maxToolCalls: 10, wallSecs: 30 },
+				text: taskText,
+				onProgress: p => {
+					capturedProgressTokens = p.tokens;
+					capturedResolvedModel = p.resolvedModel;
+					capturedTask = p.task;
+					capturedRunningActivity = registry.get(laneId)?.activity;
+				},
+			});
+
+			const ref = registry.get(laneId);
+			expect(ref).toBeDefined();
+			expect(ref?.parentId).toBe(parentId);
+			expect(capturedRunningActivity).toBe(taskText);
+			expect(capturedResolvedModel).toBe(resolvedModel);
+			expect(capturedTask).toBe(taskText);
+			expect(capturedProgressTokens).toBe(200);
+		} finally {
+			registry.unregister(laneId);
+			await rm(stub.cwd, { recursive: true, force: true });
+		}
 	});
 });

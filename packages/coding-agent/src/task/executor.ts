@@ -93,7 +93,7 @@ import { spawnFrankWorker, startFrankWorker } from "./frank-worker";
 import { FrankWorkerExitError, extractFrankYieldItems } from "./frank-worker-fold";
 import type { FrankHostToolService } from "./frank-host-tools";
 
-export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "task" | "assignment" | "index" | "id" | "description" | "modelOverride" | "modelRole" | "signal" | "onProgress" | "eventBus" | "subagentEventBus" | "parentToolCallId" | "detached" | "artifactsDir" | "outputSchema" | "outputSchemaMode" | "outputSchemaSource" | "keepAlive" | "frankTransport"> {
+export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "task" | "assignment" | "index" | "id" | "description" | "modelOverride" | "modelRole" | "signal" | "onProgress" | "eventBus" | "subagentEventBus" | "parentToolCallId" | "detached" | "artifactsDir" | "outputSchema" | "outputSchemaMode" | "outputSchemaSource" | "keepAlive" | "frankTransport" | "parentAgentId"> {
 	cwd: string;
 	exe: string;
 	endpoint: string;
@@ -2982,6 +2982,25 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	});
 }
 
+function extractMeterTokens(event: FrankEvent): number {
+	const value = event.event;
+	if (!value || typeof value !== "object") return 0;
+	const record = value as Record<string, unknown>;
+	let meter: unknown;
+	if (record.kind && typeof record.kind === "object" && "Meter" in (record.kind as Record<string, unknown>)) {
+		meter = (record.kind as Record<string, unknown>).Meter;
+	} else if (record.kind === "Meter") {
+		meter = record.meter ?? record;
+	} else if ("meter" in record) {
+		meter = record.meter;
+	}
+	if (!meter || typeof meter !== "object") return 0;
+	const m = meter as Record<string, unknown>;
+	const input = typeof m.input_tokens === "number" ? m.input_tokens : 0;
+	const output = typeof m.output_tokens === "number" ? m.output_tokens : 0;
+	return input + output;
+}
+
 export async function runFrankSubagent(options: FrankExecutorOptions): Promise<SingleResult> {
 	const { id, agent, task, assignment, index, signal } = options;
 	const startTime = Date.now();
@@ -3004,13 +3023,27 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 		softRequestBudgetNotice: false,
 		maxRuntimeMs: 0,
 	});
+	const taskDescription = options.description ?? options.assignment ?? options.task;
+	monitor.progress.task = taskDescription;
+	monitor.progress.resolvedModel = options.model;
+	monitor.scheduleProgress(true);
 	const registry = AgentRegistry.global();
-	if (!registry.get(id)) registry.register({ id, displayName: agent.name, kind: "sub", session: null, status: "running" });
+	if (!registry.get(id)) {
+		registry.register({
+			id,
+			displayName: agent.name,
+			kind: "sub",
+			parentId: options.parentAgentId,
+			activity: taskDescription,
+			session: null,
+			status: "running",
+		});
+	}
 	const hostToolService = options.hostToolService;
 	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
 		id,
 		agent: agent.name,
-		description: options.description,
+		description: taskDescription,
 		status: "started",
 		parentToolCallId: options.parentToolCallId,
 		detached: options.detached,
@@ -3056,6 +3089,14 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				onEvent: event => {
 					events.push(event);
 					return forwardEvent(event);
+				},
+				onMeter: event => {
+					// Tokens sourced from Frank live Meter events; FrankWorkerResult carries no usage/meter for a settle-time fallback.
+					const meterTokens = extractMeterTokens(event);
+					if (meterTokens > 0) {
+						monitor.progress.tokens += meterTokens;
+						monitor.scheduleProgress(true);
+					}
 				},
 				transport: options.transport ?? "process",
 				...(options.artifactsDir ? { sessionId: id } : {}),
@@ -3123,6 +3164,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 		if (options.keepAlive && exitCode === 0 && !aborted) retainedFrankWorkers.set(id, retainedWorker);
 		else await closeRetainedFrankWorker(id, retainedWorker);
 	}
+	monitor.scheduleProgress(true);
 	monitor.finish();
 	const finalMonitor: SubagentRunMonitor = { ...monitor, rawOutput: () => rawOutput };
 	const result = await finalizeRunResult({
