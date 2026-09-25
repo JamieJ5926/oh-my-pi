@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -67,9 +66,8 @@ function waitForClose(child: ReturnType<typeof spawn>): Promise<number | null> {
 	});
 }
 
-function daemonStateDir(artifactsDir: string, id: string): string {
-	const key = createHash("sha1").update(`${artifactsDir}:${id}`).digest("hex").slice(0, 16);
-	return path.join("/tmp", "omp-frank-daemon", key);
+function daemonStateDir(): string {
+	return path.join("/tmp", "omp-frank-daemon", "host");
 }
 
 async function runLoggedCli(executable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; logPath: string; detached?: boolean }): Promise<number | null> {
@@ -112,7 +110,7 @@ export async function spawnFrankDaemonWorker(options: DaemonOptions): Promise<Fr
 	if (options.signal?.aborted) throw options.signal.reason ?? new Error("Frank worker aborted");
 	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
 	const daemonDir = path.join(options.artifactsDir, `${options.id}.frank-daemon`);
-	const stateDir = daemonStateDir(options.artifactsDir, options.id);
+	const stateDir = daemonStateDir();
 	const eventsPath = options.eventsPath ?? path.join(options.artifactsDir, `${options.id}.frank.jsonl`);
 	await mkdir(daemonDir, { recursive: true });
 	await mkdir(stateDir, { recursive: true });
@@ -192,7 +190,7 @@ export async function readFrankLaneResult(artifactsDir: string, id: string, opti
 
 export async function attachFrankDaemonLane(options: { artifactsDir: string; id: string; cwd: string; frankBin?: string; env?: NodeJS.ProcessEnv }): Promise<FrankWorkerResult> {
 	const markerDir = path.join(options.artifactsDir, `${options.id}.frank-daemon`);
-	let stateDir = daemonStateDir(options.artifactsDir, options.id);
+	let stateDir = daemonStateDir();
 	try { stateDir = (await readFile(path.join(markerDir, "state-dir"), "utf8")).trim() || stateDir; } catch {}
 	const env = { ...process.env, ...options.env, FRANK_DAEMON_DIR: stateDir };
 	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
