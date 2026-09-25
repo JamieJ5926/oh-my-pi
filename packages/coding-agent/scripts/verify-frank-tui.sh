@@ -45,11 +45,11 @@ else
 fi
 tmux new-session -d -s "$session" -x 180 -y 50 -c "$workdir" \
   env FRANK_BIN=/Users/jamie/.local/bin/frank \
-  FRANK_ACCEPT_BIN=/Users/jamie/Projects/active/rust-pi-build/target/release/frank_accept \
+  FRANK_ACCEPT_BIN=/Users/jamie/.local/bin/frank_accept \
   OMP_SESSION_MODE=PRESENT "${launch[@]}"
 tmux resize-window -t "$session" -x 180 -y 50
 sleep 4
-tmux send-keys -t "$session" -l '/task agent:frank-poteto-agent task:"Read packages/coding-agent/package.json. Spawn one frank-implementer child to read that file and summarize dependencies."'
+tmux send-keys -t "$session" -l '/task agent:frank-poteto-agent task:"ROLE_MARK:frank-poteto-agent\n# Target\nRead packages/coding-agent/package.json via a child.\n# Change\nIssue one task tool call spawning agent:frank-implementer with task:read packages/coding-agent/package.json. Drain it with hub wait and report result.\n# Acceptance\nChild spawned and completed."'
 tmux send-keys -t "$session" Enter
 
 last_frame=''
