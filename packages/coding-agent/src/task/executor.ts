@@ -3103,7 +3103,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				...(options.artifactsDir ? { sessionId: id } : {}),
 			};
 			let result: FrankWorkerResult;
-			if (options.transport === "daemon") {
+			if (options.transport === "daemon" && !(options.keepAlive && !options.runWorker)) {
 				result = await spawnFrankWorker({ ...workerOptions, text: options.text });
 			} else if (options.keepAlive && !options.runWorker) {
 				const handle = await startFrankWorker(workerOptions);
