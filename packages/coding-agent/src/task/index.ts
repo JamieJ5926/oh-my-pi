@@ -636,7 +636,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	) {
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
 		this.#discoveredAgents = discoveredAgents;
-		StartPacer.resetForTests();
 	}
 
 	#isBatchEnabled(): boolean {
