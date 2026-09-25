@@ -13,7 +13,7 @@ import type { RenderResultOptions } from "../../extensibility/custom-tools/types
 import { shimmerEnabled, shimmerText } from "../../modes/theme/shimmer";
 import type { Theme } from "../../modes/theme/theme";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
-import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
+import { AgentRegistry } from "../../registry/agent-registry";
 import type { ToolSession } from "..";
 import {
 	formatBadge,
@@ -350,16 +350,11 @@ export async function executeCancel(
 					registry?.get(id) ??
 					(existing.agentId && existing.agentId !== id ? registry?.get(existing.agentId) : undefined);
 				if (ref && isCancelAuthorized(registry, ref.parentId, ownerId)) {
-					manager.cancel(id);
-					const targetId = registry?.get(id) ? id : (existing.agentId ?? id);
-					const regOutcome = await cancelAgentRegistration(session, ownerId, targetId);
+					await cancelJobTree(session, manager, id, ownerId);
 					cancelOutcomes.push({
 						id,
 						status: "cancelled",
-						message:
-							regOutcome.status === "cancelled"
-								? `Cancelled background job ${id}.`
-								: `Cancelled background job ${id}. Registration: ${regOutcome.message}`,
+						message: `Cancelled background job ${id}.`,
 					});
 					continue;
 				}
@@ -387,12 +382,8 @@ export async function executeCancel(
 			);
 			continue;
 		}
-		const cancelled = manager.cancel(id, ownerFilter);
-		cancelOutcomes.push(
-			cancelled
-				? { id, status: "cancelled", message: `Cancelled background job ${id}.` }
-				: { id, status: "already_completed", message: `Background job ${id} is already completed.` },
-		);
+		await cancelJobTree(session, manager, id, ownerId);
+		cancelOutcomes.push({ id, status: "cancelled", message: `Cancelled background job ${id}.` });
 	}
 	return buildJobResult(session, manager, "cancel", visibleJobs(manager, ids, ownerId), cancelOutcomes);
 }
@@ -416,6 +407,50 @@ function isCancelAuthorized(
 	}
 	return false;
 }
+/**
+ * Agent ids under `root`, including `root` when it is registered.
+ * A missing registry returns only `root`, so a job with no agent tree still cancels.
+ */
+export function descendantAgentIds(registry: AgentRegistry | undefined, root: string): string[] {
+	if (!registry) return [root];
+	const seen: Record<string, true> = {};
+	if (registry.get(root)) seen[root] = true;
+	let grew = true;
+	while (grew && Object.keys(seen).length < 256) {
+		grew = false;
+		for (const ref of registry.list()) {
+			if (ref.parentId && seen[ref.parentId] && !seen[ref.id]) {
+				seen[ref.id] = true;
+				grew = true;
+			}
+		}
+	}
+	if (Object.keys(seen).length === 0) seen[root] = true;
+	return Object.keys(seen);
+}
+
+/**
+ * Cancel a running job and every descendant job or registration under it.
+ * Frank seats spawn frank_accept as a separate child job. Aborting only the
+ * named job leaves those children running (retro-inbox 2026-09-26 09:12).
+ */
+async function cancelJobTree(
+	session: ToolSession,
+	manager: AsyncJobManager,
+	id: string,
+	ownerId: string | undefined,
+): Promise<void> {
+	const targets = descendantAgentIds(session.agentRegistry, id);
+	for (const target of targets) {
+		if (target === ownerId) continue;
+		const job = manager.getJob(target);
+		if (job?.status === "running") manager.cancel(target);
+		if (target !== id) await cancelAgentRegistration(session, ownerId, target);
+	}
+	const named = manager.getJob(id);
+	if (named?.status === "running") manager.cancel(id);
+}
+
 
 /**
  * Kill a non-job-backed agent registration named by `id`: abort any in-flight
