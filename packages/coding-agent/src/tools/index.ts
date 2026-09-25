@@ -284,6 +284,9 @@ export interface ToolSession {
 	 * `edit` at all; the bridge refuses then instead of constructing one.
 	 */
 	getEditReplaceTool?: () => AgentTool | undefined;
+	/** Wraps a tool with the session's extension hooks, for bridges that must
+	 *  build a tool bound to another agent id (Frank `task`/`hub`). */
+	wrapWithHooks?: (tool: AgentTool) => AgentTool;
 	/** Current session context for eval-bridged tool execution. */
 	getToolContext?: () => AgentToolContext | undefined;
 	/** Names currently authorized for invocation through the eval bridge. */

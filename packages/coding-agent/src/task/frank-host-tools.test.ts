@@ -70,6 +70,33 @@ describe("Frank host tool service", () => {
 		}
 	});
 
+	test("task bridge with session hooks builds the tool for the Frank worker and wraps it", async () => {
+		let factorySession: ToolSession | undefined;
+		const wrapped: string[] = [];
+		const hostSession = {
+			getAgentId: () => "Host",
+			getToolContext: () => undefined,
+			toolRegistry: new Map([["task", { execute: async () => ({ content: [{ type: "text", text: "host-registry" }] }) }]]),
+			wrapWithHooks: (tool: { name: string; execute: unknown }) => {
+				wrapped.push(tool.name);
+				return tool;
+			},
+		} as unknown as ToolSession;
+		const original = BUILTIN_TOOLS.task;
+		BUILTIN_TOOLS.task = async session => {
+			factorySession = session;
+			return { name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text", text: "spawned" }] }) } as never;
+		};
+		try {
+			const result = await createFrankHostToolService({ session: hostSession, agentId: "FrankPot" }).handle("task", { task: "child" });
+			expect(result).toEqual({ ok: true, content: "spawned" });
+			expect(factorySession?.getAgentId?.()).toBe("FrankPot");
+			expect(wrapped).toEqual(["task"]);
+		} finally {
+			BUILTIN_TOOLS.task = original;
+		}
+	});
+
 	test("write paths resolve against the Frank worker cwd and preserve special paths", async () => {
 		const paths: string[] = [];
 		const sessionWithRegistry = {

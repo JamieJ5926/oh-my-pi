@@ -2904,6 +2904,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			return cursorBridgeEditTool;
 		};
 		toolSession.getEditReplaceTool = getCursorBridgeEditTool;
+		toolSession.wrapWithHooks = tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner);
 
 		let writeRegistration: Promise<boolean> | undefined;
 		const ensureWriteRegistered = (): Promise<boolean> => {

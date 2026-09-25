@@ -289,7 +289,13 @@ export function createFrankHostToolService(options: {
 				// refusal above already fired). Hooks fire: the instance is an
 				// ExtensionToolWrapper around the session's own runner.
 				const editReplaceTool = name === "edit" ? (options.session.getEditReplaceTool?.() ?? registeredTool) : undefined;
-				const tool = editReplaceTool ?? registeredTool ?? (await factory(bridgedSession));
+				// task files its children under the building session's agent id; the
+				// host registry instance would nest a Frank worker's children under the
+				// host, so build it for the worker and wrap it with the host's hooks.
+				const wrapWithHooks = options.session.wrapWithHooks;
+				const built = name === "task" && wrapWithHooks ? await factory(bridgedSession) : undefined;
+				const workerTool = built && wrapWithHooks ? wrapWithHooks(built) : undefined;
+				const tool = editReplaceTool ?? workerTool ?? registeredTool ?? (await factory(bridgedSession));
 				if (!tool) return { ok: false, error: `host tool is unavailable: ${name}` };
 				const hostContext = bridgedSession.getToolContext?.();
 				const context =
