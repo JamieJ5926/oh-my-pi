@@ -1409,8 +1409,11 @@ export class ExtensionRunner {
 		return result as RunnerEmitResult<TEvent>;
 	}
 
-	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
-		const ctx = this.createContext();
+	async emitToolResult(
+		event: ToolResultEvent,
+		scope?: Pick<ExtensionContext, "cwd" | "sessionManager">,
+	): Promise<ToolResultEventResult | undefined> {
+		const ctx = Object.assign(this.createContext(), scope);
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
 
@@ -1467,8 +1470,12 @@ export class ExtensionRunner {
 	 * pre-execution gate — an unresponsive extension MUST NOT be treated as
 	 * silent consent to run the tool.
 	 */
-	async emitToolCall(event: ToolCallEvent, signal?: AbortSignal): Promise<ToolCallEventResult | undefined> {
-		const ctx = this.createContext();
+	async emitToolCall(
+		event: ToolCallEvent,
+		signal?: AbortSignal,
+		scope?: Pick<ExtensionContext, "cwd" | "sessionManager">,
+	): Promise<ToolCallEventResult | undefined> {
+		const ctx = Object.assign(this.createContext(), scope);
 		const timeoutMs = normalizeHandlerTimeout(
 			this.settings?.get("extensionHandlers.toolCallTimeoutMs") ?? extensionHandlerTimeoutMs,
 		);

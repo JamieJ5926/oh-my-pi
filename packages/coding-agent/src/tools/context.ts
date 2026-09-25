@@ -1,6 +1,6 @@
 import type { AgentToolContext, ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { CustomToolContext } from "../extensibility/custom-tools/types";
-import type { ExtensionUIContext } from "../extensibility/extensions/types";
+import type { ExtensionContext, ExtensionUIContext } from "../extensibility/extensions/types";
 
 declare module "@oh-my-pi/pi-agent-core" {
 	interface AgentToolContext extends CustomToolContext {
@@ -18,6 +18,9 @@ declare module "@oh-my-pi/pi-agent-core" {
 		xdevTierResolved?(tier: "read" | "write" | "exec"): void;
 		/** Set only after an interactive prompt approves provider computer safety checks. */
 		providerSafetyApproved?: boolean;
+		/** Set by the Frank host bridge: tool hooks see the bridged worker's lane
+		 *  (its own prompt and cwd), not the host session executing the call. */
+		hookScope?: Pick<ExtensionContext, "cwd" | "sessionManager">;
 	}
 }
 

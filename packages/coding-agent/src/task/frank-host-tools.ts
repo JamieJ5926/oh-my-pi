@@ -4,6 +4,8 @@ import type { AsyncJob } from "../async";
 import type { TaskToolDetails } from "./types";
 import { ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS } from "../async/job-manager";
 import { buildAsyncResultBatchMessage } from "../session/async-job-delivery";
+import type { ReadonlySessionManager } from "../session/session-manager";
+import type { SessionMessageEntry } from "../session/session-entries";
 
 interface FrankBashArgs {
 	argv: string[];
@@ -95,12 +97,36 @@ interface ChildDrainCall {
 	timeoutMs?: unknown;
 }
 
+/**
+ * The host session as the bridged worker's hooks must see it: the worker's own
+ * rendered prompt is the only conversation, exactly as a native lane's session
+ * starts, so lane-keyed guards classify the call by the worker, not the host.
+ */
+function laneSessionView(host: ReadonlySessionManager, workerPrompt: string): ReadonlySessionManager {
+	const lanePrompt = {
+		type: "message",
+		id: "frank-bridge-lane",
+		parentId: null,
+		timestamp: new Date().toISOString(),
+		message: { role: "user", content: [{ type: "text", text: workerPrompt }], timestamp: Date.now() },
+	} satisfies SessionMessageEntry;
+	return new Proxy(host, {
+		get(target, key) {
+			if (key === "getEntries") return () => [lanePrompt];
+			const value: unknown = Reflect.get(target, key);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+}
+
 export function createFrankHostToolService(options: {
 	session: ToolSession;
 	agentId: string;
 	signal?: AbortSignal;
 	names?: string[];
 	workerCwd?: string;
+	/** The worker's rendered prompt; when set, bridged tool hooks run in the worker's lane scope. */
+	workerPrompt?: string;
 }): FrankHostToolService {
 	const bridgedSession: ToolSession = {
 		...options.session,
@@ -265,12 +291,23 @@ export function createFrankHostToolService(options: {
 				const editReplaceTool = name === "edit" ? (options.session.getEditReplaceTool?.() ?? registeredTool) : undefined;
 				const tool = editReplaceTool ?? registeredTool ?? (await factory(bridgedSession));
 				if (!tool) return { ok: false, error: `host tool is unavailable: ${name}` };
+				const hostContext = bridgedSession.getToolContext?.();
+				const context =
+					hostContext && options.workerPrompt !== undefined
+						? {
+								...hostContext,
+								hookScope: {
+									cwd: options.workerCwd ?? options.session.cwd,
+									sessionManager: laneSessionView(hostContext.sessionManager, options.workerPrompt),
+								},
+							}
+						: hostContext;
 				const result = await tool.execute(
 					toolCallId ?? `frank-bridge:${name}`,
 					translatedArgs,
 					options.signal,
 					undefined,
-					bridgedSession.getToolContext?.(),
+					context,
 				);
 				let text = result.content
 					.filter((part): part is { type: "text"; text: string } => part.type === "text")

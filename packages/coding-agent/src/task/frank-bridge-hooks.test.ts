@@ -160,6 +160,72 @@ describe("Frank bridged mutating tools", () => {
 		expect(executed).toEqual([]);
 	});
 });
+describe("Frank bridged hook lane scope", () => {
+	const workerPrompt = "Complete assignment thoroughly:\n\nROLE_MARK:frank-implementer";
+
+	function firstUserText(ctx: unknown): string | undefined {
+		if (typeof ctx !== "object" || ctx === null || !("sessionManager" in ctx)) return undefined;
+		const manager = ctx.sessionManager;
+		if (typeof manager !== "object" || manager === null || !("getEntries" in manager)) return undefined;
+		if (typeof manager.getEntries !== "function") return undefined;
+		for (const entry of manager.getEntries()) {
+			if (entry.type !== "message" || entry.message.role !== "user") continue;
+			const part = entry.message.content[0];
+			return typeof part === "object" && part.type === "text" ? part.text : undefined;
+		}
+		return undefined;
+	}
+
+	function serviceWithLane(wrapped: AgentTool, lane: { workerPrompt?: string }) {
+		const host = SessionManager.inMemory();
+		host.appendMessage({ role: "user", content: [{ type: "text", text: "root prompt" }], timestamp: Date.now() });
+		return createFrankHostToolService({
+			session: {
+				asyncJobManager: new AsyncJobManager({ maxRunningJobs: 4 }),
+				getAgentId: () => "Host",
+				cwd: "/host/checkout",
+				toolRegistry: new Map([["write", wrapped]]),
+				getToolContext: () => ({ sessionManager: host }),
+			} as unknown as ToolSession,
+			agentId: "frank-test",
+			names: ["write"],
+			workerCwd: "/lane/worktree",
+			...lane,
+		});
+	}
+
+	test("a lane-keyed hook sees the worker prompt and cwd and refuses the bridged write", async () => {
+		const executed: unknown[] = [];
+		const seen: { prompt?: string; cwd?: unknown }[] = [];
+		const wrapped = makeWrappedTool("write", async (_event, ctx) => {
+			const prompt = firstUserText(ctx);
+			seen.push({ prompt, cwd: typeof ctx === "object" && ctx !== null && "cwd" in ctx ? ctx.cwd : undefined });
+			return prompt?.startsWith("Complete assignment thoroughly")
+				? { block: true, reason: "main-checkout write denied" }
+				: undefined;
+		}, executed);
+
+		const result = await serviceWithLane(wrapped, { workerPrompt }).handle("write", { path: "/host/checkout/x", content: "y" }, "call-lane");
+
+		expect(result).toEqual({ ok: false, error: "main-checkout write denied" });
+		expect(executed).toEqual([]);
+		expect(seen).toEqual([{ prompt: workerPrompt, cwd: "/lane/worktree" }]);
+	});
+
+	test("without a worker prompt the hook keeps the runner's own session and the write runs", async () => {
+		const executed: unknown[] = [];
+		const seen: (string | undefined)[] = [];
+		const wrapped = makeWrappedTool("write", async (_event, ctx) => {
+			seen.push(firstUserText(ctx));
+			return undefined;
+		}, executed);
+
+		const result = await serviceWithLane(wrapped, {}).handle("write", { path: "/host/checkout/x", content: "y" }, "call-host");
+
+		expect(result).toEqual({ ok: true, content: "write accepted" });
+		expect(seen).toEqual([undefined]);
+	});
+});
 describe("Frank bridged mutating argument translation", () => {
 	test("write preserves Frank path and content", async () => {
 		const executed: unknown[] = [];
