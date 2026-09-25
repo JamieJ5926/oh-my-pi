@@ -681,6 +681,36 @@ describe("system prompt tool inventory", () => {
 		expect(text).toContain("- frontend-design: Frontend UI workflow");
 	});
 
+	it("omits Routing rule sections for leaf catalogs but preserves them for roots", async () => {
+		const content = `---\nalwaysApply: true\n---\n\n# First rule\n\nKeep this.\n\n# Routing\n\nDrop this coordinator text.\n\n# Project vault writes\n\nKeep this too.`;
+		const options = {
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			alwaysApplyRules: [{ name: "RULES", content, path: "RULES.md" }],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		};
+		const leaf = await buildSystemPrompt({ ...options, catalogSkillNames: [] });
+		const leafText = leaf.systemPrompt.join("\n\n");
+		expect(leafText).toContain("Keep this.");
+		expect(leafText).toContain("Keep this too.");
+		expect(leafText).not.toContain("Drop this coordinator text.");
+		expect(leafText).not.toContain("# Routing");
+
+		const root = await buildSystemPrompt(options);
+		expect(root.systemPrompt.join("\n\n")).toContain("Drop this coordinator text.");
+
+		const onlyRouting = await buildSystemPrompt({
+			...options,
+			catalogSkillNames: [],
+			alwaysApplyRules: [{ name: "RULES", content: "# Routing\n\nOnly heading.\n", path: "RULES.md" }],
+		});
+		expect(onlyRouting.systemPrompt.join("\n\n")).toContain("Only heading.");
+	});
+
 	it("renders only named skills when the agent names its catalog", async () => {
 		const skills = [
 			{
