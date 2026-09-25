@@ -32,5 +32,7 @@ describe("frank cancel orphan", () => {
 		expect(manager.getJob("Pot-job")?.status).toBe("cancelled");
 		expect(cancelled).toContain("Deep");
 		expect(manager.getJob("Pot-job")?.abortController.signal.aborted).toBe(true);
+		expect(registry.get("Pot")).toBeUndefined();
+		expect(registry.get("Deep")).toBeUndefined();
 	});
 });
