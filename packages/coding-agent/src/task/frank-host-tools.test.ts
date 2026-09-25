@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { AsyncJobManager } from "../async";
 import { BUILTIN_TOOLS } from "../tools";
 import type { ToolSession } from "../tools";
@@ -55,32 +58,67 @@ describe("Frank host tool service", () => {
 		}
 	});
 
-test("write paths resolve against the Frank worker cwd", async () => {
-	let writtenPath: string | undefined;
-	const sessionWithRegistry = {
-		toolRegistry: {
-			get: () => ({
-				execute: async (_id: string, args: unknown) => {
-					if (args && typeof args === "object" && "path" in args && typeof args.path === "string") {
-						writtenPath = args.path;
-					}
-					expect(args).toMatchObject({ path: "/tmp/frank-worker/src/file.ts" });
-					return { content: [{ type: "text" as const, text: "written" }] };
-				},
-			}),
-		},
-	} as unknown as ToolSession;
-	const service = createFrankHostToolService({
-		session: sessionWithRegistry,
-		agentId: "frank-test",
-		workerCwd: "/tmp/frank-worker",
-		names: ["write"],
+	test("write paths resolve against the Frank worker cwd and preserve special paths", async () => {
+		const paths: string[] = [];
+		const sessionWithRegistry = {
+			toolRegistry: {
+				get: () => ({
+					execute: async (_id: string, args: unknown) => {
+						if (args && typeof args === "object" && "path" in args && typeof args.path === "string") paths.push(args.path);
+						return { content: [{ type: "text" as const, text: "written" }] };
+					},
+				}),
+			},
+		} as unknown as ToolSession;
+		const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "frank-test", workerCwd: "/tmp/frank-worker", names: ["write"] });
+		for (const path of ["src/file.ts", "~/notes.md", "local://notes.md", "vault://notes.md"]) {
+			await service.handle("write", { path, content: "body" });
+		}
+		expect(paths).toEqual(["/tmp/frank-worker/src/file.ts", "~/notes.md", "local://notes.md", "vault://notes.md"]);
 	});
-	const result = await service.handle("write", { path: "src/file.ts", content: "body" });
 
-	expect(result.ok).toBe(true);
-	expect(writtenPath).toBe("/tmp/frank-worker/src/file.ts");
+test("edit bridge applies old_string/new_string with replace semantics", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-edit-"));
+	try {
+		await Bun.write(path.join(dir, "file.txt"), "before");
+		const sessionWithRegistry = {
+			settings: { get: () => false },
+			toolRegistry: new Map([["edit", { name: "edit" }]]),
+			getToolContext: () => undefined,
+			getAgentId: () => "Host",
+			getSessionId: () => "test-session",
+			getSessionFile: () => null,
+			sessionManager: {
+				getSessionId: () => "test-session",
+				getSessionFile: () => null,
+				getCwd: () => dir,
+			},
+			cwd: dir,
+			enableLsp: false,
+		} as unknown as ToolSession;
+		const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "frank-test", workerCwd: dir, names: ["edit"] });
+		const result = await service.handle("edit", { path: "file.txt", old: "before", new: "after" });
+		expect(result.ok).toBe(true);
+		expect(await Bun.file(path.join(dir, "file.txt")).text()).toBe("after");
+	} finally {
+		await fs.rm(dir, { recursive: true, force: true });
+	}
 });
+
+	test("bash background job body is available through hub inbox", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		manager.register("bash", "Host", async () => "BASH_JOB_BODY", { id: "bash-job", agentId: "Host", ownerId: "Host" });
+		await manager.getJob("bash-job")?.promise;
+		const sessionWithRegistry = {
+			asyncJobManager: manager,
+			getAgentId: () => "Host",
+			toolRegistry: new Map([["bash", { execute: async () => ({ content: [{ type: "text" as const, text: "started" }], details: { async: { state: "running", jobId: "bash-job" } } }) }], ["hub", { execute: async () => ({ content: [{ type: "text" as const, text: "inbox" }] }) }]]),
+		} as unknown as ToolSession;
+		const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "frank-test", names: ["bash", "hub"] });
+		await service.handle("bash", { argv: ["sleep", "1"] });
+		const result = await service.handle("hub", { op: "inbox" });
+		expect(result.content).toContain("BASH_JOB_BODY");
+	});
 	test("bash bridge appends a drain note only for a running background result", async () => {
 		const registeredTool = {
 			execute: async () => ({

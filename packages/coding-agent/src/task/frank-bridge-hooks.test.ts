@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -124,7 +127,7 @@ describe("Frank bridged hook parity", () => {
 });
 
 describe("Frank bridged mutating tools", () => {
-	for (const toolName of ["write", "edit", "bash"]) {
+	for (const toolName of ["write", "bash"]) {
 		test(`a blocking hook refuses the bridged ${toolName} call`, async () => {
 			const executed: unknown[] = [];
 			const toolCallIds: string[] = [];
@@ -141,6 +144,42 @@ describe("Frank bridged mutating tools", () => {
 			expect(toolCallIds).toEqual(["call-mutate"]);
 		});
 	}
+
+	test("the bridged edit call runs replace semantics on a real file", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-edit-"));
+		try {
+			await Bun.write(path.join(dir, "x"), "before");
+			const executed: unknown[] = [];
+			const wrapped = makeWrappedTool("edit", async () => undefined, executed);
+			const service = createFrankHostToolService({
+				session: {
+					asyncJobManager: new AsyncJobManager({ maxRunningJobs: 4 }),
+					getAgentId: () => "Host",
+					toolRegistry: new Map([["edit", wrapped]]),
+					settings: { get: () => false },
+					getToolContext: () => undefined,
+					getSessionId: () => "test-session",
+					getSessionFile: () => null,
+					sessionManager: {
+						getSessionId: () => "test-session",
+						getSessionFile: () => null,
+						getCwd: () => dir,
+					},
+					cwd: dir,
+					enableLsp: false,
+				} as unknown as ToolSession,
+				agentId: "frank-test",
+				names: ["task", "hub", "write", "edit", "bash"],
+				workerCwd: dir,
+			});
+			const result = await service.handle("edit", { path: "x", old: "before", new: "after" }, "call-mutate");
+
+			expect(result.ok).toBe(true);
+			expect(await Bun.file(path.join(dir, "x")).text()).toBe("after");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 
 	test("the default names stay task and hub", () => {
 		expect(makeService(makeWrappedTask(async () => undefined, [])).toolNames()).toEqual(["task", "hub"]);
@@ -167,12 +206,38 @@ describe("Frank bridged mutating argument translation", () => {
 	});
 
 	test("edit maps Frank old and new to replace-mode names", async () => {
-		const executed: unknown[] = [];
-		const wrapped = makeWrappedTool("edit", async () => undefined, executed);
-		const result = await makeMutateService("edit", wrapped).handle("edit", { path: "notes.txt", old: "before", new: "after" });
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-edit-"));
+		try {
+			await Bun.write(path.join(dir, "notes.txt"), "before");
+			const wrapped = makeWrappedTool("edit", async () => undefined, []);
+			const service = createFrankHostToolService({
+				session: {
+					asyncJobManager: new AsyncJobManager({ maxRunningJobs: 4 }),
+					getAgentId: () => "Host",
+					toolRegistry: new Map([["edit", wrapped]]),
+					settings: { get: () => false },
+					getToolContext: () => undefined,
+					getSessionId: () => "test-session",
+					getSessionFile: () => null,
+					sessionManager: {
+						getSessionId: () => "test-session",
+						getSessionFile: () => null,
+						getCwd: () => dir,
+					},
+					cwd: dir,
+					enableLsp: false,
+				} as unknown as ToolSession,
+				agentId: "frank-test",
+				names: ["task", "hub", "write", "edit", "bash"],
+				workerCwd: dir,
+			});
+			const result = await service.handle("edit", { path: "notes.txt", old: "before", new: "after" });
 
-		expect(result.ok).toBe(true);
-		expect(executed).toEqual([{ path: `${process.cwd()}/notes.txt`, old_string: "before", new_string: "after" }]);
+			expect(result.ok).toBe(true);
+			expect(await Bun.file(path.join(dir, "notes.txt")).text()).toBe("after");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("bash quotes each argv token and maps cwd and timeout", async () => {

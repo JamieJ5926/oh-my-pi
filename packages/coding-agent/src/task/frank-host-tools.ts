@@ -1,5 +1,6 @@
 import { BUILTIN_TOOLS } from "../tools";
 import type { ToolSession } from "../tools";
+import { EditTool } from "../edit";
 import type { AsyncJob } from "../async";
 import type { TaskToolDetails } from "./types";
 import { ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS } from "../async/job-manager";
@@ -23,7 +24,7 @@ function shellQuote(value: string): string {
 }
 
 function absoluteToolPath(path: string, workerCwd?: string): string {
-	if (path.startsWith("/")) return path;
+	if (path.startsWith("/") || path.startsWith("~") || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(path)) return path;
 	return `${workerCwd ?? process.cwd()}/${path}`;
 }
 
@@ -255,8 +256,14 @@ export function createFrankHostToolService(options: {
 			try {
 				const beforeDispatch = name === "task" && manager ? new Set(ownedJobs().map(job => job.id)) : undefined;
 				const translatedArgs = translateMutatingArgs(name, args, options.workerCwd);
-				const tool = registeredTool ?? (await factory(bridgedSession));
-				if (!tool) return { ok: false, error: `host tool is unavailable: ${name}` };
+				// Bridged Frank edits arrive as old_string/new_string, which only the
+				// replace variant accepts; the session registry instance follows the
+				// configured edit mode (hashline by default) and would reject them.
+				// Gated on the registry grant: only reached when edit was granted.
+				const tool =
+					name === "edit" && registeredTool
+						? new EditTool(bridgedSession, "replace")
+						: (registeredTool ?? (await factory(bridgedSession)));
 				const result = await tool.execute(
 					toolCallId ?? `frank-bridge:${name}`,
 					translatedArgs,
@@ -264,28 +271,31 @@ export function createFrankHostToolService(options: {
 					undefined,
 					bridgedSession.getToolContext?.(),
 				);
-                let text = result.content
-                    .filter((part): part is { type: "text"; text: string } => part.type === "text")
-                    .map(part => part.text)
-                    .join("");
-                if (beforeDispatch) {
-                    for (const job of ownedJobs()) {
-                        if (!beforeDispatch.has(job.id)) dispatched.add(job.id);
-                    }
-                    const details = result.details as TaskToolDetails | undefined;
-                    if (details?.async?.state === "running") text += `\n\n${BRIDGE_DRAIN_NOTE}`;
-                    return { ok: true, content: text };
-                }
-                if (name === "bash" || name === "run") {
-                    const details = result.details as { async?: { state?: string } } | undefined;
-                    if (details?.async?.state === "running") text += `\n\n${BRIDGE_DRAIN_NOTE}`;
-                    return { ok: true, content: text };
-                }
-                if (name !== "hub") return { ok: true, content: text };
-                const children = drainableChildren(params);
-                if (children.length === 0) return { ok: true, content: text };
-                // `inbox` also carries real messages, so drained bodies join the host tool's own reply.
-                return { ok: true, content: `${text}\n\n${drainBodies(children)}` };
+				let text = result.content
+					.filter((part): part is { type: "text"; text: string } => part.type === "text")
+					.map(part => part.text)
+					.join("");
+				if (beforeDispatch) {
+					for (const job of ownedJobs()) {
+						if (!beforeDispatch.has(job.id)) dispatched.add(job.id);
+					}
+					const details = result.details as TaskToolDetails | undefined;
+					if (details?.async?.state === "running") text += `\n\n${BRIDGE_DRAIN_NOTE}`;
+					return { ok: true, content: text };
+				}
+				if (name === "bash" || name === "run") {
+					const details = result.details as { async?: { state?: string; jobId?: string } } | undefined;
+					if (details?.async?.state === "running") {
+						if (details.async.jobId) dispatched.add(details.async.jobId);
+						text += `\n\n${BRIDGE_DRAIN_NOTE}`;
+					}
+					return { ok: true, content: text };
+				}
+				if (name !== "hub") return { ok: true, content: text };
+				const children = drainableChildren(params);
+				if (children.length === 0) return { ok: true, content: text };
+				// `inbox` also carries real messages, so drained bodies join the host tool's own reply.
+				return { ok: true, content: `${text}\n\n${drainBodies(children)}` };
 			} catch (error) {
 				return { ok: false, error: error instanceof Error ? error.message : String(error) };
 			}
