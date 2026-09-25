@@ -99,6 +99,25 @@ test("write paths resolve against the Frank worker cwd", async () => {
 		expect(result.content).toContain("started");
 		expect(result.content).toContain("Bridge note:");
 	});
+
+	test("bash bridge omits the drain note for a settled result", async () => {
+		const settledTool = {
+			execute: async () => ({
+				content: [{ type: "text" as const, text: "done" }],
+				details: { async: { state: "completed", jobId: "job-2", type: "bash" } },
+			}),
+		};
+		const service = createFrankHostToolService({
+			session: { toolRegistry: { get: () => settledTool } } as unknown as ToolSession,
+			agentId: "frank-test",
+			names: ["bash"],
+		});
+
+		const result = await service.handle("bash", { argv: ["echo", "hi"] });
+
+		expect(result.content).toContain("done");
+		expect(result.content).not.toContain("Bridge note:");
+	});
 });
 
 describe("Frank host tool service: child drain", () => {
