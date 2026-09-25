@@ -389,7 +389,7 @@ describe("subagent HUD lines", () => {
 		for (let index = 1; index < 6; index++) expect(Bun.stripANSI(narrow.join("\n"))).not.toContain(`Child${index}`);
 		expect(Bun.stripANSI(narrow.join("\n"))).toContain("DeepWork");
 	});
-	it("marks a failed lane with a red ✗ and an aborted lane with a dim ⊘ after the name", () => {
+	it("keeps a failed lane with a red ✗ and hides finished and cancelled lanes", () => {
 		const parent = makeSession({ id: "Lead", description: "parent" });
 		const children = [
 			makeSession({ id: "Lead.Live", agent: "explorer", description: "live work" }),
@@ -404,13 +404,9 @@ describe("subagent HUD lines", () => {
 		expect(frame).toContain(
 			`${theme.styledSymbol("status.enabled", "error")} ${theme.bold("Broken")}${theme.fg("error", "✗")}`,
 		);
-		expect(frame).toContain(
-			`${theme.styledSymbol("status.enabled", "muted")} ${theme.bold("Stopped")}${theme.fg("dim", "⊘")}`,
-		);
-		expect(frame).toContain(`${theme.styledSymbol("status.enabled", "success")} ${theme.fg("dim", "Finished")}`);
 		expect(out).toContain("Broken✗");
-		expect(out).toContain("Stopped⊘");
-		expect(out).toMatch(/Finished ⟨reviewer⟩\s+idle row/);
+		expect(out).not.toContain("Stopped");
+		expect(out).not.toContain("Finished");
 	});
 
 	it("tags a non-group row with a dim ⟨role⟩ cell, drops it on a generic task lane, and keeps group rows bracketless", () => {
@@ -724,7 +720,7 @@ describe("subagent HUD lines", () => {
 			ancestry,
 		);
 		const settledText = Bun.stripANSI(settled.subagents.join("\n"));
-		expect(settledText).toContain("Settled");
+		expect(settledText).not.toContain("Settled");
 		expect(settledText).not.toContain("active below");
 
 		const late = makeSession({ id: "Lead.Settled.Late", agent: "explorer" });

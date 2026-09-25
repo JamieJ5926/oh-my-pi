@@ -908,6 +908,9 @@ export function renderSubagentHudLines(
 				);
 				continue;
 			}
+			// A finished or cancelled child with nothing live under it is history: the
+			// parent's dot strip already counts it. Failures stay so they get seen.
+			if (parent !== undefined && session.status !== "failed" && !isSubtreeActive(session)) continue;
 			const name = parent === undefined ? formatTaskId(session.id) : localName(session);
 			const description = session.description?.trim() || session.progress?.description?.trim();
 			// A generated label can arrive wrapped in a prompt tag (`<label>…</label>`)
