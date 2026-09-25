@@ -9,8 +9,7 @@ export function routeOf(selector: string | undefined): string {
 	return `${segments[0]}/${segments[1].split(".")[0]}`;
 }
 
-type Waiter = { resolve: () => void; reject: (error: Error) => void; signal?: AbortSignal; abort?: () => void };
-type RouteState = { rate: number; lastPenaltyAt?: number; lastClimbAt: number };
+type RouteState = { rate: number; lastPenaltyAt?: number; lastClimbAt: number; nextAt?: number };
 
 export class StartPacer {
 	static #instance: StartPacer | undefined;
@@ -18,26 +17,29 @@ export class StartPacer {
 		return (this.#instance ??= new StartPacer(DEFAULT_START_PACING));
 	}
 	static resetForTests(): void {
-		this.#instance?.#clearTimers();
-		this.#instance?.#waiters.clear();
 		this.#instance = undefined;
 	}
 
 	#pacing: StartPacing;
 	#now: () => number;
+	#wait: (ms: number, signal?: AbortSignal) => Promise<void>;
 	#grants = new Map<string, number[]>();
-	#waiters = new Map<string, Waiter[]>();
-	#timers = new Map<string, ReturnType<typeof setTimeout>>();
+	#pending = new Map<string, Promise<void>>();
 	#routes = new Map<string, RouteState>();
 
-	constructor(pacing: StartPacing, now: () => number = Date.now) {
+	constructor(pacing: StartPacing, now: () => number = Date.now, wait?: (ms: number) => Promise<void>) {
 		this.#pacing = { ...pacing };
 		this.#now = now;
+		this.#wait = wait ?? (async (ms, signal) => {
+			await new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(resolve, ms);
+				signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("Aborted")); }, { once: true });
+			});
+		});
 	}
 
 	apply(pacing: StartPacing): void {
 		this.#pacing = { ...pacing };
-		for (const route of this.#waiters.keys()) this.#schedule(route);
 	}
 
 	penalize(route: string): void {
@@ -46,31 +48,78 @@ export class StartPacer {
 		state.rate = Math.max(this.#pacing.floor, Math.floor(state.rate / 2));
 		state.lastPenaltyAt = now;
 		state.lastClimbAt = now;
-		this.#schedule(route);
 	}
 
 	acquire(route: string, signal?: AbortSignal): Promise<void> {
 		if (signal?.aborted) return Promise.reject(new Error("Aborted"));
-		if (this.#grant(route)) return Promise.resolve();
-		return new Promise((resolve, reject) => {
-			const waiter: Waiter = { resolve, reject, signal };
-			waiter.abort = () => {
-				const queue = this.#waiters.get(route);
-				if (queue) {
-					const index = queue.indexOf(waiter);
-					if (index >= 0) queue.splice(index, 1);
-					if (!queue.length) this.#waiters.delete(route);
-				}
-				signal?.removeEventListener("abort", waiter.abort!);
-				reject(new Error("Aborted"));
-				this.#schedule(route);
-			};
-			if (signal) signal.addEventListener("abort", waiter.abort, { once: true });
-			const queue = this.#waiters.get(route) ?? [];
-			queue.push(waiter);
-			this.#waiters.set(route, queue);
-			this.#schedule(route);
+		const state = this.#state(route);
+		const now = this.#now();
+		const recent = (this.#grants.get(route) ?? []).filter(time => time > now - this.#pacing.windowMs);
+		if (recent.length < state.rate) {
+			this.#record(route, state, now);
+			return Promise.resolve();
+		}
+		return this.#enqueue(route, signal);
+	}
+
+	#enqueue(route: string, signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) return Promise.reject(new Error("Aborted"));
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		const onAbort = () => reject(new Error("Aborted"));
+		signal?.addEventListener("abort", onAbort, { once: true });
+		const turn = (this.#pending.get(route) ?? Promise.resolve()).then(() => this.#acquireTurn(route, signal));
+		turn.then(() => resolve(), reject);
+		const settled = turn.then(() => undefined, () => undefined);
+		this.#pending.set(route, settled);
+		settled.then(() => {
+			signal?.removeEventListener("abort", onAbort);
+			if (this.#pending.get(route) === settled) this.#pending.delete(route);
 		});
+		return promise;
+	}
+
+	async #acquireTurn(route: string, signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) throw new Error("Aborted");
+		const state = this.#state(route);
+		const now = this.#now();
+		const recent = (this.#grants.get(route) ?? []).filter(time => time > now - this.#pacing.windowMs);
+		if (recent.length < state.rate) {
+			this.#record(route, state, now);
+			return;
+		}
+		const ordered = [...recent].sort((a, b) => a - b);
+		const releaseAt = ordered[ordered.length - state.rate]! + this.#pacing.windowMs;
+		if (signal?.aborted) throw new Error("Aborted");
+		this.#record(route, state, releaseAt);
+		try {
+			await this.#wait(Math.max(1, releaseAt - now), signal);
+		} catch (error) {
+			this.#unrecord(route, releaseAt);
+			throw error;
+		}
+		if (signal?.aborted) {
+			this.#unrecord(route, releaseAt);
+			throw new Error("Aborted");
+		}
+	}
+
+	#record(route: string, state: RouteState, grantedAt: number): void {
+		const slot = state.rate <= 0 ? 0 : Math.max(1, Math.floor(this.#pacing.windowMs / state.rate));
+		state.nextAt = grantedAt + slot;
+		const grants = [...(this.#grants.get(route) ?? [])];
+		grants.push(grantedAt);
+		this.#grants.set(route, grants);
+		if (grantedAt - Math.max(state.lastPenaltyAt ?? -Infinity, state.lastClimbAt) >= this.#pacing.windowMs && grants.length < state.rate) {
+			state.rate = Math.min(this.#pacing.ceiling, state.rate + 2);
+			state.lastClimbAt = grantedAt;
+		}
+	}
+
+	#unrecord(route: string, grantedAt: number): void {
+		const grants = [...(this.#grants.get(route) ?? [])];
+		const index = grants.indexOf(grantedAt);
+		if (index >= 0) grants.splice(index, 1);
+		this.#grants.set(route, grants);
 	}
 
 	#state(route: string, now = this.#now()): RouteState {
@@ -82,59 +131,4 @@ export class StartPacer {
 		return state;
 	}
 
-	#grant(route: string): boolean {
-		const now = this.#now();
-		const state = this.#state(route, now);
-		if (state.rate <= 0) return true;
-		const grants = (this.#grants.get(route) ?? []).filter(time => time > now - this.#pacing.windowMs && time <= now);
-		if (grants.length >= state.rate) {
-			this.#grants.set(route, grants);
-			return false;
-		}
-		grants.push(now);
-		this.#grants.set(route, grants);
-		return true;
-	}
-
-	#schedule(route: string): void {
-		const old = this.#timers.get(route);
-		if (old) globalThis.clearTimeout(old);
-		this.#timers.delete(route);
-		const queue = this.#waiters.get(route);
-		if (!queue?.length) return;
-		const now = this.#now();
-		const state = this.#state(route, now);
-		const grants = (this.#grants.get(route) ?? []).filter(time => time > now - this.#pacing.windowMs && time <= now);
-		this.#grants.set(route, grants);
-		const cleanSince = Math.max(state.lastPenaltyAt ?? -Infinity, state.lastClimbAt);
-		const climbAt = cleanSince + this.#pacing.windowMs;
-		const delay = state.rate > 0 && grants.length >= state.rate
-			? Math.max(0, Math.min(grants[0]! + this.#pacing.windowMs - now, climbAt - now))
-			: Math.max(0, climbAt - now);
-		const timer = globalThis.setTimeout(() => {
-			if (StartPacer.#instance !== undefined && StartPacer.#instance !== this) return;
-			this.#timers.delete(route);
-			const tick = this.#now();
-			const routeState = this.#state(route, tick);
-			const shouldClimb = tick - Math.max(routeState.lastPenaltyAt ?? -Infinity, routeState.lastClimbAt) >= this.#pacing.windowMs;
-			const waiting = this.#waiters.get(route) ?? [];
-			while (waiting.length && (routeState.rate <= 0 || this.#grant(route))) {
-				const waiter = waiting.shift()!;
-				waiter.signal?.removeEventListener("abort", waiter.abort!);
-				waiter.resolve();
-			}
-			if (!waiting.length) this.#waiters.delete(route);
-			if (shouldClimb) {
-				routeState.rate = Math.min(this.#pacing.ceiling, routeState.rate + 2);
-				routeState.lastClimbAt = tick;
-			}
-			this.#schedule(route);
-		}, delay);
-		this.#timers.set(route, timer);
-	}
-
-	#clearTimers(): void {
-		for (const timer of this.#timers.values()) globalThis.clearTimeout(timer);
-		this.#timers.clear();
-	}
 }
