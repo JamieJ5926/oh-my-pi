@@ -1,3 +1,4 @@
+import { access } from "node:fs/promises";
 import { spawnFrankDaemonWorker } from "./frank-daemon-worker";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -179,6 +180,11 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 	childEnv["WEBFETCH_POLICY"] ??= "on";
 	if (options.apiKey && options.apiKey !== "N/A") childEnv["PI_TRACK_API_KEY"] = options.apiKey;
 	const executable = options.exe.includes(path.sep) && !path.isAbsolute(options.exe) ? path.resolve(options.cwd, options.exe) : options.exe;
+	const cwdExists = await access(options.cwd).then(() => true, () => false);
+	if (!cwdExists) {
+		const executableExists = await access(executable).then(() => true, () => false);
+		throw new Error(`Frank spawn failed: executable ${executable} (${executableExists ? "found" : "missing executable"}), cwd ${options.cwd} (missing cwd)`);
+	}
 	const child = spawn(executable, [
 		"agent", "--endpoint", options.endpoint, "--model", options.model, "--cwd", options.cwd,
 		"--max-tool-calls", String(options.budgets.maxToolCalls), "--wall-secs", String(options.budgets.wallSecs), "--tool-choice", "auto",
@@ -187,6 +193,21 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 		...(options.role ? ["--instructions-root", options.role.root, "--instructions-role", options.role.name] : []),
 		...(options.hostTools?.length ? ["--host-tools", options.hostTools.join(",")] : []),
 	], { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"], env: childEnv });
+	await new Promise<void>((resolve, reject) => {
+		child.once("spawn", resolve);
+		child.once("error", error => {
+			void Promise.all([
+				access(executable).then(() => true, () => false),
+				access(options.cwd).then(() => true, () => false),
+			]).then(([executableExists, cwdExistsAtFailure]) => {
+				reject(new Error(`Frank spawn failed: executable ${executable} (${executableExists ? "found" : "missing executable"}), cwd ${options.cwd} (${cwdExistsAtFailure ? "found" : "missing cwd"}): ${error.message}`));
+			});
+		});
+	});
+	if (options.signal?.aborted) {
+		child.kill("SIGKILL");
+		throw options.signal.reason ?? new Error("Frank worker aborted");
+	}
 	const stdout = createInterface({ input: child.stdout });
 	const stderr = createInterface({ input: child.stderr });
 	const { promise: closed, resolve: markClosed } = Promise.withResolvers<[number | null, NodeJS.Signals | null]>();

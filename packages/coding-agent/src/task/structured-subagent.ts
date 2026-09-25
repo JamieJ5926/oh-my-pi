@@ -47,16 +47,18 @@ import {
 } from "./types";
 import { type NestedRepoPatch, parseIsolationMode } from "./worktree";
 
-async function resolveFrankAcceptExe(cwd: string): Promise<string> {
+export async function resolveFrankAcceptExe(cwd: string): Promise<string> {
 	const pinned = process.env.FRANK_ACCEPT_BIN?.trim();
 	if (pinned) return pinned;
-	const repoBuild = path.join(cwd, "target", "debug", "frank_accept");
-	try {
-		await fs.access(repoBuild, fs.constants.X_OK);
-		return repoBuild;
-	} catch {
-		return path.join(os.homedir(), ".local", "bin", "frank_accept");
+	const userInstall = path.join(os.homedir(), ".local", "bin", "frank_accept");
+	if (process.env.FRANK_ACCEPT_ALLOW_REPO_BUILD === "1") {
+		const repoBuild = path.join(cwd, "target", "debug", "frank_accept");
+		try {
+			await fs.access(repoBuild, fs.constants.X_OK);
+			return repoBuild;
+		} catch {}
 	}
+	return userInstall;
 }
 
 async function resolveFrankBin(cwd: string): Promise<string> {
