@@ -50,6 +50,7 @@ import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
+import { StartPacer, routeOf } from "./start-pacer";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
@@ -635,6 +636,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	) {
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
 		this.#discoveredAgents = discoveredAgents;
+		StartPacer.resetForTests();
 	}
 
 	#isBatchEnabled(): boolean {
@@ -850,6 +852,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			item: TaskItem;
 			index: number;
 			blocking: boolean;
+			route: string;
 			progress: AgentProgress;
 		}> = [];
 		for (const [index, item] of spawnItems.entries()) {
@@ -863,6 +866,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				item,
 				index,
 				blocking: itemBlocking[index],
+				route: routeOf(Array.isArray(policy.modelOverride) ? policy.modelOverride[0] : policy.modelOverride),
 				progress: {
 					index,
 					id: agentId,
@@ -924,6 +928,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
 					agentId: spawn.agentId,
 					progress: spawn.progress,
+					route: spawn.route,
 					ircEnabled,
 					buildDetails: buildAsyncDetails,
 					onUpdate,
@@ -1083,12 +1088,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawnParams: TaskParams;
 		agentId: string;
 		progress: AgentProgress;
+		route: string;
 		ircEnabled: boolean;
 		buildDetails: () => TaskToolDetails;
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
 		onSettled?: (failed: boolean) => void;
 	}): string {
-		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
+		const { manager, toolCallId, spawnParams, agentId, progress, route, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			if (aborted) {
@@ -1124,6 +1130,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					this.#releaseSpawnSemaphore();
 				};
 				try {
+					const pacing = this.session.settings.get("task.startPacing");
+					StartPacer.instance().apply(pacing);
+					await StartPacer.instance().acquire(route, runSignal);
 					await semaphore.acquire(runSignal);
 					semaphoreHeld = true;
 				} catch {
@@ -1224,12 +1233,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					if (error instanceof TaskJobError) {
 						throw error;
 					}
+					const message = error instanceof Error ? error.message : String(error);
+					if (!runSignal.aborted && (message.includes("429") || message.includes("model_cooldown"))) {
+						StartPacer.instance().penalize(route);
+					}
 					progress.status = "failed";
 					progress.durationMs = Math.max(0, Date.now() - startedAt);
 					onSettled?.(true);
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
-					const message = error instanceof Error ? error.message : String(error);
 					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {

@@ -5014,6 +5014,10 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.startPacing": {
+		type: "object",
+		default: { windowMs: 10000, initial: 15, floor: 1, ceiling: 30 },
+	},
 	"task.maxConcurrency": {
 		type: "number",
 		default: 32,
