@@ -74,14 +74,6 @@ Pass large payloads via `local://<path>` URIs, NEVER inline text.
 # Change       ← step-by-step add/remove/rename; APIs and patterns
 # Acceptance   ← observable result; no project-wide commands
 
-# Available Agents
-{{#if spawningDisabled}}
-Agent spawning is currently disabled.
-{{else}}
-Pick the most specific agent. Omit `agent` only when the spawn-policy default is that agent.
-{{#list agents join="\n"}}
-### {{name}}{{#if readOnly}} (READ-ONLY){{/if}}{{#if blocking}} (BLOCKING: inline result){{/if}}
-{{description}}
-{{#if readOnly}}Use ONLY for investigation; do edits yourself or assign to a writing agent.{{/if}}
-{{/list}}
+{{#if agentRoster}}
+{{agentRoster}}
 {{/if}}

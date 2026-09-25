@@ -29,7 +29,7 @@ import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import { isReadOnlyAgent } from "./read-only-policy";
-import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
+import { isScoutSpawnable, resolveSpawnPolicy, type ResolvedSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -60,6 +60,23 @@ function renderSubagentUserPrompt(assignment: string): string {
 	});
 }
 
+export interface RosterSeat {
+	name: string;
+	description: string;
+	readOnly: boolean;
+	blocking: boolean;
+}
+
+export function filterTaskAgentRoster(roster: readonly RosterSeat[], policy: ResolvedSpawnPolicy): string {
+	if (!policy.enabled) return "";
+	const agents = policy.allowedAgents === null ? roster : roster.filter(agent => policy.allowedAgents?.includes(agent.name));
+	const lines = agents.map(agent => {
+		const tags = `${agent.readOnly ? " (READ-ONLY)" : ""}${agent.blocking ? " (BLOCKING: inline result)" : ""}`;
+		const usage = agent.readOnly ? "\nUse ONLY for investigation; do edits yourself or assign to a writing agent." : "";
+		return `### ${agent.name}${tags}\n${agent.description}${usage}`;
+	});
+	return ["# Available Agents", "Pick the most specific agent. Omit `agent` only when the spawn-policy default is that agent.", ...lines].join("\n");
+}
 function createUsageTotals(): Usage {
 	return {
 		input: 0,
@@ -146,7 +163,7 @@ interface TaskDescriptionOptions {
 }
 
 /** Render the tool description from a cached agent list and current settings. */
-function renderDescription(options: TaskDescriptionOptions): string {
+export function renderDescription(options: TaskDescriptionOptions): string {
 	const spawnPolicy = resolveSpawnPolicy(options.parentSpawns);
 	const spawningDisabled = !spawnPolicy.enabled;
 	let filteredAgents =
@@ -168,8 +185,8 @@ function renderDescription(options: TaskDescriptionOptions): string {
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
 	return prompt.render(taskDescriptionTemplate, {
 		agents: renderedAgents,
+		agentRoster: filterTaskAgentRoster(renderedAgents, spawnPolicy),
 		scoutAvailable,
-		spawningDisabled,
 		defaultAgent: spawnPolicy.defaultAgent,
 		isolationEnabled: options.isolationEnabled,
 		applyIsolatedChanges: options.applyIsolatedChanges,
