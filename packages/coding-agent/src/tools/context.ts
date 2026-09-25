@@ -18,9 +18,10 @@ declare module "@oh-my-pi/pi-agent-core" {
 		xdevTierResolved?(tier: "read" | "write" | "exec"): void;
 		/** Set only after an interactive prompt approves provider computer safety checks. */
 		providerSafetyApproved?: boolean;
-		/** Set by the Frank host bridge: tool hooks see the bridged worker's lane
-		 *  (its own prompt and cwd), not the host session executing the call. */
-		hookScope?: Pick<ExtensionContext, "cwd" | "sessionManager">;
+		/** Set by the Frank host bridge: tool hooks see the bridged worker's own
+		 *  prompt as the session, so lane-keyed guards treat the call as a lane.
+		 *  cwd stays the host's, which guards read as the main checkout. */
+		hookScope?: Pick<ExtensionContext, "sessionManager">;
 	}
 }
 

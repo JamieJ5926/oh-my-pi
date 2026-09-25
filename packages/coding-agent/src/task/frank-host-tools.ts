@@ -297,7 +297,6 @@ export function createFrankHostToolService(options: {
 						? {
 								...hostContext,
 								hookScope: {
-									cwd: options.workerCwd ?? options.session.cwd,
 									sessionManager: laneSessionView(hostContext.sessionManager, options.workerPrompt),
 								},
 							}

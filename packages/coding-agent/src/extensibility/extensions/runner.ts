@@ -1411,7 +1411,7 @@ export class ExtensionRunner {
 
 	async emitToolResult(
 		event: ToolResultEvent,
-		scope?: Pick<ExtensionContext, "cwd" | "sessionManager">,
+		scope?: Pick<ExtensionContext, "sessionManager">,
 	): Promise<ToolResultEventResult | undefined> {
 		const ctx = Object.assign(this.createContext(), scope);
 		const currentEvent: ToolResultEvent = { ...event };
@@ -1473,7 +1473,7 @@ export class ExtensionRunner {
 	async emitToolCall(
 		event: ToolCallEvent,
 		signal?: AbortSignal,
-		scope?: Pick<ExtensionContext, "cwd" | "sessionManager">,
+		scope?: Pick<ExtensionContext, "sessionManager">,
 	): Promise<ToolCallEventResult | undefined> {
 		const ctx = Object.assign(this.createContext(), scope);
 		const timeoutMs = normalizeHandlerTimeout(

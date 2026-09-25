@@ -194,7 +194,7 @@ describe("Frank bridged hook lane scope", () => {
 		});
 	}
 
-	test("a lane-keyed hook sees the worker prompt and cwd and refuses the bridged write", async () => {
+	test("a lane-keyed hook sees the worker prompt, keeps the host cwd, and refuses the bridged write", async () => {
 		const executed: unknown[] = [];
 		const seen: { prompt?: string; cwd?: unknown }[] = [];
 		const wrapped = makeWrappedTool("write", async (_event, ctx) => {
@@ -209,7 +209,7 @@ describe("Frank bridged hook lane scope", () => {
 
 		expect(result).toEqual({ ok: false, error: "main-checkout write denied" });
 		expect(executed).toEqual([]);
-		expect(seen).toEqual([{ prompt: workerPrompt, cwd: "/lane/worktree" }]);
+		expect(seen).toEqual([{ prompt: workerPrompt, cwd: process.cwd() }]);
 	});
 
 	test("without a worker prompt the hook keeps the runner's own session and the write runs", async () => {
