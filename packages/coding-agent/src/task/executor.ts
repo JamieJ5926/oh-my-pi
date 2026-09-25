@@ -3051,7 +3051,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				apiKeyEnv: options.apiKeyEnv,
 				apiKey: options.apiKey,
 				hostTools: hostToolService ? ["task", "hub"] : [],
-				onToolRequest: hostToolService ? req => hostToolService.handle(req.name, req.args) : undefined,
+				onToolRequest: hostToolService ? req => hostToolService.handle(req.name, req.args, String(req.call_id)) : undefined,
 				signal,
 				onEvent: event => {
 					events.push(event);
