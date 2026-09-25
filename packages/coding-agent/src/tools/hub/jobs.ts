@@ -445,7 +445,7 @@ async function cancelJobTree(
 		if (target === ownerId) continue;
 		const job = manager.getJob(target) ?? manager.getAllJobs().find(candidate => candidate.agentId === target);
 		if (job?.status === "running") manager.cancel(job.id);
-		if (target !== id) await cancelAgentRegistration(session, ownerId, target);
+		await cancelAgentRegistration(session, ownerId, target);
 	}
 	const named = manager.getJob(id);
 	if (named?.status === "running") manager.cancel(id);
