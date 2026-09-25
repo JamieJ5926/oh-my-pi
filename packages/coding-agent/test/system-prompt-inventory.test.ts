@@ -681,6 +681,50 @@ describe("system prompt tool inventory", () => {
 		expect(text).toContain("- frontend-design: Frontend UI workflow");
 	});
 
+	it("renders only named skills when the agent names its catalog", async () => {
+		const skills = [
+			{
+				name: "poteto-mode",
+				description: "Named skill a leaf loads",
+				filePath: path.join(tempDir, "poteto.md"),
+				baseDir: tempDir,
+				source: "test",
+			},
+			{
+				name: "browser-drive",
+				description: "Unnamed skill a leaf never loads",
+				filePath: path.join(tempDir, "browser.md"),
+				baseDir: tempDir,
+				source: "test",
+			},
+		];
+		const named = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills,
+			catalogSkillNames: ["poteto-mode"],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const namedText = named.systemPrompt.join("\n\n");
+		expect(namedText).toContain("- poteto-mode: Named skill a leaf loads");
+		expect(namedText).not.toContain("browser-drive");
+
+		const empty = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills,
+			catalogSkillNames: [],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		expect(empty.systemPrompt.join("\n\n")).not.toContain("<skills>");
+	});
+
 	it("omits the read-only scout delegation gate when scout is unavailable", async () => {
 		const opts = { toolNames: ["read", "bash", "task"], tools: TOOLS };
 		const withScout = (

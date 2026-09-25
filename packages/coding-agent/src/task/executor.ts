@@ -3643,6 +3643,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				requireYieldTool: true,
 				contextFiles: options.contextFiles,
 				skills: options.skills,
+				catalogSkillNames: agent.autoloadSkills ?? [],
 				promptTemplates: options.promptTemplates,
 				workspaceTree: options.workspaceTree,
 				rules: options.rules,

@@ -661,6 +661,12 @@ export interface BuildSystemPromptOptions {
 	autoQaEnabled?: boolean;
 	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
 	writeTransportOnly?: boolean;
+	/**
+	 * Skill names this agent loads by name (`autoloadSkills`). When set, the rendered
+	 * `<skills>` catalog keeps only those names. `skill://` resolution is unchanged.
+	 * Omit it for a session that discovers skills (the full visible catalog).
+	 */
+	catalogSkillNames?: readonly string[];
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -720,6 +726,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs = "",
 		autoQaEnabled = false,
 		writeTransportOnly = false,
+		catalogSkillNames,
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
@@ -955,9 +962,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 	// Filter skills for the rendered system prompt:
 	// - require the `read` tool so the model can actually fetch skill content;
-	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
+	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>);
+	// - when the agent names its skills, render only those. An empty list renders none.
 	const hasRead = toolNames.includes("read");
-	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	const visibleSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	const filteredSkills =
+		catalogSkillNames === undefined
+			? visibleSkills
+			: visibleSkills.filter(skill => catalogSkillNames.includes(skill.name));
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,

@@ -570,6 +570,11 @@ export interface CreateAgentSessionOptions {
 	agentId?: string;
 	/** Display name for the agent in IRC. Default: "main" or "sub". */
 	agentDisplayName?: string;
+	/**
+	 * Skill names this agent loads by name. When set, the rendered `<skills>` catalog
+	 * keeps only these names. Undefined keeps the full visible catalog.
+	 */
+	catalogSkillNames?: readonly string[];
 	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
 	agentRegistry?: AgentRegistry;
 	/**
@@ -3197,6 +3202,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				includeModelInPrompt: settings.get("includeModelInPrompt"),
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
 				renderMermaid: settings.get("tui.renderMermaid"),
+				catalogSkillNames: options.catalogSkillNames,
 				activeRepoContext,
 			});
 
