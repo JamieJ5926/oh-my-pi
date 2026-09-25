@@ -4,7 +4,7 @@ import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { answerExitDecision, foldEventsToText } from "./frank-worker-fold";
-import type { FrankControl, FrankEvent, FrankWorkerResult, StartFrankWorkerOptions } from "./frank-worker";
+import type { FrankControl, FrankEvent, FrankToolRequest, FrankToolResult, FrankWorkerResult, StartFrankWorkerOptions } from "./frank-worker";
 
 type DaemonOptions = StartFrankWorkerOptions & { text: string; artifactsDir: string; id: string };
 type TerminalName = Extract<FrankControl, { kind: "terminal" }>['terminal'];
@@ -37,6 +37,27 @@ function terminalResult(event: unknown): Extract<FrankControl, { kind: "terminal
 function eventFromAttach(value: Extract<AttachLine, { kind: "event" }>): FrankEvent {
 	return { type: "event", seq: value.seq, event: { kind: value.event, run_id: value.run_id, seq: value.seq } };
 }
+function parseHostToolRequest(line: string): FrankToolRequest | undefined {
+	try {
+		const value: unknown = JSON.parse(line);
+		if (!isRecord(value) || value.type !== "tool_request" || value.version !== 1) return undefined;
+		if (typeof value.call_id !== "number" || typeof value.turn_id !== "number" || typeof value.name !== "string" || !value.name || !("args" in value)) return undefined;
+		return { call_id: value.call_id, turn_id: value.turn_id, name: value.name, args: value.args };
+	} catch {
+		return undefined;
+	}
+}
+
+
+function writeHostToolResult(stream: NodeJS.WritableStream, callId: number, result: FrankToolResult): Promise<void> {
+	const response = result.ok
+		? { op: "tool_result", call_id: callId, ok: true, content: result.content ?? "" }
+		: { op: "tool_result", call_id: callId, ok: false, error: result.error ?? "host tool failed" };
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	stream.write(`${JSON.stringify(response)}\n`, error => error ? reject(error) : resolve());
+	return promise;
+}
+
 
 function daemonEnvironment(options: DaemonOptions, daemonDir: string): NodeJS.ProcessEnv {
 	const keyName = options.apiKeyEnv ?? "PI_TRACK_API_KEY";
@@ -48,6 +69,7 @@ function daemonEnvironment(options: DaemonOptions, daemonDir: string): NodeJS.Pr
 		FRANK_DAEMON_KEY_ENV: keyName,
 		FRANK_DAEMON_TOOL_CHOICE: "auto",
 		FRANK_DAEMON_READ_ROOT: "any",
+		...(options.hostTools?.length ? { FRANK_DAEMON_HOST_TOOLS: options.hostTools.join(",") } : {}),
 		...(options.apiKey && options.apiKey !== "N/A" ? { [keyName]: options.apiKey } : {}),
 		FRANK_DAEMON_WALL_SECS: String(options.budgets.wallSecs),
 		FRANK_DAEMON_MAX_TOOL_CALLS: String(options.budgets.maxToolCalls),
@@ -94,7 +116,7 @@ async function runLoggedCli(executable: string, args: string[], options: { cwd: 
 async function admitRun(options: DaemonOptions, env: NodeJS.ProcessEnv, stateDir: string): Promise<void> {
 	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
 	const logPath = path.join(stateDir, "cli.log");
-	const args = ["daemon", "start", "--task", options.text, "--session", daemonSessionKey(options.artifactsDir, options.id), "--allow", "all", "--key-env", options.apiKeyEnv ?? "PI_TRACK_API_KEY", "--json"];
+	const args = ["daemon", "start", "--task", options.text, "--session", daemonSessionKey(options.artifactsDir, options.id), "--allow", "all", "--key-env", options.apiKeyEnv ?? "PI_TRACK_API_KEY", "--cwd", options.cwd, "--endpoint", options.endpoint, "--model", options.model, "--budgets", JSON.stringify(options.budgets), ...(options.role ? ["--profile", options.role.name] : []), "--json"];
 	const startCode = await runLoggedCli(bin, args, { cwd: options.cwd, env, logPath });
 	if (startCode === 0) return;
 	const existingStatus = await runLoggedCli(bin, ["daemon", "status"], { cwd: options.cwd, env, logPath });
@@ -124,14 +146,14 @@ export async function spawnFrankDaemonWorker(options: DaemonOptions): Promise<Fr
 	await writeFile(path.join(daemonDir, "session-key"), `${sessionKey}\n`);
 	const env = daemonEnvironment(options, stateDir);
 	const abortListener = () => {
-		const stop = runCli(bin, ["daemon", "stop", "--json"], { cwd: options.cwd, env, stdio: "ignore" });
+		const stop = runCli(bin, ["cancel", "--session", sessionKey, "--json"], { cwd: options.cwd, env, stdio: "ignore" });
 		stop.once("error", () => {});
 	};
 	options.signal?.addEventListener("abort", abortListener, { once: true });
 	try {
 		await admitRun(options, env, stateDir);
 		if (options.signal?.aborted) {
-			const stop = runCli(bin, ["daemon", "stop", "--json"], { cwd: options.cwd, env, stdio: "ignore" });
+			const stop = runCli(bin, ["cancel", "--session", sessionKey, "--json"], { cwd: options.cwd, env, stdio: "ignore" });
 			stop.once("error", () => {});
 			throw options.signal.reason ?? new Error("Frank worker aborted");
 		}
@@ -145,6 +167,12 @@ export async function spawnFrankDaemonWorker(options: DaemonOptions): Promise<Fr
 		const output = createInterface({ input: child.stdout });
 		output.on("line", line => {
 			chain = chain.then(async () => {
+				const toolRequest = parseHostToolRequest(line);
+				if (toolRequest) {
+					const result = options.onToolRequest ? await options.onToolRequest(toolRequest) : { ok: false, error: "host tools are not enabled for this worker" };
+					if (child.stdin) await writeHostToolResult(child.stdin, toolRequest.call_id, result);
+					return;
+				}
 				// The mirror is complete only when its writer sees TerminalDone; post-crash recovery attaches to the live daemon.
 				await appendFile(eventsPath, `${line}\n`);
 				const parsed = parseAttachLine(line);
@@ -200,7 +228,7 @@ export async function attachFrankDaemonLane(options: { artifactsDir: string; id:
 	let stateDir = daemonStateDir();
 	try { stateDir = (await readFile(path.join(markerDir, "state-dir"), "utf8")).trim() || stateDir; } catch {}
 	let sessionKey: string;
-	try { sessionKey = (await readFile(path.join(markerDir, "session-key"), "utf8")).trim() || daemonSessionKey(options.artifactsDir, options.id); } catch { sessionKey = daemonSessionKey(options.artifactsDir, options.id); }
+	try { sessionKey = (await readFile(path.join(markerDir, "session-key"), "utf8")).trim() || daemonSessionKey(options.artifactsDir, options.id); } catch (error) { sessionKey = error instanceof Error && "code" in error && error.code === "ENOENT" ? options.id : daemonSessionKey(options.artifactsDir, options.id); }
 	const env = { ...process.env, ...options.env, FRANK_DAEMON_DIR: stateDir };
 	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
 	const child = runCli(bin, ["attach", "--session", sessionKey, "--json"], { cwd: options.cwd, env });
