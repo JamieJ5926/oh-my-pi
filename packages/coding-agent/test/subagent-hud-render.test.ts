@@ -1222,3 +1222,16 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("subagent HUD Frank tag", () => {
+	it("tags a Frank lane with ⟨🧟⟩ after its role and leaves a native lane untagged", () => {
+		const parent = makeSession({ id: "Lead", description: "parent" });
+		const frank = makeSession({ id: "Lead.Writer", agent: "implementer", runtime: "frank", description: "frank work" });
+		const native = makeSession({ id: "Lead.Reader", agent: "reviewer", description: "native work" });
+		const ancestry = [frank, native].map(child => ({ id: child.id, parentId: parent.id }));
+		const out = Bun.stripANSI(renderSubagentHudLines([parent, frank, native], 200, ancestry, 2).subagents.join("\n"));
+		expect(out).toContain("Writer ⟨implementer⟩⟨\u{1F9DF}⟩");
+		expect(out).toContain("Reader ⟨reviewer⟩");
+		expect(out).not.toContain("Reader ⟨reviewer⟩⟨\u{1F9DF}⟩");
+	});
+});

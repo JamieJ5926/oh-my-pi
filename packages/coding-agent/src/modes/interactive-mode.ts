@@ -717,6 +717,7 @@ export function renderSubagentHudLines(
 		state: ObservableSession["status"];
 		name: string;
 		role?: string;
+		frank?: boolean;
 		description: string;
 		strip: string;
 		token: string;
@@ -730,9 +731,10 @@ export function renderSubagentHudLines(
 			row.role && row.role !== "task"
 				? ` ${theme.fg("dim", `${SUBAGENT_HUD_ROLE_OPEN}${row.role}${SUBAGENT_HUD_ROLE_CLOSE}`)}`
 				: "";
+		const frank = row.frank ? theme.fg("dim", `${SUBAGENT_HUD_ROLE_OPEN}\u{1F9DF}${SUBAGENT_HUD_ROLE_CLOSE}`) : "";
 		return {
 			depth: row.depth,
-			left: `${marker}${dot(row.state)} ${name}${outcome}${role}`,
+			left: `${marker}${dot(row.state)} ${name}${outcome}${role}${frank}`,
 			description: row.description,
 			strip: row.strip,
 			token: row.token,
@@ -877,6 +879,7 @@ export function renderSubagentHudLines(
 						marker: "",
 						state: aggregateState(group),
 						name: `${role} ×${group.length}`,
+						frank: group.every(member => member.runtime === "frank"),
 						description: group.map(member => localName(member)).join("  "),
 						strip: stripOf(group.map(member => member.status)),
 						token: formatHudTokenCount(group.reduce((sum, member) => sum + tokens(member), 0)),
@@ -934,6 +937,7 @@ export function renderSubagentHudLines(
 					state: session.status,
 					name,
 					role: roleOf(session),
+					frank: session.runtime === "frank",
 					description: preview,
 					strip: stripFor(session),
 					token,

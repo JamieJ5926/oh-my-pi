@@ -8,6 +8,8 @@ export interface ObservableSession {
 	label: string;
 	agent?: string;
 	canDelegate?: boolean;
+	/** "frank" for lanes run by the Frank worker; the HUD tags them ⟨🧟⟩. */
+	runtime?: "frank";
 	description?: string;
 	status: "active" | "completed" | "failed" | "aborted";
 	sessionFile?: string;
@@ -201,6 +203,7 @@ export class SessionObserverRegistry {
 							existing.parentToolCallId = payload.parentToolCallId ?? existing.parentToolCallId;
 							existing.detached = payload.detached ?? existing.detached;
 							existing.canDelegate = payload.canDelegate ?? existing.canDelegate;
+							existing.runtime = payload.runtime ?? existing.runtime;
 							if (payload.description) existing.description = payload.description;
 							if (payload.sessionFile) existing.sessionFile = payload.sessionFile;
 						} else {
@@ -215,6 +218,7 @@ export class SessionObserverRegistry {
 								parentToolCallId: payload.parentToolCallId,
 								detached: payload.detached,
 								canDelegate: payload.canDelegate,
+								runtime: payload.runtime,
 								index: payload.index,
 								lastUpdate: Date.now(),
 							});

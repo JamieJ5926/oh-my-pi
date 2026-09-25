@@ -102,6 +102,8 @@ export interface SubagentLifecyclePayload {
 	 */
 	detached?: boolean;
 	canDelegate?: boolean;
+	/** "frank" when the lane runs through the Frank worker; absent for native lanes. */
+	runtime?: "frank";
 }
 
 /** Display cap for a normalized one-line label (roster line, registry `displayName`, prompt field). */

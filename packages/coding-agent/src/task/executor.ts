@@ -3048,6 +3048,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 		parentToolCallId: options.parentToolCallId,
 		detached: options.detached,
 		index,
+		runtime: "frank",
 	});
 	let rawOutput = "";
 	let exitCode = 1;
