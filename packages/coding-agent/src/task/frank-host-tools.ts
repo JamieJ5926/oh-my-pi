@@ -5,6 +5,47 @@ import type { TaskToolDetails } from "./types";
 import { ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS } from "../async/job-manager";
 import { buildAsyncResultBatchMessage } from "../session/async-job-delivery";
 
+interface FrankBashArgs {
+	argv: string[];
+	cwd?: string;
+	timeout_ms?: number;
+}
+
+interface FrankEditArgs {
+	path: string;
+	old: string;
+	new: string;
+	then_run?: unknown;
+}
+
+function shellQuote(value: string): string {
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function absoluteToolPath(path: string): string {
+	return path.startsWith("/") ? path : `${process.cwd()}/${path}`;
+}
+
+function translateMutatingArgs(name: string, args: unknown): unknown {
+	if (typeof args !== "object" || args === null) return args;
+	if (name === "bash" || name === "run") {
+		if (!("argv" in args) || !Array.isArray(args.argv) || !args.argv.every(part => typeof part === "string")) return args;
+		const argv = args.argv;
+		const cwd = "cwd" in args && typeof args.cwd === "string" ? absoluteToolPath(args.cwd) : undefined;
+		const timeout = "timeout_ms" in args && typeof args.timeout_ms === "number" ? args.timeout_ms / 1000 : undefined;
+		return {
+			command: argv.map(shellQuote).join(" "),
+			...(cwd !== undefined ? { cwd } : {}),
+			...(timeout !== undefined ? { timeout } : {}),
+		};
+	}
+	if (name === "edit") {
+		if (!("path" in args) || typeof args.path !== "string" || !("old" in args) || typeof args.old !== "string" || !("new" in args) || typeof args.new !== "string") return args;
+		return { path: args.path, old_string: args.old, new_string: args.new };
+	}
+	return args;
+}
+
 export interface FrankHostToolResult {
 	ok: boolean;
 	content?: string;
@@ -13,6 +54,7 @@ export interface FrankHostToolResult {
 
 export interface FrankHostToolService {
 	handle(name: string, args: unknown, toolCallId?: string): Promise<FrankHostToolResult>;
+	toolNames(): string[];
 	closed: boolean;
 }
 
@@ -172,6 +214,7 @@ export function createFrankHostToolService(options: {
 	};
 
 	return {
+		toolNames: () => Object.keys(enabled),
 		get closed() {
 			return closed;
 		},
@@ -198,13 +241,16 @@ export function createFrankHostToolService(options: {
 			}
 			const factory = Object.entries(BUILTIN_TOOLS).find(([toolName]) => toolName === name)?.[1];
 			if (!factory) return { ok: false, error: `unknown host tool: ${name}` };
+			const requireRegistry = name === "write" || name === "edit" || name === "bash" || name === "run";
+			const registeredTool = options.session.toolRegistry?.get(name);
 			try {
 				const beforeDispatch = name === "task" && manager ? new Set(ownedJobs().map(job => job.id)) : undefined;
-				const tool = options.session.toolRegistry?.get(name) ?? (await factory(bridgedSession));
+				const translatedArgs = translateMutatingArgs(name, args);
+				const tool = registeredTool ?? (await factory(bridgedSession));
 				if (!tool) return { ok: false, error: `host tool is unavailable: ${name}` };
 				const result = await tool.execute(
 					toolCallId ?? `frank-bridge:${name}`,
-					args,
+					translatedArgs,
 					options.signal,
 					undefined,
 					bridgedSession.getToolContext?.(),

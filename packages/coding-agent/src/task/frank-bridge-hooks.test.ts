@@ -26,16 +26,16 @@ afterAll(() => {
 	tempDir.removeSync();
 });
 
-function makeWrappedTask(handler: (...args: unknown[]) => Promise<unknown>, executed: unknown[]): AgentTool {
+function makeWrappedTool(toolName: string, handler: (...args: unknown[]) => Promise<unknown>, executed: unknown[]): AgentTool {
 	const recording: AgentTool = {
-		name: "task",
-		label: "Task",
-		description: "Test task tool",
+		name: toolName,
+		label: toolName,
+		description: `Test ${toolName} tool`,
 		parameters: {} as AgentTool["parameters"],
 		strict: true,
 		execute: async (_id, params) => {
 			executed.push(params);
-			return { content: [{ type: "text", text: "task accepted" }] };
+			return { content: [{ type: "text", text: `${toolName} accepted` }] };
 		},
 	};
 	const extension = {
@@ -62,6 +62,10 @@ function makeWrappedTask(handler: (...args: unknown[]) => Promise<unknown>, exec
 	return new ExtensionToolWrapper(recording, runner);
 }
 
+function makeWrappedTask(handler: (...args: unknown[]) => Promise<unknown>, executed: unknown[]): AgentTool {
+	return makeWrappedTool("task", handler, executed);
+}
+
 function makeService(wrapped: AgentTool) {
 	return createFrankHostToolService({
 		session: {
@@ -70,6 +74,18 @@ function makeService(wrapped: AgentTool) {
 			toolRegistry: new Map([["task", wrapped]]),
 		} as unknown as ToolSession,
 		agentId: "frank-test",
+	});
+}
+
+function makeMutateService(toolName: string, wrapped: AgentTool) {
+	return createFrankHostToolService({
+		session: {
+			asyncJobManager: new AsyncJobManager({ maxRunningJobs: 4 }),
+			getAgentId: () => "Host",
+			toolRegistry: new Map([[toolName, wrapped]]),
+		} as unknown as ToolSession,
+		agentId: "frank-test",
+		names: ["task", "hub", "write", "edit", "bash"],
 	});
 }
 
@@ -104,5 +120,77 @@ describe("Frank bridged hook parity", () => {
 
 		expect(result).toEqual({ ok: true, content: "task accepted" });
 		expect(executed).toEqual([{ task: "x" }]);
+	});
+});
+
+describe("Frank bridged mutating tools", () => {
+	for (const toolName of ["write", "edit", "bash"]) {
+		test(`a blocking hook refuses the bridged ${toolName} call`, async () => {
+			const executed: unknown[] = [];
+			const toolCallIds: string[] = [];
+			const wrapped = makeWrappedTool(toolName, async (...args) => {
+				const toolCallId = toolCallIdFrom(args);
+				if (toolCallId !== undefined) toolCallIds.push(toolCallId);
+				return { block: true, reason: "nope" };
+			}, executed);
+
+			const result = await makeMutateService(toolName, wrapped).handle(toolName, { path: "x" }, "call-mutate");
+
+			expect(result).toEqual({ ok: false, error: "nope" });
+			expect(executed).toEqual([]);
+			expect(toolCallIds).toEqual(["call-mutate"]);
+		});
+	}
+
+	test("the default names stay task and hub", () => {
+		expect(makeService(makeWrappedTask(async () => undefined, [])).toolNames()).toEqual(["task", "hub"]);
+	});
+
+	test("an unlisted tool is rejected", async () => {
+		const executed: unknown[] = [];
+		const wrapped = makeWrappedTask(async () => undefined, executed);
+
+		const result = await makeService(wrapped).handle("write", { path: "x" }, "call-denied");
+
+		expect(result).toEqual({ ok: false, error: "host tool is not enabled: write" });
+		expect(executed).toEqual([]);
+	});
+});
+describe("Frank bridged mutating argument translation", () => {
+	test("write preserves Frank path and content", async () => {
+		const executed: unknown[] = [];
+		const wrapped = makeWrappedTool("write", async () => undefined, executed);
+		const result = await makeMutateService("write", wrapped).handle("write", { path: "notes.txt", content: "hello" });
+
+		expect(result.ok).toBe(true);
+		expect(executed).toEqual([{ path: "notes.txt", content: "hello" }]);
+	});
+
+	test("edit maps Frank old and new to replace-mode names", async () => {
+		const executed: unknown[] = [];
+		const wrapped = makeWrappedTool("edit", async () => undefined, executed);
+		const result = await makeMutateService("edit", wrapped).handle("edit", { path: "notes.txt", old: "before", new: "after" });
+
+		expect(result.ok).toBe(true);
+		expect(executed).toEqual([{ path: "notes.txt", old_string: "before", new_string: "after" }]);
+	});
+
+	test("bash quotes each argv token and maps cwd and timeout", async () => {
+		const executed: unknown[] = [];
+		const wrapped = makeWrappedTool("bash", async () => undefined, executed);
+		const result = await makeMutateService("bash", wrapped).handle("bash", {
+			argv: ["printf", "%s", "it's safe"],
+			cwd: ".",
+			timeout_ms: 2500,
+		});
+
+		expect(result.ok).toBe(true);
+		expect(executed).toEqual([
+			{
+				command: "'printf' '%s' 'it'\\''s safe'",
+				cwd: `${process.cwd()}/.`,
+				timeout: 2.5,
+			},
+		]);
 	});
 });

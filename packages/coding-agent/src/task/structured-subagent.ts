@@ -138,7 +138,7 @@ async function frankWorkerOptions(
 		apiKeyEnv: "PI_TRACK_API_KEY",
 		text: options.context ? `${options.context}\n\n${options.task}` : options.task,
 		session,
-		hostToolService: createFrankHostToolService({ session, agentId: options.id, signal }),
+		hostToolService: createFrankHostToolService({ session, agentId: options.id, signal, names: ["task", "hub", "write", "edit", "bash"] }),
 	};
 }
 /** Validation behavior requested for an effective output schema. */
