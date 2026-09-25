@@ -23,7 +23,7 @@ describe("frank cancel orphan", () => {
 		const manager = new AsyncJobManager({});
 		const child = new Promise<void>(() => {});
 		manager.register("task", "Deep", () => new Promise<string>(() => {}), { id: "Deep", ownerId: "Main", agentId: "Deep" });
-		manager.register("task", "Pot", () => child.then(() => "still running"), { id: "Pot", ownerId: "Deep", agentId: "Pot" });
+		manager.register("task", "Pot", () => child.then(() => "still running"), { id: "Pot-job", ownerId: "Deep", agentId: "Pot" });
 
 		const result = await executeCancel(sessionWith(registry), manager, "Main", ["Deep"]);
 		const cancelled = result.details?.cancelled?.map(row => row.id) ?? [];

@@ -443,8 +443,8 @@ async function cancelJobTree(
 	const targets = descendantAgentIds(session.agentRegistry, id);
 	for (const target of targets) {
 		if (target === ownerId) continue;
-		const job = manager.getJob(target);
-		if (job?.status === "running") manager.cancel(target);
+		const job = manager.getJob(target) ?? manager.getAllJobs().find(candidate => candidate.agentId === target);
+		if (job?.status === "running") manager.cancel(job.id);
 		if (target !== id) await cancelAgentRegistration(session, ownerId, target);
 	}
 	const named = manager.getJob(id);
