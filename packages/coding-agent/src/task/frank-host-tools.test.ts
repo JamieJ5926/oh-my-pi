@@ -44,6 +44,39 @@ describe("Frank host tool service", () => {
 		expect(result).toEqual({ ok: false, error: `host tool is not registered in the host session: ${name}` });
 	});
 
+	test("task bridge passes a 10-item batch through as one call", async () => {
+		let capturedArgs: unknown;
+		let invocations = 0;
+		const original = BUILTIN_TOOLS.task;
+		BUILTIN_TOOLS.task = async () => ({
+			name: "task",
+			label: "Task",
+			description: "",
+			parameters: {},
+			execute: async (_toolCallId: string, args: unknown) => {
+				invocations++;
+				capturedArgs = args;
+				return { content: [{ type: "text", text: "spawned" }] };
+			},
+		} as never);
+		const args = {
+			context: "delegable: implementer slices",
+			tasks: Array.from({ length: 10 }, (_, index) => ({
+				name: `slice-${index + 1}`,
+				agent: "implementer",
+				task: `Implement slice ${index + 1}`,
+			})),
+		};
+		try {
+			const service = createFrankHostToolService({ session: {} as ToolSession, agentId: "frank-test" });
+			await service.handle("task", args);
+			expect(capturedArgs).toEqual(args);
+			expect(invocations).toBe(1);
+		} finally {
+			BUILTIN_TOOLS.task = original;
+		}
+	});
+
 	test("task bridge runs the tool with the Frank parent identity", async () => {
 		let factorySession: ToolSession | undefined;
 		const hostSession = {
