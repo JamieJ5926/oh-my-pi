@@ -138,7 +138,7 @@ describe("Frank task return integration", () => {
 		});
 		expect(result.extractedToolData?.yield).toEqual([{ data, status: "success" }]);
 		expect(result.structuredOutput).toEqual({ source: "caller", mode: "strict", status: "valid", data });
-		expect(result.output).toContain(JSON.stringify(data));
+		expect(result.output).toContain(JSON.stringify(data, null, 2));
 	});
 
 	test("rejects a Frank worker yield that violates the strict output schema", async () => {
