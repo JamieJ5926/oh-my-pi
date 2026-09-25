@@ -1,6 +1,5 @@
 import { BUILTIN_TOOLS } from "../tools";
 import type { ToolSession } from "../tools";
-import { EditTool } from "../edit";
 import type { AsyncJob } from "../async";
 import type { TaskToolDetails } from "./types";
 import { ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS } from "../async/job-manager";
@@ -259,11 +258,12 @@ export function createFrankHostToolService(options: {
 				// Bridged Frank edits arrive as old_string/new_string, which only the
 				// replace variant accepts; the session registry instance follows the
 				// configured edit mode (hashline by default) and would reject them.
-				// Gated on the registry grant: only reached when edit was granted.
-				const tool =
-					name === "edit" && registeredTool
-						? new EditTool(bridgedSession, "replace")
-						: (registeredTool ?? (await factory(bridgedSession)));
+				// The session serves the wrapped replace-mode instance through
+				// getEditReplaceTool (undefined when edit was never granted, so the
+				// refusal above already fired). Hooks fire: the instance is an
+				// ExtensionToolWrapper around the session's own runner.
+				const editReplaceTool = name === "edit" ? (options.session.getEditReplaceTool?.() ?? registeredTool) : undefined;
+				const tool = editReplaceTool ?? registeredTool ?? (await factory(bridgedSession));
 				const result = await tool.execute(
 					toolCallId ?? `frank-bridge:${name}`,
 					translatedArgs,

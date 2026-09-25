@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AsyncJobManager } from "../async";
+import { EditTool } from "../edit";
 import { BUILTIN_TOOLS } from "../tools";
 import type { ToolSession } from "../tools";
 import { createFrankHostToolService } from "./frank-host-tools";
@@ -81,18 +82,31 @@ test("edit bridge applies old_string/new_string with replace semantics", async (
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-edit-"));
 	try {
 		await Bun.write(path.join(dir, "file.txt"), "before");
+		const replaceTool = new EditTool(
+			{
+				settings: { get: () => false },
+				getToolContext: () => undefined,
+				getAgentId: () => "Host",
+				getSessionId: () => "test-session",
+				getSessionFile: () => null,
+				sessionManager: {
+					getSessionId: () => "test-session",
+					getSessionFile: () => null,
+					getCwd: () => dir,
+				},
+				cwd: dir,
+				enableLsp: false,
+			} as unknown as ToolSession,
+			"replace",
+		);
 		const sessionWithRegistry = {
 			settings: { get: () => false },
 			toolRegistry: new Map([["edit", { name: "edit" }]]),
+			getEditReplaceTool: () => replaceTool,
 			getToolContext: () => undefined,
 			getAgentId: () => "Host",
 			getSessionId: () => "test-session",
 			getSessionFile: () => null,
-			sessionManager: {
-				getSessionId: () => "test-session",
-				getSessionFile: () => null,
-				getCwd: () => dir,
-			},
 			cwd: dir,
 			enableLsp: false,
 		} as unknown as ToolSession;
@@ -103,6 +117,24 @@ test("edit bridge applies old_string/new_string with replace semantics", async (
 	} finally {
 		await fs.rm(dir, { recursive: true, force: true });
 	}
+});
+
+test("edit bridge without a replace-tool accessor still applies through the registry tool", async () => {
+	const executed: unknown[] = [];
+	const sessionWithRegistry = {
+		toolRegistry: {
+			get: () => ({
+				execute: async (_id: string, args: unknown) => {
+					executed.push(args);
+					return { content: [{ type: "text" as const, text: "edited" }] };
+				},
+			}),
+		},
+	} as unknown as ToolSession;
+	const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "frank-test", workerCwd: "/tmp/frank-worker", names: ["edit"] });
+	const result = await service.handle("edit", { path: "notes.txt", old: "before", new: "after" });
+	expect(result.ok).toBe(true);
+	expect(executed).toEqual([{ path: "/tmp/frank-worker/notes.txt", old_string: "before", new_string: "after" }]);
 });
 
 	test("bash background job body is available through hub inbox", async () => {

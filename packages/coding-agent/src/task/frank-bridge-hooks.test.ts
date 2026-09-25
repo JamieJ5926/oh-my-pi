@@ -8,6 +8,7 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import type { Extension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createFrankHostToolService } from "@oh-my-pi/pi-coding-agent/task/frank-host-tools";
@@ -127,7 +128,7 @@ describe("Frank bridged hook parity", () => {
 });
 
 describe("Frank bridged mutating tools", () => {
-	for (const toolName of ["write", "bash"]) {
+	for (const toolName of ["write", "edit", "bash"]) {
 		test(`a blocking hook refuses the bridged ${toolName} call`, async () => {
 			const executed: unknown[] = [];
 			const toolCallIds: string[] = [];
@@ -137,49 +138,13 @@ describe("Frank bridged mutating tools", () => {
 				return { block: true, reason: "nope" };
 			}, executed);
 
-			const result = await makeMutateService(toolName, wrapped).handle(toolName, { path: "x" }, "call-mutate");
+			const result = await makeMutateService(toolName, wrapped).handle(toolName, toolName === "edit" ? { path: "x", old: "a", new: "b" } : { path: "x" }, "call-mutate");
 
 			expect(result).toEqual({ ok: false, error: "nope" });
 			expect(executed).toEqual([]);
 			expect(toolCallIds).toEqual(["call-mutate"]);
 		});
 	}
-
-	test("the bridged edit call runs replace semantics on a real file", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-edit-"));
-		try {
-			await Bun.write(path.join(dir, "x"), "before");
-			const executed: unknown[] = [];
-			const wrapped = makeWrappedTool("edit", async () => undefined, executed);
-			const service = createFrankHostToolService({
-				session: {
-					asyncJobManager: new AsyncJobManager({ maxRunningJobs: 4 }),
-					getAgentId: () => "Host",
-					toolRegistry: new Map([["edit", wrapped]]),
-					settings: { get: () => false },
-					getToolContext: () => undefined,
-					getSessionId: () => "test-session",
-					getSessionFile: () => null,
-					sessionManager: {
-						getSessionId: () => "test-session",
-						getSessionFile: () => null,
-						getCwd: () => dir,
-					},
-					cwd: dir,
-					enableLsp: false,
-				} as unknown as ToolSession,
-				agentId: "frank-test",
-				names: ["task", "hub", "write", "edit", "bash"],
-				workerCwd: dir,
-			});
-			const result = await service.handle("edit", { path: "x", old: "before", new: "after" }, "call-mutate");
-
-			expect(result.ok).toBe(true);
-			expect(await Bun.file(path.join(dir, "x")).text()).toBe("after");
-		} finally {
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	});
 
 	test("the default names stay task and hub", () => {
 		expect(makeService(makeWrappedTask(async () => undefined, [])).toolNames()).toEqual(["task", "hub"]);
@@ -210,20 +175,30 @@ describe("Frank bridged mutating argument translation", () => {
 		try {
 			await Bun.write(path.join(dir, "notes.txt"), "before");
 			const wrapped = makeWrappedTool("edit", async () => undefined, []);
+			const replaceSession = {
+				settings: { get: () => false },
+				getToolContext: () => undefined,
+				getAgentId: () => "Host",
+				getSessionId: () => "test-session",
+				getSessionFile: () => null,
+				sessionManager: {
+					getSessionId: () => "test-session",
+					getSessionFile: () => null,
+					getCwd: () => dir,
+				},
+				cwd: dir,
+				enableLsp: false,
+			} as unknown as ToolSession;
 			const service = createFrankHostToolService({
 				session: {
 					asyncJobManager: new AsyncJobManager({ maxRunningJobs: 4 }),
 					getAgentId: () => "Host",
 					toolRegistry: new Map([["edit", wrapped]]),
+					getEditReplaceTool: () => new EditTool(replaceSession, "replace"),
 					settings: { get: () => false },
 					getToolContext: () => undefined,
 					getSessionId: () => "test-session",
 					getSessionFile: () => null,
-					sessionManager: {
-						getSessionId: () => "test-session",
-						getSessionFile: () => null,
-						getCwd: () => dir,
-					},
 					cwd: dir,
 					enableLsp: false,
 				} as unknown as ToolSession,
