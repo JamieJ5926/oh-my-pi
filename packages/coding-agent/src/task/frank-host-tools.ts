@@ -22,16 +22,17 @@ function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function absoluteToolPath(path: string): string {
-	return path.startsWith("/") ? path : `${process.cwd()}/${path}`;
+function absoluteToolPath(path: string, workerCwd?: string): string {
+	if (path.startsWith("/")) return path;
+	return `${workerCwd ?? process.cwd()}/${path}`;
 }
 
-function translateMutatingArgs(name: string, args: unknown): unknown {
+function translateMutatingArgs(name: string, args: unknown, workerCwd?: string): unknown {
 	if (typeof args !== "object" || args === null) return args;
 	if (name === "bash" || name === "run") {
 		if (!("argv" in args) || !Array.isArray(args.argv) || !args.argv.every(part => typeof part === "string")) return args;
 		const argv = args.argv;
-		const cwd = "cwd" in args && typeof args.cwd === "string" ? absoluteToolPath(args.cwd) : undefined;
+		const cwd = "cwd" in args && typeof args.cwd === "string" ? absoluteToolPath(args.cwd, workerCwd) : workerCwd;
 		const timeout = "timeout_ms" in args && typeof args.timeout_ms === "number" ? args.timeout_ms / 1000 : undefined;
 		return {
 			command: argv.map(shellQuote).join(" "),
@@ -41,7 +42,11 @@ function translateMutatingArgs(name: string, args: unknown): unknown {
 	}
 	if (name === "edit") {
 		if (!("path" in args) || typeof args.path !== "string" || !("old" in args) || typeof args.old !== "string" || !("new" in args) || typeof args.new !== "string") return args;
-		return { path: args.path, old_string: args.old, new_string: args.new };
+		return { path: absoluteToolPath(args.path, workerCwd), old_string: args.old, new_string: args.new };
+	}
+	if (name === "write") {
+		if (!("path" in args) || typeof args.path !== "string") return args;
+		return { ...args, path: absoluteToolPath(args.path, workerCwd) };
 	}
 	return args;
 }
@@ -95,6 +100,7 @@ export function createFrankHostToolService(options: {
 	agentId: string;
 	signal?: AbortSignal;
 	names?: string[];
+	workerCwd?: string;
 }): FrankHostToolService {
 	const bridgedSession: ToolSession = {
 		...options.session,
@@ -243,9 +249,12 @@ export function createFrankHostToolService(options: {
 			if (!factory) return { ok: false, error: `unknown host tool: ${name}` };
 			const requireRegistry = name === "write" || name === "edit" || name === "bash" || name === "run";
 			const registeredTool = options.session.toolRegistry?.get(name);
+			if (requireRegistry && !registeredTool) {
+				return { ok: false, error: `host tool is not registered in the host session: ${name}` };
+			}
 			try {
 				const beforeDispatch = name === "task" && manager ? new Set(ownedJobs().map(job => job.id)) : undefined;
-				const translatedArgs = translateMutatingArgs(name, args);
+				const translatedArgs = translateMutatingArgs(name, args, options.workerCwd);
 				const tool = registeredTool ?? (await factory(bridgedSession));
 				if (!tool) return { ok: false, error: `host tool is unavailable: ${name}` };
 				const result = await tool.execute(
@@ -255,23 +264,28 @@ export function createFrankHostToolService(options: {
 					undefined,
 					bridgedSession.getToolContext?.(),
 				);
-				let text = result.content
-					.filter((part): part is { type: "text"; text: string } => part.type === "text")
-					.map(part => part.text)
-					.join("");
-				if (beforeDispatch) {
-					for (const job of ownedJobs()) {
-						if (!beforeDispatch.has(job.id)) dispatched.add(job.id);
-					}
-					const details = result.details as TaskToolDetails | undefined;
-					if (details?.async?.state === "running") text += `\n\n${BRIDGE_DRAIN_NOTE}`;
-					return { ok: true, content: text };
-				}
-				if (name !== "hub") return { ok: true, content: text };
-				const children = drainableChildren(params);
-				if (children.length === 0) return { ok: true, content: text };
-				// `inbox` also carries real messages, so drained bodies join the host tool's own reply.
-				return { ok: true, content: `${text}\n\n${drainBodies(children)}` };
+                let text = result.content
+                    .filter((part): part is { type: "text"; text: string } => part.type === "text")
+                    .map(part => part.text)
+                    .join("");
+                if (beforeDispatch) {
+                    for (const job of ownedJobs()) {
+                        if (!beforeDispatch.has(job.id)) dispatched.add(job.id);
+                    }
+                    const details = result.details as TaskToolDetails | undefined;
+                    if (details?.async?.state === "running") text += `\n\n${BRIDGE_DRAIN_NOTE}`;
+                    return { ok: true, content: text };
+                }
+                if (name === "bash" || name === "run") {
+                    const details = result.details as { async?: { state?: string } } | undefined;
+                    if (details?.async?.state === "running") text += `\n\n${BRIDGE_DRAIN_NOTE}`;
+                    return { ok: true, content: text };
+                }
+                if (name !== "hub") return { ok: true, content: text };
+                const children = drainableChildren(params);
+                if (children.length === 0) return { ok: true, content: text };
+                // `inbox` also carries real messages, so drained bodies join the host tool's own reply.
+                return { ok: true, content: `${text}\n\n${drainBodies(children)}` };
 			} catch (error) {
 				return { ok: false, error: error instanceof Error ? error.message : String(error) };
 			}

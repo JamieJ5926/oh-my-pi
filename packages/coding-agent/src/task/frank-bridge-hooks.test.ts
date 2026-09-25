@@ -163,7 +163,7 @@ describe("Frank bridged mutating argument translation", () => {
 		const result = await makeMutateService("write", wrapped).handle("write", { path: "notes.txt", content: "hello" });
 
 		expect(result.ok).toBe(true);
-		expect(executed).toEqual([{ path: "notes.txt", content: "hello" }]);
+		expect(executed).toEqual([{ path: `${process.cwd()}/notes.txt`, content: "hello" }]);
 	});
 
 	test("edit maps Frank old and new to replace-mode names", async () => {
@@ -172,7 +172,7 @@ describe("Frank bridged mutating argument translation", () => {
 		const result = await makeMutateService("edit", wrapped).handle("edit", { path: "notes.txt", old: "before", new: "after" });
 
 		expect(result.ok).toBe(true);
-		expect(executed).toEqual([{ path: "notes.txt", old_string: "before", new_string: "after" }]);
+		expect(executed).toEqual([{ path: `${process.cwd()}/notes.txt`, old_string: "before", new_string: "after" }]);
 	});
 
 	test("bash quotes each argv token and maps cwd and timeout", async () => {

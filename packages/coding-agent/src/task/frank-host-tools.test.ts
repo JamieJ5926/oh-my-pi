@@ -54,6 +54,51 @@ describe("Frank host tool service", () => {
 			BUILTIN_TOOLS.task = original;
 		}
 	});
+
+test("write paths resolve against the Frank worker cwd", async () => {
+	let writtenPath: string | undefined;
+	const sessionWithRegistry = {
+		toolRegistry: {
+			get: () => ({
+				execute: async (_id: string, args: unknown) => {
+					if (args && typeof args === "object" && "path" in args && typeof args.path === "string") {
+						writtenPath = args.path;
+					}
+					expect(args).toMatchObject({ path: "/tmp/frank-worker/src/file.ts" });
+					return { content: [{ type: "text" as const, text: "written" }] };
+				},
+			}),
+		},
+	} as unknown as ToolSession;
+	const service = createFrankHostToolService({
+		session: sessionWithRegistry,
+		agentId: "frank-test",
+		workerCwd: "/tmp/frank-worker",
+		names: ["write"],
+	});
+	const result = await service.handle("write", { path: "src/file.ts", content: "body" });
+
+	expect(result.ok).toBe(true);
+	expect(writtenPath).toBe("/tmp/frank-worker/src/file.ts");
+});
+	test("bash bridge appends a drain note only for a running background result", async () => {
+		const registeredTool = {
+			execute: async () => ({
+				content: [{ type: "text" as const, text: "started" }],
+				details: { async: { state: "running", jobId: "job-1", type: "bash" } },
+			}),
+		};
+		const service = createFrankHostToolService({
+			session: { toolRegistry: { get: () => registeredTool } } as unknown as ToolSession,
+			agentId: "frank-test",
+			names: ["bash"],
+		});
+
+		const result = await service.handle("bash", { argv: ["sleep", "1"] });
+
+		expect(result.content).toContain("started");
+		expect(result.content).toContain("Bridge note:");
+	});
 });
 
 describe("Frank host tool service: child drain", () => {
