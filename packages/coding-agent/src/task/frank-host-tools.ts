@@ -1,3 +1,4 @@
+import { IrcBus, type IrcMessage } from "../irc/bus";
 import { BUILTIN_TOOLS } from "../tools";
 import type { ToolSession } from "../tools";
 import type { AsyncJob } from "../async";
@@ -70,6 +71,19 @@ export interface FrankHostToolService {
  * `timeoutMs`. Bounded so a worker cannot park on a child that never settles.
  */
 const CHILD_WAIT_DEFAULT_MS = 120_000;
+function hostMailFor(agentId: string): string {
+	const pending = IrcBus.global().inbox(agentId);
+	if (pending.length === 0) return "";
+	return `Host messages:\n${pending.map(message => `[hub from ${message.from}] ${message.body}`).join("\n")}\n\n`;
+}
+
+function prependHostMail(pending: string[], result: { ok: boolean; content?: string; error?: string }): { ok: boolean; content?: string; error?: string } {
+	if (pending.length === 0) return result;
+	const note = `Host messages:\n${pending.join("\n")}`;
+	if (!result.ok) return { ok: false, error: `${note}\n\n${result.error ?? "hub failed"}` };
+	return { ok: true, content: result.content ? `${note}\n\n${result.content}` : note };
+}
+
 /** Ceiling for the same wait; a longer request is clamped, never honored. */
 const CHILD_WAIT_MAX_MS = 3_600_000;
 
@@ -268,10 +282,7 @@ export function createFrankHostToolService(options: {
 			}
 			if (!enabled[name]) return { ok: false, error: `host tool is not enabled: ${name}` };
 			const params = (args ?? {}) as ChildDrainCall;
-			// A wait that names a child this worker can drain is answered from the job
-			// row before the host tool runs. The host path consumes the child and can
-			// only render its body while the row is unconsumed, and the host session's
-			// own async-result sink usually wins that race.
+			const hostMail = name === "hub" ? hostMailFor(options.agentId) : "";
 			if (name === "hub" && params.op === "wait") {
 				const children = drainableChildren(params);
 				if (children.length > 0) {
@@ -280,11 +291,11 @@ export function createFrankHostToolService(options: {
 							? params.timeoutMs
 							: CHILD_WAIT_DEFAULT_MS;
 					await settle(children, Math.max(0, Math.min(requested, CHILD_WAIT_MAX_MS)));
-					return { ok: true, content: drainBodies(children) };
+					return { ok: true, content: `${hostMail}${drainBodies(children)}` };
 				}
 			}
 			const factory = Object.entries(BUILTIN_TOOLS).find(([toolName]) => toolName === name)?.[1];
-			if (!factory) return { ok: false, error: `unknown host tool: ${name}` };
+			if (!factory) return { ok: false, error: hostMail ? `${hostMail}${`unknown host tool: ${name}`}` : `unknown host tool: ${name}` };
 			const requireRegistry = name === "write" || name === "edit" || name === "bash" || name === "run";
 			const registeredTool = options.session.toolRegistry?.get(name);
 			if (requireRegistry && !registeredTool) {
@@ -308,7 +319,7 @@ export function createFrankHostToolService(options: {
 				const built = name === "task" && wrapWithHooks ? await factory(bridgedSession) : undefined;
 				const workerTool = built && wrapWithHooks ? wrapWithHooks(built) : undefined;
 				const tool = editReplaceTool ?? workerTool ?? registeredTool ?? (await factory(bridgedSession));
-				if (!tool) return { ok: false, error: `host tool is unavailable: ${name}` };
+				if (!tool) return { ok: false, error: hostMail ? `${hostMail}host tool is unavailable: ${name}` : `host tool is unavailable: ${name}` };
 				const hostContext = bridgedSession.getToolContext?.();
 				const context =
 					hostContext && options.workerLane !== undefined
@@ -336,7 +347,7 @@ export function createFrankHostToolService(options: {
 					}
 					const details = result.details as TaskToolDetails | undefined;
 					if (details?.async?.state === "running") text += `\n\n${BRIDGE_DRAIN_NOTE}`;
-					return { ok: true, content: text };
+					return { ok: true, content: `${hostMail}${text}` };
 				}
 				if (name === "bash" || name === "run") {
 					const details = result.details as { async?: { state?: string; jobId?: string } } | undefined;
@@ -344,15 +355,14 @@ export function createFrankHostToolService(options: {
 						if (details.async.jobId) dispatched.add(details.async.jobId);
 						text += `\n\n${BRIDGE_DRAIN_NOTE}`;
 					}
-					return { ok: true, content: text };
+					return { ok: true, content: `${hostMail}${text}` };
 				}
-				if (name !== "hub") return { ok: true, content: text };
+				if (name !== "hub") return { ok: true, content: `${hostMail}${text}` };
 				const children = drainableChildren(params);
-				if (children.length === 0) return { ok: true, content: text };
-				// `inbox` also carries real messages, so drained bodies join the host tool's own reply.
-				return { ok: true, content: `${text}\n\n${drainBodies(children)}` };
+				const drained = children.length === 0 ? text : `${text}\n\n${drainBodies(children)}`;
+				return { ok: true, content: `${hostMail}${drained}` };
 			} catch (error) {
-				return { ok: false, error: error instanceof Error ? error.message : String(error) };
+				return { ok: false, error: `${hostMail}${error instanceof Error ? error.message : String(error)}` };
 			}
 		},
 	};
