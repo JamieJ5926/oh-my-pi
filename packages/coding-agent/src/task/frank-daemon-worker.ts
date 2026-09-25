@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -66,6 +67,10 @@ function waitForClose(child: ReturnType<typeof spawn>): Promise<number | null> {
 	});
 }
 
+function daemonSessionKey(artifactsDir: string, id: string): string {
+	return createHash("sha1").update(`${artifactsDir}:${id}`).digest("hex").slice(0, 16);
+}
+
 function daemonStateDir(): string {
 	return path.join("/tmp", "omp-frank-daemon", "host");
 }
@@ -89,7 +94,7 @@ async function runLoggedCli(executable: string, args: string[], options: { cwd: 
 async function admitRun(options: DaemonOptions, env: NodeJS.ProcessEnv, stateDir: string): Promise<void> {
 	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
 	const logPath = path.join(stateDir, "cli.log");
-	const args = ["daemon", "start", "--task", options.text, "--session", options.id, "--allow", "all", "--key-env", options.apiKeyEnv ?? "PI_TRACK_API_KEY", "--json"];
+	const args = ["daemon", "start", "--task", options.text, "--session", daemonSessionKey(options.artifactsDir, options.id), "--allow", "all", "--key-env", options.apiKeyEnv ?? "PI_TRACK_API_KEY", "--json"];
 	const startCode = await runLoggedCli(bin, args, { cwd: options.cwd, env, logPath });
 	if (startCode === 0) return;
 	const existingStatus = await runLoggedCli(bin, ["daemon", "status"], { cwd: options.cwd, env, logPath });
@@ -110,11 +115,13 @@ export async function spawnFrankDaemonWorker(options: DaemonOptions): Promise<Fr
 	if (options.signal?.aborted) throw options.signal.reason ?? new Error("Frank worker aborted");
 	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
 	const daemonDir = path.join(options.artifactsDir, `${options.id}.frank-daemon`);
+	const sessionKey = daemonSessionKey(options.artifactsDir, options.id);
 	const stateDir = daemonStateDir();
 	const eventsPath = options.eventsPath ?? path.join(options.artifactsDir, `${options.id}.frank.jsonl`);
 	await mkdir(daemonDir, { recursive: true });
 	await mkdir(stateDir, { recursive: true });
 	await writeFile(path.join(daemonDir, "state-dir"), `${stateDir}\n`);
+	await writeFile(path.join(daemonDir, "session-key"), `${sessionKey}\n`);
 	const env = daemonEnvironment(options, stateDir);
 	const abortListener = () => {
 		const stop = runCli(bin, ["daemon", "stop", "--json"], { cwd: options.cwd, env, stdio: "ignore" });
@@ -128,7 +135,7 @@ export async function spawnFrankDaemonWorker(options: DaemonOptions): Promise<Fr
 			stop.once("error", () => {});
 			throw options.signal.reason ?? new Error("Frank worker aborted");
 		}
-		const child = runCli(bin, ["attach", "--session", options.id, "--json"], { cwd: options.cwd, env });
+		const child = runCli(bin, ["attach", "--session", sessionKey, "--json"], { cwd: options.cwd, env });
 		if (!child.stdout) throw new Error("Frank attach did not provide stdout");
 		const events: FrankEvent[] = [];
 		let envelopeText: string | undefined;
@@ -192,9 +199,11 @@ export async function attachFrankDaemonLane(options: { artifactsDir: string; id:
 	const markerDir = path.join(options.artifactsDir, `${options.id}.frank-daemon`);
 	let stateDir = daemonStateDir();
 	try { stateDir = (await readFile(path.join(markerDir, "state-dir"), "utf8")).trim() || stateDir; } catch {}
+	let sessionKey: string;
+	try { sessionKey = (await readFile(path.join(markerDir, "session-key"), "utf8")).trim() || daemonSessionKey(options.artifactsDir, options.id); } catch { sessionKey = daemonSessionKey(options.artifactsDir, options.id); }
 	const env = { ...process.env, ...options.env, FRANK_DAEMON_DIR: stateDir };
 	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
-	const child = runCli(bin, ["attach", "--session", options.id, "--json"], { cwd: options.cwd, env });
+	const child = runCli(bin, ["attach", "--session", sessionKey, "--json"], { cwd: options.cwd, env });
 	if (!child.stdout) throw new Error("Frank attach did not provide stdout");
 	const events: FrankEvent[] = [];
 	let envelopeText: string | undefined;

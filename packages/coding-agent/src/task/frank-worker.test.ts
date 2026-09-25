@@ -390,15 +390,25 @@ describe("Frank daemon transport", () => {
 		const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-shared-"));
 		const bin = path.join(cwd, "frank");
 		const artifactsDir = path.join(cwd, "artifacts");
-		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "daemon" ]; then exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
+		const argvFile = path.join(cwd, "frank-argv.txt");
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
+		process.env.FRANK_ARGV_FILE = argvFile;
 		try {
 			for (const id of ["lane-1", "lane-2"]) {
 				await spawnFrankDaemonWorker({ exe: bin, frankBin: bin, endpoint: "http://127.0.0.1:1", model: "test-model:high", cwd, budgets: { maxToolCalls: 4, wallSecs: 9 }, text: "inspect", id, artifactsDir, onEvent: () => {} });
 			}
+			const argv = await Bun.file(argvFile).text();
+			expect(argv).not.toMatch(/--session (?:lane-1|lane-2)(?:\s|$)/);
+			const keys: string[] = [];
 			for (const id of ["lane-1", "lane-2"]) {
 				expect((await Bun.file(path.join(artifactsDir, `${id}.frank-daemon`, "state-dir")).text()).trim()).toBe("/tmp/omp-frank-daemon/host");
+				const key = (await Bun.file(path.join(artifactsDir, `${id}.frank-daemon`, "session-key")).text()).trim();
+				expect(key).toMatch(/^[0-9a-f]{16}$/);
+				expect(key).not.toBe(id);
+				keys.push(key);
 			}
-		} finally { await rm(cwd, { recursive: true, force: true }); }
+			expect(keys[0]).not.toBe(keys[1]);
+		} finally { delete process.env.FRANK_ARGV_FILE; await rm(cwd, { recursive: true, force: true }); }
 	});
 	test("defaults Frank transport to the shared daemon", () => {
 		expect(SETTINGS_SCHEMA["task.frankTransport"].default).toBe("daemon");
