@@ -5,7 +5,7 @@ import type { TaskToolDetails } from "./types";
 import { ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS } from "../async/job-manager";
 import { buildAsyncResultBatchMessage } from "../session/async-job-delivery";
 import type { ReadonlySessionManager } from "../session/session-manager";
-import type { SessionMessageEntry } from "../session/session-entries";
+import type { SessionInitEntry, SessionMessageEntry } from "../session/session-entries";
 
 interface FrankBashArgs {
 	argv: string[];
@@ -99,20 +99,32 @@ interface ChildDrainCall {
 
 /**
  * The host session as the bridged worker's hooks must see it: the worker's own
- * rendered prompt is the only conversation, exactly as a native lane's session
- * starts, so lane-keyed guards classify the call by the worker, not the host.
+ * session_init (its seat) and rendered prompt, exactly as a native lane's
+ * session starts, so seat- and lane-keyed guards classify the worker, not the
+ * host. Without the seat, profile policy reads an anonymous lane and confines it.
  */
-function laneSessionView(host: ReadonlySessionManager, workerPrompt: string): ReadonlySessionManager {
+function laneSessionView(host: ReadonlySessionManager, lane: { prompt: string; agent: string }): ReadonlySessionManager {
+	const timestamp = new Date().toISOString();
+	const init = {
+		type: "session_init",
+		id: "frank-bridge-init",
+		parentId: null,
+		timestamp,
+		systemPrompt: "",
+		task: lane.prompt,
+		tools: [],
+		agent: lane.agent,
+	} satisfies SessionInitEntry;
 	const lanePrompt = {
 		type: "message",
 		id: "frank-bridge-lane",
-		parentId: null,
-		timestamp: new Date().toISOString(),
-		message: { role: "user", content: [{ type: "text", text: workerPrompt }], timestamp: Date.now() },
+		parentId: init.id,
+		timestamp,
+		message: { role: "user", content: [{ type: "text", text: lane.prompt }], timestamp: Date.now() },
 	} satisfies SessionMessageEntry;
 	return new Proxy(host, {
 		get(target, key) {
-			if (key === "getEntries") return () => [lanePrompt];
+			if (key === "getEntries") return () => [init, lanePrompt];
 			const value: unknown = Reflect.get(target, key);
 			return typeof value === "function" ? value.bind(target) : value;
 		},
@@ -125,8 +137,8 @@ export function createFrankHostToolService(options: {
 	signal?: AbortSignal;
 	names?: string[];
 	workerCwd?: string;
-	/** The worker's rendered prompt; when set, bridged tool hooks run in the worker's lane scope. */
-	workerPrompt?: string;
+	/** The worker's rendered prompt and seat; when set, bridged tool hooks run in the worker's lane scope. */
+	workerLane?: { prompt: string; agent: string };
 }): FrankHostToolService {
 	const bridgedSession: ToolSession = {
 		...options.session,
@@ -299,11 +311,11 @@ export function createFrankHostToolService(options: {
 				if (!tool) return { ok: false, error: `host tool is unavailable: ${name}` };
 				const hostContext = bridgedSession.getToolContext?.();
 				const context =
-					hostContext && options.workerPrompt !== undefined
+					hostContext && options.workerLane !== undefined
 						? {
 								...hostContext,
 								hookScope: {
-									sessionManager: laneSessionView(hostContext.sessionManager, options.workerPrompt),
+									sessionManager: laneSessionView(hostContext.sessionManager, options.workerLane),
 								},
 							}
 						: hostContext;

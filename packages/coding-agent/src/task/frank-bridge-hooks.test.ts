@@ -176,7 +176,7 @@ describe("Frank bridged hook lane scope", () => {
 		return undefined;
 	}
 
-	function serviceWithLane(wrapped: AgentTool, lane: { workerPrompt?: string }) {
+	function serviceWithLane(wrapped: AgentTool, lane: { workerLane?: { prompt: string; agent: string } }) {
 		const host = SessionManager.inMemory();
 		host.appendMessage({ role: "user", content: [{ type: "text", text: "root prompt" }], timestamp: Date.now() });
 		return createFrankHostToolService({
@@ -205,7 +205,7 @@ describe("Frank bridged hook lane scope", () => {
 				: undefined;
 		}, executed);
 
-		const result = await serviceWithLane(wrapped, { workerPrompt }).handle("write", { path: "/host/checkout/x", content: "y" }, "call-lane");
+		const result = await serviceWithLane(wrapped, { workerLane: { prompt: workerPrompt, agent: "implementer" } }).handle("write", { path: "/host/checkout/x", content: "y" }, "call-lane");
 
 		expect(result).toEqual({ ok: false, error: "main-checkout write denied" });
 		expect(executed).toEqual([]);

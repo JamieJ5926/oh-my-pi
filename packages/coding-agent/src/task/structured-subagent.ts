@@ -144,7 +144,7 @@ async function frankWorkerOptions(
 			signal,
 			names: ["task", "hub", "write", "edit", "bash"],
 			workerCwd: options.cwd,
-			workerPrompt: options.task,
+			workerLane: { prompt: options.task, agent: options.agent.name },
 		}),
 	};
 }
