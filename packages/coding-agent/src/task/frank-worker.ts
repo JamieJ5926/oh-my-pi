@@ -97,7 +97,8 @@ export interface FrankWorkerHandle {
 
 export function frankWorkerEndpoint(baseUrl: string): string {
 	const normalized = baseUrl.replace(/\/+$/, "");
-	return normalized.endsWith("/chat/completions") ? normalized : `${normalized}/chat/completions`;
+	if (normalized.endsWith("/messages") || normalized.endsWith("/chat/completions")) return normalized;
+	return `${normalized}/chat/completions`;
 }
 
 export interface FrankWorkerResult {

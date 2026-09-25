@@ -33,6 +33,7 @@ describe("Frank worker transport", () => {
 	test("uses a full OpenAI chat completions endpoint and forwards the API key to the child", async () => {
 		expect(frankWorkerEndpoint("http://127.0.0.1:8317/v1")).toBe("http://127.0.0.1:8317/v1/chat/completions");
 		expect(frankWorkerEndpoint("http://127.0.0.1:8317/v1/chat/completions")).toBe("http://127.0.0.1:8317/v1/chat/completions");
+		expect(frankWorkerEndpoint("https://api.anthropic.com/v1/messages")).toBe("https://api.anthropic.com/v1/messages");
 		const stub = await makeStub(`printf '%s\\n' "$PI_TRACK_API_KEY" > "$FRANK_KEY_FILE"; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		const keyFile = path.join(stub.cwd, "key");
 		process.env.FRANK_KEY_FILE = keyFile;

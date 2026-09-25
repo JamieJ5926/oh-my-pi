@@ -74,22 +74,24 @@ async function resolveFrankBin(cwd: string): Promise<string> {
 }
 
 /**
- * Frank reads reasoning effort off its `provider/alias:effort` model hop, so the
- * hop is the only place a seat's resolved level can travel. Frank splits the
- * alias at the first colon, so a level is appended only to an id that carries no
- * colon of its own; a literal level already on the id is replaced rather than
- * doubled, and any other suffixed id keeps the bare-id behavior.
+ * Frank reads the provider off the hop's `provider/alias` prefix and
+ * reasoning effort off a trailing `:effort`, so the hop always carries the
+ * provider even when no effort level resolved. Frank splits the alias at the
+ * first colon, so a level is appended only to an id that carries no colon of
+ * its own; a literal level already on the id is replaced rather than doubled,
+ * and any other suffixed id keeps the provider-qualified raw id.
  */
 export function frankModelHop(
 	model: Pick<Model<Api>, "provider" | "id">,
 	thinkingLevel: ScopedModel["thinkingLevel"],
 ): string {
+	const qualified = `${model.provider}/${model.id}`;
 	const effort = toReasoningEffort(thinkingLevel);
-	if (effort === undefined) return model.id;
+	if (effort === undefined) return qualified;
 	const colon = model.id.lastIndexOf(":");
 	const literal = colon > 0 ? model.id.slice(colon + 1) : "";
 	const id = literal && parseThinkingLevel(literal) !== undefined ? model.id.slice(0, colon) : model.id;
-	if (id.includes(":")) return model.id;
+	if (id.includes(":")) return qualified;
 	return `${model.provider}/${id}:${effort}`;
 }
 

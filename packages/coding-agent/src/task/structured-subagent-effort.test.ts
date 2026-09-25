@@ -9,12 +9,12 @@ describe("Frank worker model hop", () => {
 		expect(frankModelHop(seat, ThinkingLevel.XHigh)).toBe("cli-proxy/openrouter.muse-spark-1.3-contributor:xhigh");
 	});
 
-	test("a seat with no level sends the bare id", () => {
-		expect(frankModelHop(seat, undefined)).toBe("openrouter.muse-spark-1.3-contributor");
+	test("a seat with no level sends the provider-qualified hop", () => {
+		expect(frankModelHop(seat, undefined)).toBe("cli-proxy/openrouter.muse-spark-1.3-contributor");
 	});
 
-	test("thinking off stays off the wire", () => {
-		expect(frankModelHop(seat, ThinkingLevel.Off)).toBe("openrouter.muse-spark-1.3-contributor");
+	test("thinking off stays off the wire but keeps the provider", () => {
+		expect(frankModelHop(seat, ThinkingLevel.Off)).toBe("cli-proxy/openrouter.muse-spark-1.3-contributor");
 	});
 
 	test("a literal level on the id is replaced, not duplicated", () => {
@@ -23,7 +23,7 @@ describe("Frank worker model hop", () => {
 		);
 	});
 
-	test("an id with a non-level colon keeps its raw id instead of a second colon", () => {
-		expect(frankModelHop({ provider: "openrouter", id: "foo:beta" }, ThinkingLevel.High)).toBe("foo:beta");
+	test("an id with a non-level colon keeps its provider-qualified raw id", () => {
+		expect(frankModelHop({ provider: "openrouter", id: "foo:beta" }, ThinkingLevel.High)).toBe("openrouter/foo:beta");
 	});
 });
