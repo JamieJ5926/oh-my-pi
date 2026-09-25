@@ -29,8 +29,8 @@ describe("frank cancel orphan", () => {
 		const cancelled = result.details?.cancelled?.map(row => row.id) ?? [];
 
 		expect(manager.getJob("Deep")?.status).toBe("cancelled");
-		expect(manager.getJob("Pot")?.status).toBe("cancelled");
+		expect(manager.getJob("Pot-job")?.status).toBe("cancelled");
 		expect(cancelled).toContain("Deep");
-		expect(manager.getJob("Pot")?.abortController.signal.aborted).toBe(true);
+		expect(manager.getJob("Pot-job")?.abortController.signal.aborted).toBe(true);
 	});
 });
