@@ -12,7 +12,7 @@ export interface FrankHostToolResult {
 }
 
 export interface FrankHostToolService {
-	handle(name: string, args: unknown): Promise<FrankHostToolResult>;
+	handle(name: string, args: unknown, toolCallId?: string): Promise<FrankHostToolResult>;
 	closed: boolean;
 }
 
@@ -169,7 +169,7 @@ export function createFrankHostToolService(options: {
 		get closed() {
 			return closed;
 		},
-		async handle(name, args) {
+		async handle(name, args, toolCallId) {
 			if (closed || options.signal?.aborted) {
 				return { ok: false, error: "host tool service is closed" };
 			}
@@ -194,10 +194,10 @@ export function createFrankHostToolService(options: {
 			if (!factory) return { ok: false, error: `unknown host tool: ${name}` };
 			try {
 				const beforeDispatch = name === "task" && manager ? new Set(ownedJobs().map(job => job.id)) : undefined;
-				const tool = await factory(options.session);
+				const tool = options.session.toolRegistry?.get(name) ?? (await factory(options.session));
 				if (!tool) return { ok: false, error: `host tool is unavailable: ${name}` };
 				const result = await tool.execute(
-					options.agentId,
+					toolCallId ?? `frank-bridge:${name}`,
 					args,
 					options.signal,
 					undefined,
