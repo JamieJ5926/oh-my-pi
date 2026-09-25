@@ -4977,7 +4977,7 @@ export const SETTINGS_SCHEMA = {
 	"task.frankTransport": {
 		type: "enum",
 		values: ["process", "daemon"] as const,
-		default: "process",
+		default: "daemon",
 		ui: {
 			tab: "tasks",
 			group: "Subagents",

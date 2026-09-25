@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { taskSchema } from "./types";
+import { getDefault } from "../config/settings-schema";
 
 describe("task orchestration contract fields", () => {
 	test("applies defaults when a task item omits the contract fields", () => {
@@ -30,5 +31,11 @@ describe("task orchestration contract fields", () => {
 			width: 3,
 			childrenReadOnly: true,
 		});
+	});
+
+	test("a task item that omits frankTransport inherits the daemon default", () => {
+		const parsed = taskSchema({ agent: "frank-explorer", task: "read" });
+		expect(parsed.frankTransport).toBeUndefined();
+		expect(getDefault("task.frankTransport")).toBe("daemon");
 	});
 });
