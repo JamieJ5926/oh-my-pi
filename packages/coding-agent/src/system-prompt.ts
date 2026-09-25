@@ -140,7 +140,7 @@ function dedupeAlwaysApplyRules(
 	);
 }
 
-export const LEAF_OMITTED_RULE_HEADINGS = ["Routing"] as const;
+export const LEAF_OMITTED_RULE_HEADINGS = ["Coordinator"] as const;
 
 export function omitLeafRuleSections(content: string, headings: readonly string[]): string {
 	const lines = content.split("\n");

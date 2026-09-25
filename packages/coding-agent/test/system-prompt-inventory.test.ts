@@ -681,8 +681,8 @@ describe("system prompt tool inventory", () => {
 		expect(text).toContain("- frontend-design: Frontend UI workflow");
 	});
 
-	it("omits Routing rule sections for leaf catalogs but preserves them for roots", async () => {
-		const content = `---\nalwaysApply: true\n---\n\n# First rule\n\nKeep this.\n\n# Routing\n\nDrop this coordinator text.\n\n# Project vault writes\n\nKeep this too.`;
+	it("omits Coordinator rule sections for leaf catalogs but preserves them for roots", async () => {
+		const content = `---\nalwaysApply: true\n---\n\n# First rule\n\nKeep this.\n\n# Coordinator\n\nDrop this coordinator text.\n\n# Project vault writes\n\nKeep this too.`;
 		const options = {
 			cwd: tempDir,
 			contextFiles: [],
@@ -698,7 +698,7 @@ describe("system prompt tool inventory", () => {
 		expect(leafText).toContain("Keep this.");
 		expect(leafText).toContain("Keep this too.");
 		expect(leafText).not.toContain("Drop this coordinator text.");
-		expect(leafText).not.toContain("# Routing");
+		expect(leafText).not.toContain("# Coordinator");
 
 		const root = await buildSystemPrompt(options);
 		expect(root.systemPrompt.join("\n\n")).toContain("Drop this coordinator text.");
@@ -706,7 +706,7 @@ describe("system prompt tool inventory", () => {
 		const onlyRouting = await buildSystemPrompt({
 			...options,
 			catalogSkillNames: [],
-			alwaysApplyRules: [{ name: "RULES", content: "# Routing\n\nOnly heading.\n", path: "RULES.md" }],
+			alwaysApplyRules: [{ name: "RULES", content: "# Coordinator\n\nOnly heading.\n", path: "RULES.md" }],
 		});
 		expect(onlyRouting.systemPrompt.join("\n\n")).toContain("Only heading.");
 	});
