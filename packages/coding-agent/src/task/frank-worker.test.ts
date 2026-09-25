@@ -391,7 +391,7 @@ describe("Frank daemon transport", () => {
 		const bin = path.join(cwd, "frank");
 		const artifactsDir = path.join(cwd, "artifacts");
 		const argvFile = path.join(cwd, "frank-argv.txt");
-		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
 		process.env.FRANK_ARGV_FILE = argvFile;
 		try {
 			for (const id of ["lane-1", "lane-2"]) {
@@ -408,6 +408,9 @@ describe("Frank daemon transport", () => {
 				keys.push(key);
 			}
 			expect(keys[0]).not.toBe(keys[1]);
+			for (const key of keys) {
+				expect(argv).toContain(`attach --session ${key} --json`);
+			}
 		} finally { delete process.env.FRANK_ARGV_FILE; await rm(cwd, { recursive: true, force: true }); }
 	});
 	test("defaults Frank transport to the shared daemon", () => {
