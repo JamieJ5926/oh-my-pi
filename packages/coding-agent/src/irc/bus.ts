@@ -235,8 +235,12 @@ export class IrcBus {
 			return { to: message.to, outcome: revived ? "revived" : "injected" };
 		}
 
-		const session = this.#registry.get(message.to)?.session;
+		const session = ref.session;
 		if (!session) {
+			if (ref && (ref.status === "running" || ref.status === "idle")) {
+				this.#enqueue(message);
+				return { to: message.to, outcome: "queued" };
+			}
 			return { to: message.to, outcome: "failed", error: `Agent "${message.to}" has no live session.` };
 		}
 
