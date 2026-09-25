@@ -1,6 +1,6 @@
 import { attachFrankDaemonLane, readFrankLaneResult, spawnFrankDaemonWorker } from "./frank-daemon-worker";
 import { AgentRegistry } from "../registry/agent-registry";
-import { runFrankSubagent, runSubagentFollowUpTurn } from "./executor";
+import { runFrankSubagent } from "./executor";
 import { watch } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -413,50 +413,8 @@ describe("Frank daemon transport", () => {
 			}
 		} finally { delete process.env.FRANK_ARGV_FILE; await rm(cwd, { recursive: true, force: true }); }
 	});
-	test("defaults Frank transport to process until the daemon is proven", () => {
-		expect(SETTINGS_SCHEMA["task.frankTransport"].default).toBe("process");
-	});
-	test("recovers a pre-change lane by its bare id when session-key is absent", async () => {
-		const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-old-marker-"));
-		const bin = path.join(cwd, "frank");
-		const artifactsDir = path.join(cwd, "artifacts");
-		const argvFile = path.join(cwd, "argv.txt");
-		const bareId = "pre-change-lane";
-		await mkdir(path.join(artifactsDir, `${bareId}.frank-daemon`), { recursive: true });
-		await writeFile(path.join(artifactsDir, `${bareId}.frank-daemon`, "state-dir"), "/tmp/omp-frank-daemon/host\n");
-		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "attach" ]; then printf '%s\\n' "$*" > "$FRANK_ARGV_FILE"; printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
-		process.env.FRANK_ARGV_FILE = argvFile;
-		try {
-			const result = await attachFrankDaemonLane({ artifactsDir, id: bareId, cwd, frankBin: bin });
-			expect(result.text).toBe("daemon answer");
-			const argv = await Bun.file(argvFile).text();
-			expect(argv).toContain(`attach --session ${bareId} --json`);
-		} finally {
-			delete process.env.FRANK_ARGV_FILE;
-			await rm(cwd, { recursive: true, force: true });
-		}
-	});
-	test("keepAlive daemon task completes a follow-up on the retained process worker", async () => {
-		const stub = await makeStub(`printf '%s\\n' "$@" >> "$FRANK_ARGV_FILE"; IFS= read -r input; [ "$input" = '{"op":"submit","text":"first"}' ]; printf '%s\\n' '{"type":"event","seq":1,"event":{"kind":{"AssistantDelta":"first answer"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"submit","text":"follow up"}' ]; printf '%s\\n' '{"type":"event","seq":2,"event":{"kind":{"AssistantDelta":"follow-up answer"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":2,"accepted":true}' '{"type":"terminal","version":1,"turn_id":2,"terminal":"Answer","final_seq":2}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
-		const id = `p2-keepalive-${Date.now()}`;
-		const artifactsDir = path.join(stub.cwd, "artifacts");
-		const argvFile = path.join(stub.cwd, "argv.txt");
-		const agent = parseAgent("test.md", `---\nname: frank-test-agent\ndescription: test agent\nruntime: frank\nmodel: cli-proxy/test-model\n---\nTask\n`, "project");
-		process.env.FRANK_ARGV_FILE = argvFile;
-		try {
-			await runFrankSubagent({ id, agent, task: "first", description: "first", index: 0, cwd: stub.cwd, exe: stub.exe, frankBin: stub.exe, endpoint: "http://127.0.0.1:1", model: "test-model", budgets: { maxToolCalls: 4, wallSecs: 9 }, text: "first", transport: "daemon", keepAlive: true, artifactsDir });
-			const follow = await runSubagentFollowUpTurn({ id, agent, message: "follow up", followUpMessage: "follow up", keepAlive: true });
-			expect(follow.output).toBe("follow-up answer");
-			expect(follow.exitCode).toBe(0);
-			const argv = await Bun.file(argvFile).text();
-			expect(argv).toContain("agent");
-			expect(argv).toContain("--endpoint");
-			expect(argv).not.toContain("daemon");
-		} finally {
-			AgentRegistry.global().unregister(id);
-			await rm(stub.cwd, { recursive: true, force: true });
-			delete process.env.FRANK_ARGV_FILE;
-		}
+	test("defaults Frank transport to the shared daemon", () => {
+		expect(SETTINGS_SCHEMA["task.frankTransport"].default).toBe("daemon");
 	});
 	test("reattaches when the local mirror is incomplete", async () => {
 		const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-reattach-"));
