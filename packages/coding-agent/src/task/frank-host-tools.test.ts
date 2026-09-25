@@ -33,6 +33,17 @@ describe("Frank host tool service", () => {
 		expect(result.error).toBe("host tool is not enabled: hub");
 	});
 
+	test.each(["write", "edit", "bash"] as const)("unregistered %s is refused without reaching the factory", async name => {
+		const service = createFrankHostToolService({
+			session: { toolRegistry: new Map() } as unknown as ToolSession,
+			agentId: "frank-test",
+			names: ["write", "edit", "bash"],
+		});
+		const result = await service.handle(name, { path: "x" });
+
+		expect(result).toEqual({ ok: false, error: `host tool is not registered in the host session: ${name}` });
+	});
+
 	test("task bridge runs the tool with the Frank parent identity", async () => {
 		let factorySession: ToolSession | undefined;
 		const hostSession = {

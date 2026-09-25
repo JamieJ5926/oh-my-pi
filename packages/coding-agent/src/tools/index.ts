@@ -275,6 +275,8 @@ export interface ToolSession {
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
+	/** Look up an enabled tool through the eval bridge's normal permission pipeline. */
+	getToolForEvalBridge?: (name: string) => AgentTool | undefined;
 	/**
 	 * The `replace`-mode `edit` instance a bridge must run for `old_string` /
 	 * `new_string` frames, served by the session (which owns the runner needed

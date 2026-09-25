@@ -264,6 +264,7 @@ export function createFrankHostToolService(options: {
 				// ExtensionToolWrapper around the session's own runner.
 				const editReplaceTool = name === "edit" ? (options.session.getEditReplaceTool?.() ?? registeredTool) : undefined;
 				const tool = editReplaceTool ?? registeredTool ?? (await factory(bridgedSession));
+				if (!tool) return { ok: false, error: `host tool is unavailable: ${name}` };
 				const result = await tool.execute(
 					toolCallId ?? `frank-bridge:${name}`,
 					translatedArgs,
