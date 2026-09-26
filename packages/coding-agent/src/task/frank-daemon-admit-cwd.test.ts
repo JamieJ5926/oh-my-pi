@@ -26,7 +26,8 @@ describe("Frank daemon lane admission", () => {
 			expect(argv).toContain(`--cwd ${cwdA}`);
 			expect(argv).toContain("--profile reviewer");
 			expect(argv).toContain("--model model-a");
-			expect(argv).toContain(`--budgets {\"maxToolCalls\":4,\"wallSecs\":9}`);
+			expect(argv).toContain("--max-tool-calls 4 --wall-secs 9");
+			expect(argv).not.toContain("--budgets");
 			expect(argv).toContain(`--cwd ${cwdB}`);
 			expect(argv).toContain("--profile implementer");
 			expect(argv).toContain("--model model-b");
