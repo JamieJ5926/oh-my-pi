@@ -122,9 +122,8 @@ import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
-import { oneLineLabel } from "../task/types";
 import { formatTaskId } from "../task/render";
-import { parseThinkingLevel, type ConfiguredThinkingLevel } from "../thinking";
+import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
@@ -214,14 +213,13 @@ import {
 	type SessionObserverChangeKind,
 	SessionObserverRegistry,
 } from "./session-observer-registry";
-import { resolveServedModel } from "./served-model";
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
 import { sanitizeStatusText } from "./shared";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
 import { clearMermaidCache } from "./theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerText } from "./theme/shimmer";
-import type { Theme, ThemeColor } from "./theme/theme";
+import type { Theme } from "./theme/theme";
 import {
 	getEditorTheme,
 	getMarkdownTheme,
@@ -495,108 +493,96 @@ const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
 
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
 
+/** Locked subagents-panel columns (1-based): description 27, child-strip 61, tokens end 78. */
+const SUBAGENT_PANEL_DESC_COL = 27;
+const SUBAGENT_PANEL_STRIP_COL = 61;
+const SUBAGENT_PANEL_TOKEN_END_COL = 78;
+const SUBAGENT_PANEL_WIDTH = SUBAGENT_PANEL_TOKEN_END_COL;
+const SUBAGENT_PANEL_MAX_DEPTH = 3;
+const SUBAGENT_PANEL_MAX_STRIP = 9;
+
+/** Panel token column: two-decimal millions, integer thousands, `0` for empty. */
+function formatPanelTokenCount(value: number): string {
+	if (!Number.isFinite(value) || value <= 0) return "0";
+	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+	if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+	return `${Math.round(value)}`;
+}
+
 /**
- * Subagents HUD row cells: a name column starting at 22, 2-space gutters, a
- * left-aligned child-dot strip, a right-aligned token cell and the model cell.
+ * One-letter role tag shown before the state dot: D deep lead, L pot lead,
+ * I implementer, O owner, M mechanical, R researcher/explorer, V
+ * reviewer/verifier, W worker, A assistant, S any sub-role seat.
  */
-const SUBAGENT_HUD_DESC_COL = 22;
-/** Description column floor, so a terminal too narrow for every cell still labels rows. */
-const SUBAGENT_HUD_MIN_DESC_COLS = 12;
-const SUBAGENT_HUD_GUTTER = 2;
-/**
- * Brackets of the dim `⟨role⟩` badge on a non-group row. Fixed at U+27E8/U+27E9
- * by Jamie's FINAL subagents-HUD row spec (2026-09-11), so the badge glyph does
- * not follow `theme.format.bracketLeft`, which is preset-dependent (`⟦` unicode,
- * `⟨` nerd, `[` ascii).
- */
-const SUBAGENT_HUD_ROLE_OPEN = "\u27e8";
-const SUBAGENT_HUD_ROLE_CLOSE = "\u27e9";
-const SUBAGENT_HUD_STRIP_COLS = 9;
-const SUBAGENT_HUD_TOKEN_COLS = 8;
-/** Roomy trailing cluster for `⟨id:level⟩⟨emoji⟩` plus fallback `⚠`. */
-const SUBAGENT_HUD_MODEL_COLS = 28;
-const SUBAGENT_HUD_FALLBACK_MARK = "\u26a0";
-/** Resolved-model fragments used when the full id:level cluster is squeezed. */
-const SUBAGENT_HUD_MODEL_CODES: readonly (readonly [RegExp, string, string])[] = [
-	[/muse/i, "🟣", "muse"],
-	[/deepseek.*flash/i, "🐳", "ds"],
-	[/deepseek/i, "🐳", "ds-v4"],
-	[/codex|astra/i, "🍏", "astra"],
-	[/fable/i, "🟠", "fable"],
-	[/opus/i, "🟠", "opus"],
-	[/grok/i, "⚡", "grok"],
-	[/gemini|gemma/i, "💎", "gem"],
+function subagentRoleTag(role: string): string {
+	switch (role) {
+		case "poteto-agent-deep":
+			return "D";
+		case "poteto-agent":
+			return "L";
+		case "implementer":
+			return "I";
+		case "owner":
+			return "O";
+		case "mechanical":
+			return "M";
+		case "researcher":
+		case "explorer":
+			return "R";
+		case "reviewer":
+		case "reviewer-fast":
+		case "security-reviewer":
+		case "comment-sicko":
+			return "V";
+		case "worker":
+			return "W";
+		case "assistant":
+			return "A";
+		default:
+			return "S";
+	}
+}
+
+/** Resolved-model id fragments that map to the panel's short model codes. */
+const SUBAGENT_MODEL_CODES: readonly (readonly [RegExp, string])[] = [
+	[/astra/i, "astra"],
+	[/muse/i, "muse"],
+	[/deepseek/i, "ds"],
+	[/gemini|gemma/i, "gem"],
+	[/opus/i, "opus"],
+	[/fable/i, "fable"],
+	[/luna/i, "luna"],
+	[/grok/i, "grok"],
 ];
 
-type HudModelParts = {
-	provider: string;
-	id: string;
-	thinking: string;
-	emoji: string;
-	isFallback: boolean;
-};
-
-function parseHudSelector(selector: string): { provider: string; id: string; thinking: string } {
-	const colon = selector.lastIndexOf(":");
-	const explicitLevel = colon >= 0 ? parseThinkingLevel(selector.slice(colon + 1)) : undefined;
-	const modelPart = explicitLevel !== undefined ? selector.slice(0, colon) : selector;
-	const slash = modelPart.indexOf("/");
-	const provider = slash >= 0 ? modelPart.slice(0, slash) : "";
-	const id = slash >= 0 ? modelPart.slice(slash + 1) : modelPart;
-	const thinking = explicitLevel ?? (colon >= 0 && selector.slice(colon + 1) === "auto" ? "auto" : "");
-	return { provider, id, thinking };
-}
-
-function hudModelCode(id: string): { emoji: string; code: string } | undefined {
-	const known = SUBAGENT_HUD_MODEL_CODES.find(([pattern]) => pattern.test(id));
-	return known ? { emoji: known[1], code: known[2] } : undefined;
-}
-
-function wholeCell(text: string, budget: number): string {
-	if (!text) return "";
-	return visibleWidth(text) <= budget ? text : "";
-}
-
-
-function formatHudTokenCount(value: number): string {
-	if (value < 1_000) return value.toString();
-	const divisor = value >= 1_000_000_000 ? 1_000_000_000 : value >= 1_000_000 ? 1_000_000 : 1_000;
-	const suffix = divisor === 1_000_000_000 ? "b" : divisor === 1_000_000 ? "m" : "k";
-	return `${Number((value / divisor).toFixed(1))}${suffix}`;
+/**
+ * `[code]` for a seat's own model record: `[?]` before the seat reports one, a
+ * trailing `!` when the resolved model is a fallback target.
+ */
+function subagentModelCode(session: ObservableSession): string {
+	const resolved = session.progress?.resolvedModel;
+	if (!resolved) return "?";
+	const id = (resolved.split("/").pop() ?? resolved).split(":")[0]?.toLowerCase() ?? "";
+	const known = SUBAGENT_MODEL_CODES.find(([pattern]) => pattern.test(id));
+	const code = known ? known[1] : id.replace(/[^a-z0-9]/g, "").slice(0, 4) || "?";
+	return session.progress?.resolvedModelIsFallback === true ? `${code}!` : code;
 }
 
 /**
- * A complete `<tag>` / `</tag>` envelope around a description, and the fragments
- * a length or column cap leaves when it cuts a tag in half (`<ti`, `</lab`).
- * Both fragment rules are anchored to a text end, which is where a truncated tag
- * lands; the lookahead keeps a complete opened tag out of the fragment rule.
+ * Build the anchored subagent HUD sections: live rows under a "Subagents"
+ * header plus settled top-level roots in `completed`. Clean completed roots
+ * collapse to a single dim `… N completed` count line so live rows stay
+ * visible (issue #20); settled roots with failed/aborted descendants keep
+ * their full entry so the problem signal is never folded away. This is the
+ * only place the collapsed count renders — the Agent Hub keeps the full
+ * roster — so the count cannot double-count.
  */
-const HUD_LEADING_OPEN_TAG_RE = /^\s*<[a-z][\w-]*>\s*/i;
-const HUD_TRAILING_CLOSE_TAG_RE = /\s*<\/[a-z][\w-]*>\s*$/i;
-const HUD_LEADING_TAG_FRAGMENT_RE = /^\s*<\/?[a-z][\w-]*(?=\s|$)\s*/i;
-const HUD_TRAILING_TAG_FRAGMENT_RE = /\s*<\/?[a-z][\w-]*\s*$/i;
-
-/** Drops a description's tag scaffolding, looping until the text stops changing so nesting and mixed cases terminate. */
-function stripHudTagScaffolding(text: string): string {
-	let out = text;
-	// Each pass strictly shortens the text, so this always terminates.
-	for (;;) {
-		const next = out
-			.replace(HUD_LEADING_OPEN_TAG_RE, "")
-			.replace(HUD_TRAILING_CLOSE_TAG_RE, "")
-			.replace(HUD_LEADING_TAG_FRAGMENT_RE, "")
-			.replace(HUD_TRAILING_TAG_FRAGMENT_RE, "");
-		if (next === out) break;
-		out = next;
-	}
-	return out;
-}
-
 export function renderSubagentHudLines(
 	sessions: readonly ObservableSession[],
 	columns: number,
 	ancestry: readonly { id: string; parentId?: string }[] = [],
 	siblingCollapseThreshold = 0,
+	contextPercent?: number | null,
 ): { completed: readonly string[]; subagents: readonly string[] } {
 	const candidates = new Map(
 		sessions
@@ -643,197 +629,105 @@ export function renderSubagentHudLines(
 			parent = parents.get(parent);
 		}
 	}
+	// Failed/aborted descendants keep their settled root expanded: the entry
+	// carries the problem signal, so only clean completed roots collapse to
+	// the one-line count (issue #20).
+	const problemBelow = new Map<string, number>();
+	for (const session of allSessions.values()) {
+		if (session.status !== "failed" && session.status !== "aborted") continue;
+		const seen = new Set([session.id]);
+		let parent = parents.get(session.id);
+		while (parent !== undefined && !seen.has(parent)) {
+			seen.add(parent);
+			problemBelow.set(parent, (problemBelow.get(parent) ?? 0) + 1);
+			parent = parents.get(parent);
+		}
+	}
 	const isSubtreeActive = (session: ObservableSession) =>
 		session.status === "active" || (activeBelow.get(session.id) ?? 0) > 0;
 	const roleOf = (session: ObservableSession) => session.agent ?? session.progress?.agent ?? "task";
-	/** Own-state colour per lane status: yellow running, green done, red failed, dim aborted. */
-	const stateColours: Record<ObservableSession["status"], ThemeColor> = {
-		active: "warning",
-		completed: "success",
-		failed: "error",
-		aborted: "muted",
-	};
-	const dot = (status: ObservableSession["status"]) => theme.styledSymbol("status.enabled", stateColours[status]);
+	const stateGlyph = (status: ObservableSession["status"]): string =>
+		status === "failed"
+			? theme.fg("error", "✗")
+			: status === "aborted"
+				? theme.styledSymbol("status.shadowed", "muted")
+				: theme.styledSymbol("status.enabled", status === "active" ? "warning" : "success");
 	const localName = (session: ObservableSession) => session.id.split(".").pop() ?? session.id;
 	const tokens = (session: ObservableSession) => session.progress?.tokens ?? 0;
-	const kidsOf = (session: ObservableSession) => children.get(session.id) ?? [];
-	const subtreeTokens = (session: ObservableSession): number =>
-		tokens(session) + kidsOf(session).reduce((sum, kid) => sum + subtreeTokens(kid), 0);
-	/** Medium `●` per owned child, coloured by that child's state; past nine, a dim `+N` tail keeps the cell at nine columns. */
-	const stripOf = (states: ReadonlyArray<ObservableSession["status"]>): string => {
-		if (states.length === 0) return "";
-		const rank: Record<ObservableSession["status"], number> = { completed: 0, active: 1, failed: 2, aborted: 3 };
-		const sorted = [...states].sort((a, b) => rank[a] - rank[b]);
-		let shown = sorted.length;
-		if (shown > SUBAGENT_HUD_STRIP_COLS) {
-			while (shown > 0 && shown + `+${sorted.length - shown}`.length > SUBAGENT_HUD_STRIP_COLS) shown--;
+	const completed: string[] = [];
+	// Clean completed top-level roots folded into the one-line count (issue #20).
+	let collapsedCompleted = 0;
+	const groupCode = (group: readonly ObservableSession[]): string => {
+		let code: string | undefined;
+		for (const member of group) {
+			const memberCode = subagentModelCode(member);
+			if (code === undefined) code = memberCode;
+			else if (code !== memberCode) return "?";
 		}
-		const glyphs = sorted.slice(0, shown).map(status => theme.fg(stateColours[status], "●"));
-		if (shown < sorted.length) glyphs.push(theme.fg("dim", `+${sorted.length - shown}`));
+		return code ?? "?";
+	};
+	const descendantCount = (id: string): number => {
+		let count = 0;
+		for (const child of children.get(id) ?? []) count += 1 + descendantCount(child.id);
+		return count;
+	};
+	const subtreeTokens = (session: ObservableSession): number => {
+		let sum = tokens(session);
+		for (const child of children.get(session.id) ?? []) sum += subtreeTokens(child);
+		return sum;
+	};
+	const stripFor = (session: ObservableSession, depth: number): string => {
+		const kids = children.get(session.id) ?? [];
+		if (kids.length === 0) return "—";
+		if (depth >= SUBAGENT_PANEL_MAX_DEPTH) return `${descendantCount(session.id)} deep`;
+		const rank: Record<ObservableSession["status"], number> = { completed: 0, active: 1, failed: 2, aborted: 3 };
+		const sorted = [...kids].sort((a, b) => rank[a.status] - rank[b.status]);
+		const glyphs = sorted.slice(0, SUBAGENT_PANEL_MAX_STRIP).map(kid => stateGlyph(kid.status));
+		if (sorted.length > SUBAGENT_PANEL_MAX_STRIP) glyphs.push(`+${sorted.length - SUBAGENT_PANEL_MAX_STRIP}`);
 		return glyphs.join("");
 	};
-	const markerFor = (session: ObservableSession): string => {
-		const kids = kidsOf(session);
+	const markerFor = (session: ObservableSession, depth: number): string => {
+		const kids = children.get(session.id) ?? [];
 		if (kids.length === 0) return "";
-		return kids.some(isSubtreeActive) ? "▾" : "▸";
+		return depth < SUBAGENT_PANEL_MAX_DEPTH && kids.some(isSubtreeActive) ? "▾" : "▸";
 	};
-	const modelParts = (session: ObservableSession): HudModelParts => {
-		const served = resolveServedModel({ progress: session.progress });
-		if (!served) return { provider: "", id: "", thinking: "", emoji: "", isFallback: false };
-		const parsed = parseHudSelector(served.selector);
-		return {
-			provider: parsed.provider,
-			id: parsed.id,
-			thinking: parsed.thinking,
-			emoji: hudModelCode(parsed.id)?.emoji ?? "",
-			isFallback: served.isFallback,
-		};
-	};
-	const modelCell = (session: ObservableSession): HudModelParts => modelParts(session);
-	type Rows = { lines: string[]; depths: number[] };
-	const activeRows: Rows = { lines: [], depths: [] };
-	const completed: string[] = [];
-	/** A row's styled cells short of the description column, which every row in the block shares. */
-	type RowCells = {
+	const leftCols = SUBAGENT_PANEL_DESC_COL - 1;
+	const descCols = SUBAGENT_PANEL_STRIP_COL - SUBAGENT_PANEL_DESC_COL;
+	const rightCols = SUBAGENT_PANEL_WIDTH - SUBAGENT_PANEL_STRIP_COL + 1;
+	const pad = (text: string, width: number): string => truncateToWidth(text, Math.max(0, width), undefined, true);
+	type PanelRow = {
 		depth: number;
-		left: string;
-		description: string;
-		strip: string;
-		token: string;
-		model: HudModelParts;
-	};
-	/** One emitted line: a standard row, or a raw indented line such as the `N active below` note. */
-	type RowEntry = { kind: "row"; cells: RowCells } | { kind: "raw"; text: string; depth: number };
-	const rowEntries: RowEntry[] = [];
-	const add = (text: string, depth: number) => {
-		rowEntries.push({ kind: "raw", text, depth });
-	};
-	/** Columns the tree guides occupy before a row's own cells. */
-	const indentCols = (depth: number): number => (depth === 0 ? 0 : depth * 2 + 2);
-	/** One standard-layout row: marker, dot, name, then the description, strip, token and model cells. */
-	const rowCells = (row: {
-		depth: number;
-		marker: string;
+		last: boolean;
+		indents: readonly boolean[];
+		tag: string;
 		state: ObservableSession["status"];
+		marker: string;
 		name: string;
-		role?: string;
-		frank?: boolean;
+		code: string;
 		description: string;
 		strip: string;
-		token: string;
-		model: HudModelParts;
-	}): RowCells => {
-		const marker = row.marker ? `${row.marker} ` : " ";
-		const name = row.state === "completed" ? theme.fg("dim", row.name) : theme.bold(row.name);
-		const outcome =
-			row.state === "failed" ? theme.fg("error", "✗") : row.state === "aborted" ? theme.fg("dim", "⊘") : "";
-		const role =
-			row.role && row.role !== "task"
-				? ` ${theme.fg("dim", `${SUBAGENT_HUD_ROLE_OPEN}${row.role}${SUBAGENT_HUD_ROLE_CLOSE}`)}`
-				: "";
-		const frank = row.frank ? theme.fg("dim", `${SUBAGENT_HUD_ROLE_OPEN}\u{1F9DF}${SUBAGENT_HUD_ROLE_CLOSE}`) : "";
-		return {
-			depth: row.depth,
-			left: `${marker}${dot(row.state)} ${name}${outcome}${role}${frank}`,
-			description: row.description,
-			strip: row.strip,
-			token: row.token,
-			model: row.model,
-		};
+		tokensText: string;
 	};
-	/** The leftmost description column this row fits in: its own cells plus one gutter. */
-	const demandedCol = (cells: RowCells): number =>
-		indentCols(cells.depth) + visibleWidth(cells.left) + SUBAGENT_HUD_GUTTER;
-	/** Lay a row out at the block's shared description column; a row too wide for it keeps its own. */
-	const layoutRow = (cells: RowCells, descStart: number): string => {
-		const indent = indentCols(cells.depth);
-		const start = Math.max(descStart, indent + visibleWidth(cells.left) + SUBAGENT_HUD_GUTTER);
-		const gutter = " ".repeat(SUBAGENT_HUD_GUTTER);
-		const served = cells.model;
-		const buildTrail = (opts: {
-			includeStrip: boolean;
-			includeToken: boolean;
-			includeEmoji: boolean;
-			includeThinking: boolean;
-			idMode: "full" | "ellipsize" | "drop-prefix" | "none";
-		}): { text: string; width: number } => {
-			const warn = served.isFallback ? theme.fg("warning", SUBAGENT_HUD_FALLBACK_MARK) : "";
-			const unknown = !served.id && !served.thinking && !served.isFallback;
-			let idText = served.id;
-			if (opts.idMode === "none" && !unknown) idText = "";
-			else if (opts.idMode === "ellipsize") idText = "";
-			else if (opts.idMode === "drop-prefix" && served.provider) idText = `${served.provider}/${served.id}`;
-			else idText = served.id;
-			const think = opts.includeThinking && served.thinking ? `:${served.thinking}` : "";
-			const inner = `${warn}${idText}${think}`;
-			const hasInner = !unknown && (served.isFallback || idText.length > 0 || think.length > 0);
-			const modelBracket = unknown
-				? theme.fg("dim", "· ?")
-				: hasInner
-					? `${theme.fg("dim", SUBAGENT_HUD_ROLE_OPEN)}${inner}${theme.fg("dim", SUBAGENT_HUD_ROLE_CLOSE)}`
-					: "";
-			const emoji =
-				opts.includeEmoji && served.emoji
-					? theme.fg("dim", `${SUBAGENT_HUD_ROLE_OPEN}${served.emoji}${SUBAGENT_HUD_ROLE_CLOSE}`)
-					: "";
-			const strip =
-				opts.includeStrip && cells.strip && visibleWidth(cells.strip) <= SUBAGENT_HUD_STRIP_COLS ? cells.strip : "";
-			const token = opts.includeToken ? cells.token : "";
-			const parts: string[] = [];
-			if (strip) parts.push(strip.padEnd(SUBAGENT_HUD_STRIP_COLS));
-			if (token) parts.push(`${" ".repeat(Math.max(0, SUBAGENT_HUD_TOKEN_COLS - visibleWidth(token)))}${token}`);
-			if (modelBracket || emoji) parts.push(`${modelBracket}${emoji}`);
-			const text = parts.length ? `${gutter}${parts.join(gutter)}` : "";
-			return { text, width: visibleWidth(text) };
-		};
-		const full = {
-			includeStrip: true,
-			includeToken: true,
-			includeEmoji: true,
-			includeThinking: true,
-			idMode: "full" as const,
-		};
-		let built = buildTrail(full);
-		const roomForDesc = (trailWidth: number) => columns - start - trailWidth;
-		let descCols = roomForDesc(built.width);
-		if (descCols < SUBAGENT_HUD_MIN_DESC_COLS) {
-			built = buildTrail({ ...full, includeToken: false });
-			descCols = roomForDesc(built.width);
-		}
-		if (descCols < SUBAGENT_HUD_MIN_DESC_COLS) {
-			built = buildTrail({ ...full, includeToken: false, includeStrip: false });
-			descCols = roomForDesc(built.width);
-		}
-		if (start + built.width > columns) {
-			const squeeze: Array<Parameters<typeof buildTrail>[0]> = [
-				{ includeStrip: false, includeToken: false, includeEmoji: false, includeThinking: true, idMode: "full" },
-				{ includeStrip: false, includeToken: false, includeEmoji: false, includeThinking: false, idMode: "full" },
-				{ includeStrip: false, includeToken: false, includeEmoji: false, includeThinking: false, idMode: "drop-prefix" },
-				{ includeStrip: false, includeToken: false, includeEmoji: false, includeThinking: false, idMode: "ellipsize" },
-				{ includeStrip: false, includeToken: false, includeEmoji: false, includeThinking: false, idMode: "none" },
-			];
-			for (const attempt of squeeze) {
-				built = buildTrail(attempt);
-				if (start + built.width <= columns) break;
-			}
-			descCols = Math.max(0, roomForDesc(built.width));
-		}
-		descCols = Math.max(0, descCols);
-		return (
-			`${cells.left}${" ".repeat(Math.max(0, start - indent - visibleWidth(cells.left)))}` +
-			truncateToWidth(cells.description, descCols, undefined, true) +
-			built.text
-		);
+	const rows: PanelRow[] = [];
+	const continuations: boolean[] = [];
+	const renderRow = (row: PanelRow): string => {
+		let prefix = "";
+		for (let level = 0; level < row.depth; level++) prefix += row.indents[level] ? `${theme.tree.vertical} ` : "  ";
+		if (row.depth > 0) prefix += row.last ? theme.tree.last : theme.tree.branch;
+		const marker = row.marker ? `${row.marker} ` : " ";
+		const dot = stateGlyph(row.state);
+		const codeSuffix = ` [${row.code}]`;
+		const fixed = visibleWidth(prefix) + visibleWidth(marker) + 1 + visibleWidth(dot) + 1 + visibleWidth(codeSuffix);
+		const name = truncateToWidth(row.name, Math.max(1, leftCols - fixed));
+		const left = pad(`${prefix}${marker}${row.tag}${dot} ${name}${codeSuffix}`, leftCols);
+		const desc = pad(row.description, descCols);
+		const strip = pad(row.strip, rightCols - visibleWidth(row.tokensText));
+		return truncateToWidth(`${left}${desc}${strip}${row.tokensText}`, columns);
 	};
 	const delegatingRoles: Record<string, true> = { "poteto-agent": true, "poteto-agent-deep": true, owner: true };
 	const ownRow = (session: ObservableSession): boolean =>
 		delegatingRoles[roleOf(session)] === true || delegators.has(session.id);
-	type ChildRow = { group: readonly ObservableSession[] | undefined; session: ObservableSession };
-	/**
-	 * The child rows `parent` draws, in emission order: a collapsed same-role group is one entry.
-	 * The top-level settled-row promotion stays with the caller, which owns the completed list.
-	 */
-	const childRowsOf = (parent: string | undefined): ChildRow[] => {
+	const renderChildren = (parent: string | undefined, depth: number): void => {
 		const siblings = children.get(parent) ?? [];
 		const groups = new Map<string, ObservableSession[]>();
 		if (parent !== undefined)
@@ -844,156 +738,98 @@ export function renderSubagentHudLines(
 				if (group) group.push(session);
 				else groups.set(role, [session]);
 			}
-		const rows: ChildRow[] = [];
 		const emitted = new Set<string>();
-		for (const session of siblings) {
+		for (let index = 0; index < siblings.length; index++) {
+			const session = siblings[index]!;
+			const last = index === siblings.length - 1;
+			// Depth-0 rows carry no connector, so a vertical continuation is only
+			// meaningful below them once a connector column exists.
+			continuations[depth] = depth > 0 && !last;
+			continuations.length = depth + 1;
 			const role = roleOf(session);
 			const group = ownRow(session) ? undefined : groups.get(role);
 			if (group && group.length > siblingCollapseThreshold) {
 				if (emitted.has(role)) continue;
 				emitted.add(role);
-				if (group.some(isSubtreeActive)) rows.push({ group, session });
-				continue;
-			}
-			rows.push({ group: undefined, session });
-		}
-		return rows;
-	};
-	const aggregateState = (group: readonly ObservableSession[]): ObservableSession["status"] => {
-		const counts: Record<ObservableSession["status"], number> = { active: 0, completed: 0, failed: 0, aborted: 0 };
-		for (const member of group) counts[member.status]++;
-		return counts.failed ? "failed" : counts.active ? "active" : counts.aborted ? "aborted" : "completed";
-	};
-	/** One `•` per child row this session owns: a collapsed group contributes one dot in its aggregate state. */
-	const stripFor = (session: ObservableSession): string =>
-		stripOf(childRowsOf(session.id).map(row => (row.group ? aggregateState(row.group) : row.session.status)));
-	const renderChildren = (parent: string | undefined, depth: number): void => {
-		for (const { group, session } of childRowsOf(parent)) {
-			if (group) {
-				const role = roleOf(group[0]!);
-				const groupModel = modelCell(group[0]!);
-				rowEntries.push({
-					kind: "row",
-					cells: rowCells({
-						depth,
-						marker: "",
-						state: aggregateState(group),
-						name: `${role} ×${group.length}`,
-						frank: group.every(member => member.runtime === "frank"),
-						description: group.map(member => localName(member)).join("  "),
-						strip: stripOf(group.map(member => member.status)),
-						token: formatHudTokenCount(group.reduce((sum, member) => sum + tokens(member), 0)),
-						model: group.every(member => {
-							const other = modelCell(member);
-							return (
-								other.provider === groupModel.provider &&
-								other.id === groupModel.id &&
-								other.thinking === groupModel.thinking &&
-								other.emoji === groupModel.emoji &&
-								other.isFallback === groupModel.isFallback
-							);
-						})
-							? groupModel
-							: { provider: "", id: "", thinking: "", emoji: "", isFallback: false },
-					}),
+				if (!group.some(isSubtreeActive)) continue;
+				const counts = { active: 0, completed: 0, failed: 0, aborted: 0 };
+				let sum = 0;
+				for (const member of group) {
+					counts[member.status]++;
+					sum += tokens(member);
+				}
+				const state = counts.failed
+					? "failed"
+					: counts.active
+						? "active"
+						: counts.aborted
+							? "aborted"
+							: "completed";
+				rows.push({
+					depth,
+					last,
+					indents: continuations.slice(0, depth),
+					tag: subagentRoleTag(role),
+					state,
+					marker: "",
+					name: `${role} x${group.length}`,
+					code: groupCode(group),
+					description: group.map(member => `${stateGlyph(member.status)} ${localName(member)}`).join("  "),
+					strip: "",
+					tokensText: formatPanelTokenCount(sum),
 				});
 				continue;
 			}
 			if (parent === undefined && !isSubtreeActive(session)) {
+				// Clean completed roots collapse to the one-line count below (issue #20):
+				// one full row per finished root buries live rows. Roots with failed or
+				// aborted descendants keep their entry so the problem signal stays visible.
+				if (session.status === "completed" && (problemBelow.get(session.id) ?? 0) === 0) {
+					collapsedCompleted += 1;
+					continue;
+				}
 				let leads = "";
 				for (const child of children.get(session.id) ?? []) {
 					const childRole = roleOf(child);
 					if (childRole !== "poteto-agent" && childRole !== "poteto-agent-deep") continue;
-					leads += `${leads ? ", " : ""}${dot(child.status)} ${theme.bold(localName(child))}`;
+					leads += `${leads ? ", " : ""}${stateGlyph(child.status)} ${theme.bold(localName(child))}`;
 				}
 				completed.push(
-					`${dot(session.status)} ${theme.bold(formatTaskId(session.id))}${leads ? ` (${leads})` : ""}`,
+					`${stateGlyph(session.status)} ${theme.bold(formatTaskId(session.id))}${leads ? ` (${leads})` : ""}`,
 				);
 				continue;
 			}
-			// A finished or cancelled child with nothing live under it is history: the
-			// parent's dot strip already counts it. Failures stay so they get seen.
-			if (parent !== undefined && session.status !== "failed" && !isSubtreeActive(session)) continue;
-			const name = parent === undefined ? formatTaskId(session.id) : localName(session);
-			const description = session.description?.trim() || session.progress?.description?.trim();
-			// A generated label can arrive wrapped in a prompt tag (`<label>…</label>`)
-			// or cut by a cap into a bare fragment (`<ti`, `</lab`): both are prompt
-			// scaffolding, never text to show. Stripping runs before the label cap, so
-			// the cap can never leave a fragment of its own.
-			const preview =
-				description && !labelEchoesHandle(session.id, description)
-					? oneLineLabel(
-							stripHudTagScaffolding(description).replace(/\s*[\r\n]+\s*/g, " ↵ "),
-						)
-					: "";
-			const kids = kidsOf(session);
-			const token =
-				kids.length > 0 ? `Σ ${formatHudTokenCount(subtreeTokens(session))}` : formatHudTokenCount(tokens(session));
-			rowEntries.push({
-				kind: "row",
-				cells: rowCells({
-					depth,
-					marker: markerFor(session),
-					state: session.status,
-					name,
-					role: roleOf(session),
-					frank: session.runtime === "frank",
-					description: preview,
-					strip: stripFor(session),
-					token,
-					model: modelCell(session),
-				}),
+			const rawDescription = session.description?.trim() || session.progress?.description?.trim() || "";
+			// A label that only echoes the spawn handle would repeat the name column.
+			const description = labelEchoesHandle(session.id, rawDescription) ? "" : rawDescription;
+			const hasChildren = (children.get(session.id) ?? []).length > 0;
+			rows.push({
+				depth,
+				last,
+				indents: continuations.slice(0, depth),
+				tag: subagentRoleTag(role),
+				state: session.status,
+				marker: markerFor(session, depth),
+				name: localName(session),
+				code: subagentModelCode(session),
+				description: replaceTabs(description).replace(/\s*[\r\n]+\s*/g, " ↵ "),
+				strip: stripFor(session, depth),
+				tokensText: hasChildren
+					? `Σ ${formatPanelTokenCount(subtreeTokens(session))}`
+					: formatPanelTokenCount(tokens(session)),
 			});
-			// Only a settled row with live work still buried under it earns the note;
-			// a count of zero means every descendant settled, so the row stands alone.
-			const below = activeBelow.get(session.id) ?? 0;
-			if (session.status !== "active" && below > 0) add(`${below} active below`, depth + 1);
-			renderChildren(session.id, depth + 1);
+			if (depth < SUBAGENT_PANEL_MAX_DEPTH) renderChildren(session.id, depth + 1);
 		}
 	};
 	renderChildren(undefined, 0);
-	/**
-	 * The block's description column: wide enough for the widest `Name ⟨role⟩` any row
-	 * draws, so descriptions line up; clamped to keep the description readable when the
-	 * terminal is too narrow, where a row back on its own wider start gets truncated.
-	 */
-	const descStart = Math.min(
-		rowEntries.reduce(
-			(wide, entry) => (entry.kind === "row" ? Math.max(wide, demandedCol(entry.cells)) : wide),
-			SUBAGENT_HUD_DESC_COL,
-		),
-		Math.max(
-			SUBAGENT_HUD_DESC_COL,
-			columns - (SUBAGENT_HUD_GUTTER * 3 + SUBAGENT_HUD_STRIP_COLS + SUBAGENT_HUD_TOKEN_COLS + SUBAGENT_HUD_MODEL_COLS),
-		),
-	);
-	for (const entry of rowEntries) {
-		activeRows.depths.push(entry.kind === "row" ? entry.cells.depth : entry.depth);
-		activeRows.lines.push(entry.kind === "row" ? layoutRow(entry.cells, descStart) : ` ${entry.text}`);
-	}
-	const section = ({ lines: rows, depths: rowDepths }: Rows, title: string): string[] => {
-		if (rows.length === 0) return [];
-		const followingSibling = new Set<number>();
-		const pending: number[] = [];
-		for (let index = rows.length - 1; index >= 0; index--) {
-			while (pending.length && rowDepths[pending[pending.length - 1]] > rowDepths[index]) pending.pop();
-			if (pending.length && rowDepths[pending[pending.length - 1]] === rowDepths[index]) followingSibling.add(index);
-			pending.push(index);
-		}
-		const continuations: boolean[] = [];
-		const guided = rows.map((row, index) => {
-			const depth = rowDepths[index];
-			let prefix = "";
-			for (let level = 0; level < depth; level++)
-				prefix += continuations[level] ? `${theme.tree.vertical} ` : "  ";
-			const hasSibling = followingSibling.has(index);
-			if (depth > 0) prefix += hasSibling ? theme.tree.branch : theme.tree.last;
-			continuations[depth] = hasSibling;
-			continuations.length = depth + 1;
-			return `${theme.fg("dim", prefix)}${row}`;
-		});
-		return ["", theme.bold(theme.fg("accent", title)), ...guided];
-	};
+	const totalTokens = [...candidates.values()].reduce((sum, session) => sum + tokens(session), 0);
+	const ctx =
+		typeof contextPercent === "number" && Number.isFinite(contextPercent) ? ` · ${Math.round(contextPercent)}% ctx` : "";
+	const stats = `${candidates.size} ${candidates.size === 1 ? "agent" : "agents"} · ${formatPanelTokenCount(totalTokens)}${ctx}`;
+	const headerLabel = "Subagents";
+	const header = `${theme.bold(theme.fg("accent", headerLabel))}${" ".repeat(
+		Math.max(1, SUBAGENT_PANEL_WIDTH - headerLabel.length - visibleWidth(stats)),
+	)}${stats}`;
 	const completedLines: string[] = [];
 	const completedWidth = Math.max(1, columns);
 	let completedLine = "";
@@ -1007,9 +843,16 @@ export function renderSubagentHudLines(
 		}
 	}
 	if (completedLine) completedLines.push(...wrapTextWithAnsi(completedLine, completedWidth));
+	// The one-line count for collapsed completed roots (issue #20). This is the
+	// only place the count renders: the Agent Hub keeps the full roster and the
+	// inline task renderer keeps its own per-batch summary, so there is no
+	// double count. Failed/aborted roots keep their full entries above.
+	if (collapsedCompleted > 0) {
+		completedLines.push(truncateToWidth(theme.fg("dim", `… ${collapsedCompleted} completed`), completedWidth));
+	}
 	return {
 		completed: completedLines,
-		subagents: section(activeRows, "Subagents"),
+		subagents: rows.length === 0 ? [] : ["", truncateToWidth(header, columns), "", ...rows.map(renderRow)],
 	};
 }
 
@@ -3209,9 +3052,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			const ref = registry.get(session.id);
 			if (ref) this.#subagentHudAncestry.set(session.id, { id: ref.id, parentId: ref.parentId });
 		}
-		const lines = renderSubagentHudLines(sessions, Math.max(0, this.ui.terminal.columns - 2), [
-			...this.#subagentHudAncestry.values(),
-		]);
+		const lines = renderSubagentHudLines(
+			sessions,
+			Math.max(0, this.ui.terminal.columns - 2),
+			[...this.#subagentHudAncestry.values()],
+			undefined,
+			this.session.getContextUsage()?.percent,
+		);
 		if (lines.completed.length > 0) {
 			this.completedContainer.addChild(new Text(theme.bold(theme.fg("accent", "Completed")), 1, 0));
 			this.completedContainer.addChild(new Text(lines.completed.join("\n"), 1, 0));
