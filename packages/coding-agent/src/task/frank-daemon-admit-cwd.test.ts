@@ -1,10 +1,22 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnFrankDaemonWorker } from "./frank-daemon-worker";
 
 describe("Frank daemon lane admission", () => {
+	let isolatedStateDir = "";
+	let priorStateDir: string | undefined;
+	beforeEach(async () => {
+		priorStateDir = process.env.FRANK_DAEMON_STATE_DIR;
+		isolatedStateDir = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-state-"));
+		process.env.FRANK_DAEMON_STATE_DIR = isolatedStateDir;
+	});
+	afterEach(async () => {
+		if (priorStateDir === undefined) delete process.env.FRANK_DAEMON_STATE_DIR;
+		else process.env.FRANK_DAEMON_STATE_DIR = priorStateDir;
+		await rm(isolatedStateDir, { recursive: true, force: true });
+	});
 	test("passes each lane's cwd and profile to daemon admission", async () => {
 		const directory = await mkdtemp(path.join(os.tmpdir(), "frank-admit-cwd-"));
 		const cwdA = await mkdtemp(path.join(os.tmpdir(), "frank-lane-a-"));

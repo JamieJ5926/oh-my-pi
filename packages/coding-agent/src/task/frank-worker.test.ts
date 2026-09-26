@@ -1,11 +1,11 @@
-import { attachFrankDaemonLane, readFrankLaneResult, spawnFrankDaemonWorker } from "./frank-daemon-worker";
+import { attachFrankDaemonLane, daemonStateDir, readFrankLaneResult, spawnFrankDaemonWorker } from "./frank-daemon-worker";
 import { AgentRegistry } from "../registry/agent-registry";
 import { runFrankSubagent } from "./executor";
 import { watch } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { parseAgent } from "./agents";
 import { DEFAULT_FRANK_WORKER_BUDGETS, FrankProtocolError, frankWorkerEndpoint, parseFrankControl, resolveFrankWorkerBudgets, spawnFrankWorker, startFrankWorker, type FrankEvent } from "./frank-worker";
 import { SETTINGS_SCHEMA } from "../config/settings-schema";
@@ -365,6 +365,22 @@ describe("Frank daemon lane reader", () => {
 });
 
 describe("Frank daemon transport", () => {
+	let isolatedStateDir = "";
+	let priorStateDir: string | undefined;
+	beforeEach(async () => {
+		priorStateDir = process.env.FRANK_DAEMON_STATE_DIR;
+		isolatedStateDir = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-state-"));
+		process.env.FRANK_DAEMON_STATE_DIR = isolatedStateDir;
+	});
+	afterEach(async () => {
+		if (priorStateDir === undefined) delete process.env.FRANK_DAEMON_STATE_DIR;
+		else process.env.FRANK_DAEMON_STATE_DIR = priorStateDir;
+		await rm(isolatedStateDir, { recursive: true, force: true });
+	});
+	test("the shared host daemon directory defaults to /tmp/omp-frank-daemon/host", () => {
+		delete process.env.FRANK_DAEMON_STATE_DIR;
+		expect(daemonStateDir()).toBe("/tmp/omp-frank-daemon/host");
+	});
 	test("mirrors attach output and forwards transcript events", async () => {
 		const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-cli-"));
 		const bin = path.join(cwd, "frank");
@@ -380,7 +396,7 @@ describe("Frank daemon transport", () => {
 			expect(delivered.map(event => event.seq)).toEqual([1, 2]);
 			expect((await Bun.file(parityFile).text()).trim().split("\n")).toEqual(["auto", "any", "test-model:high"]);
 			const stateDir = (await Bun.file(path.join(artifactsDir, "lane-1.frank-daemon", "state-dir")).text()).trim();
-			expect(stateDir).toBe("/tmp/omp-frank-daemon/host");
+			expect(stateDir).toBe(isolatedStateDir);
 		} finally {
 			delete process.env.FRANK_PARITY_FILE;
 			await rm(cwd, { recursive: true, force: true });
@@ -401,7 +417,7 @@ describe("Frank daemon transport", () => {
 			expect(argv).not.toMatch(/--session (?:lane-1|lane-2)(?:\s|$)/);
 			const keys: string[] = [];
 			for (const id of ["lane-1", "lane-2"]) {
-				expect((await Bun.file(path.join(artifactsDir, `${id}.frank-daemon`, "state-dir")).text()).trim()).toBe("/tmp/omp-frank-daemon/host");
+				expect((await Bun.file(path.join(artifactsDir, `${id}.frank-daemon`, "state-dir")).text()).trim()).toBe(isolatedStateDir);
 				const key = (await Bun.file(path.join(artifactsDir, `${id}.frank-daemon`, "session-key")).text()).trim();
 				expect(key).toMatch(/^[0-9a-f]{16}$/);
 				expect(key).not.toBe(id);
