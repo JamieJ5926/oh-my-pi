@@ -282,7 +282,7 @@ export function createFrankHostToolService(options: {
 			}
 			if (!enabled[name]) return { ok: false, error: `host tool is not enabled: ${name}` };
 			const params = (args ?? {}) as ChildDrainCall;
-			const hostMail = name === "hub" ? hostMailFor(options.agentId) : "";
+			const hostMail = hostMailFor(options.agentId);
 			if (name === "hub" && params.op === "wait") {
 				const children = drainableChildren(params);
 				if (children.length > 0) {

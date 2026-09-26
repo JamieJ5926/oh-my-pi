@@ -373,6 +373,22 @@ describe("Frank host tool service: child drain", () => {
 });
 
 describe("Frank hub send mailbox", () => {
+	test("queued host mail is injected into the next non-hub tool result", async () => {
+		const id = "SteerMailNonHubProbe";
+		AgentRegistry.global().unregister(id);
+		AgentRegistry.global().register({ id, displayName: id, kind: "sub", session: null, status: "running" });
+		await IrcBus.global().send({ from: "Main", to: id, body: "steer before run" });
+		const service = createFrankHostToolService({
+			session: { toolRegistry: new Map([["read", { execute: async () => ({ content: [{ type: "text" as const, text: "file contents" }] }) }]]) } as unknown as ToolSession,
+			agentId: id,
+			names: ["read"],
+		});
+		const result = await service.handle("read", {});
+		expect(result.content).toContain("steer before run");
+		expect(result.content).toContain("file contents");
+		expect(IrcBus.global().unreadCount(id)).toBe(0);
+		AgentRegistry.global().unregister(id);
+	});
 	test("a running frank seat with a null session accepts hub send and the next hub call returns the body", async () => {
 		const id = "SteerMailProbe";
 		AgentRegistry.global().unregister(id);
