@@ -164,11 +164,13 @@ const FIRST_WORK_TOOLS: Readonly<Record<string, true>> = {
 };
 
 function coordinatorItemsMissingDelegable(args: unknown): string[] {
-	if (typeof args !== "object" || args === null || !("tasks" in args) || !Array.isArray(args.tasks)) return [];
+	if (typeof args !== "object" || args === null || !("tasks" in args) || !Array.isArray(args.tasks)) return ["batch"];
+	if (args.tasks.length === 0) return ["batch"];
 	return args.tasks.flatMap((item, index) => {
-		if (typeof item !== "object" || item === null || !("agent" in item) || typeof item.agent !== "string" || !COORDINATOR_SEATS[item.agent]) return [];
+		if (typeof item !== "object" || item === null) return [String(index + 1)];
+		if (!("agent" in item) || typeof item.agent !== "string" || !COORDINATOR_SEATS[item.agent]) return [];
 		const task = "task" in item && typeof item.task === "string" ? item.task : "";
-		return /^[ \t]*delegable[ \t]*:[ \t]*\S/im.test(task) ? [] : [String(index + 1)];
+		return /^[ \t]*(?:delegable[ \t]*:|single-slice[ \t]*:)[ \t]*\S/im.test(task) ? [] : [String(index + 1)];
 	});
 }
 
@@ -316,7 +318,10 @@ export function createFrankHostToolService(options: {
 			if (name === "task" && coordinator) {
 				const missing = coordinatorItemsMissingDelegable(args);
 				if (missing.length > 0) {
-					return { ok: false, error: `Delegation required: coordinator task item${missing.length === 1 ? "" : "s"} ${missing.join(", ")} must each declare their own \`delegable: <scope>\` in its task text.` };
+					const reason = missing.includes("batch")
+						? "call must contain a non-empty tasks batch"
+						: `item${missing.length === 1 ? "" : "s"} ${missing.join(", ")} must each declare their own \`delegable: <scope>\` or \`single-slice: <reason>\` in its task text`;
+					return { ok: false, error: `Delegation required: coordinator task ${reason}.` };
 				}
 			}
 			const params = (args ?? {}) as ChildDrainCall;
