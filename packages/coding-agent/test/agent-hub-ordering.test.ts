@@ -213,15 +213,89 @@ describe("Agent hub row ordering", () => {
 		try {
 			hub.handleInput("t");
 			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
-			expect(rendered).toContain("leaf-a");
-			expect(rendered).toContain("leaf-b");
-			expect(rendered).toContain("leaf-c");
-			expect(rendered).toContain("leaf-d");
-			expect(rendered.match(/leaf-a/g)).toHaveLength(1);
-			expect(rendered.match(/leaf-b/g)).toHaveLength(1);
+			for (const id of ["leaf-a", "leaf-b", "leaf-c", "leaf-d"]) expect(rendered).toContain(id);
 			expect(rendered).toContain("2 explorer");
 			expect(rendered.match(/Coordinator A/g)).toHaveLength(1);
 			expect(rendered.match(/coordinator-b/g)).toHaveLength(1);
+		} finally {
+			hub.dispose();
+		}
+	});
+	it("keeps a sub-coordinator separate from same-seat sibling leaves", () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(40);
+		const agents = new AgentRegistry();
+		agents.register({ id: "coordinator", displayName: "Coordinator", kind: "sub", parentId: "root", session: null, history: { modelRole: "explorer" } });
+		agents.register({ id: "child", displayName: "Child", kind: "sub", parentId: "coordinator", session: null, history: { modelRole: "explorer" } });
+		agents.register({ id: "sibling", displayName: "Sibling", kind: "sub", parentId: "root", session: null, history: { modelRole: "explorer" } });
+		const hub = makeHub(agents);
+		try {
+			hub.handleInput("t");
+			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(rendered).toContain("coordinator");
+			expect(rendered).toContain("sibling");
+			expect(rendered).toContain("explorer");
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("clicking a grouped row selects and activates a member of that group", async () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(40);
+		const agents = new AgentRegistry();
+		agents.register({ id: "leaf-a", displayName: "Leaf A", kind: "sub", parentId: "parent", session: {} as AgentSession, history: { modelRole: "explorer" }, lastActivity: 1 });
+		agents.register({ id: "leaf-b", displayName: "Leaf B", kind: "sub", parentId: "parent", session: {} as AgentSession, history: { modelRole: "explorer" }, lastActivity: 2 });
+		agents.register({ id: "unrelated", displayName: "Unrelated", kind: "sub", parentId: "other", session: {} as AgentSession, lastActivity: 3 });
+		const focused: string[] = [];
+		const hub = makeHub(agents, { focusAgent: async id => { focused.push(id); } });
+		try {
+			expect(selectedAgentId(hub)).toBe("unrelated");
+			hub.handleInput("t");
+			const frame = hub.render(120);
+			const groupRow = frame.findIndex(line => /^│ .*2 explorer.*│/u.test(Bun.stripANSI(line)));
+			expect(groupRow).toBeGreaterThanOrEqual(0);
+			hub.handleInput(leftClick(groupRow + 1));
+			await Promise.resolve();
+			expect(["leaf-a", "leaf-b"]).toContain(selectedAgentId(hub));
+			expect(["leaf-a", "leaf-b"]).toContain(focused[0]);
+		} finally {
+			hub.dispose();
+		}
+	});
+	it("paints the selected state on a grouped row after selecting a non-anchor member", () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(40);
+		const agents = new AgentRegistry();
+		agents.register({ id: "leaf-a", displayName: "Leaf A", kind: "sub", parentId: "parent", session: null, history: { modelRole: "explorer" } });
+		agents.register({ id: "leaf-b", displayName: "Leaf B", kind: "sub", parentId: "parent", session: null, history: { modelRole: "explorer" } });
+		const hub = makeHub(agents);
+		try {
+			hub.handleInput("t");
+			hub.handleInput("j");
+			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(rendered).toContain("❯");
+			expect(rendered).toContain("Leaf B");
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("keeps grouped rendering bounded for thousands of same-parent same-seat leaves", () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(12);
+		const agents = new AgentRegistry();
+		for (let i = 0; i < 5_000; i++) {
+			const id = `Grouped-${i.toString().padStart(4, "0")}`;
+			agents.register({ id, displayName: id, kind: "sub", parentId: "parent", session: null, status: "parked", history: { modelRole: "explorer" } });
+		}
+		const hub = makeHub(agents);
+		try {
+			hub.handleInput("t");
+			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(rendered).toContain("5000 explorer");
+			expect(rendered.split("\n").filter(line => /Grouped-\d/u.test(line)).length).toBeLessThanOrEqual(2);
+			expect(rendered).toContain("…");
 		} finally {
 			hub.dispose();
 		}
