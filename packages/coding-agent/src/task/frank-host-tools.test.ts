@@ -83,12 +83,12 @@ describe("Frank host tool service", () => {
 		expect(result.error).not.toContain("Delegation required");
 	});
 
-	test("structured delegable scope satisfies coordinator child declaration", async () => {
+	test("structured-only delegable scope is rejected until carried in child task text", async () => {
 		const original = BUILTIN_TOOLS.task;
 		BUILTIN_TOOLS.task = async () => ({ name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text" as const, text: "spawned" }] }) } as never);
 		try {
 			const service = createFrankHostToolService({ session: {} as ToolSession, agentId: "pot", workerLane: { agent: "frank-poteto-agent", prompt: "Coordinate" } });
-			expect(await service.handle("task", { tasks: [{ agent: "frank-poteto-agent", task: "Inspect files", delegable: "inspect source only" }] })).toEqual({ ok: true, content: "spawned" });
+			expect(await service.handle("task", { tasks: [{ agent: "frank-poteto-agent", task: "Inspect files", delegable: "inspect source only" }] })).toEqual({ ok: false, error: "Delegation required: coordinator task item 1 must each declare their own `delegable: <scope>` or `single-slice: <reason>` in its task text." });
 		} finally {
 			BUILTIN_TOOLS.task = original;
 		}

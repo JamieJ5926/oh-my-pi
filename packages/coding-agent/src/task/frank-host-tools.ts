@@ -172,8 +172,7 @@ function coordinatorItemsMissingDelegable(args: unknown): string[] {
 		if (typeof item !== "object" || item === null) return [String(index + 1)];
 		if (!("agent" in item) || typeof item.agent !== "string" || !COORDINATOR_SEATS[item.agent]) return [];
 		const task = "task" in item && typeof item.task === "string" ? item.task : "";
-		const delegable = "delegable" in item && typeof item.delegable === "string" && item.delegable.trim().length > 0;
-		return delegable || /^[ \t]*(?:delegable[ \t]*:|single-slice[ \t]*:)[ \t]*\S/im.test(task) ? [] : [String(index + 1)];
+		return /^[ \t]*(?:delegable[ \t]*:|single-slice[ \t]*:)[ \t]*\S/im.test(task) ? [] : [String(index + 1)];
 	});
 }
 
