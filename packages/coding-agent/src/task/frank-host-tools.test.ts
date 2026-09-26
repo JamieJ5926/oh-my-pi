@@ -51,10 +51,10 @@ describe("Frank host tool service", () => {
 		const sessionWithRegistry = {
 			toolRegistry: new Map([["read", { execute: async () => { invoked++; return { content: [{ type: "text", text: "read" }] }; } }]]),
 		} as unknown as ToolSession;
-		const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "pot", names: ["read"], workerLane: { agent: "poteto-agent", prompt: "Coordinate this work" } });
+		const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "pot", names: ["read"], workerLane: { agent: "frank-poteto-agent", prompt: "Coordinate this work" } });
 		expect(await service.handle("read", {})).toEqual({ ok: false, error: "Delegation required: dispatch a task before calling `read`, or declare `single-slice: <reason>` in the worker brief." });
 		expect(invoked).toBe(0);
-		const singleSlice = createFrankHostToolService({ session: sessionWithRegistry, agentId: "solo", names: ["read"], workerLane: { agent: "poteto-agent", prompt: "single-slice: this is indivisible" } });
+		const singleSlice = createFrankHostToolService({ session: sessionWithRegistry, agentId: "solo", names: ["read"], workerLane: { agent: "frank-poteto-agent", prompt: "single-slice: this is indivisible" } });
 		expect(await singleSlice.handle("read", {})).toEqual({ ok: true, content: "read" });
 	});
 
@@ -63,17 +63,21 @@ describe("Frank host tool service", () => {
 		const original = BUILTIN_TOOLS.task;
 		BUILTIN_TOOLS.task = async () => ({ name: "task", label: "Task", description: "", parameters: {}, execute: async () => { invocations++; return { content: [{ type: "text", text: "spawned" }] }; } } as never);
 		try {
-			const service = createFrankHostToolService({ session: {} as ToolSession, agentId: "pot", workerLane: { agent: "poteto-agent-deep", prompt: "Coordinate" } });
-			const rejected = await service.handle("task", { context: "delegable: shared scope", tasks: [{ agent: "poteto-agent", task: "Implement A\ndelegable: source inspection" }, { agent: "poteto-agent-deep", task: "Implement B" }] });
+			const service = createFrankHostToolService({ session: {} as ToolSession, agentId: "pot", workerLane: { agent: "frank-poteto-agent-deep", prompt: "Coordinate" } });
+			const rejected = await service.handle("task", { context: "delegable: shared scope", tasks: [{ agent: "frank-poteto-agent", task: "Implement A\ndelegable: source inspection" }, { agent: "frank-poteto-agent-deep", task: "Implement B" }] });
 			expect(rejected).toEqual({ ok: false, error: "Delegation required: coordinator task item 2 must each declare their own `delegable: <scope>` or `single-slice: <reason>` in its task text." });
 			expect(invocations).toBe(0);
-			expect(await service.handle("task", { context: "Shared scope", tasks: [{ agent: "poteto-agent", task: "single-slice: indivisible task" }] })).toEqual({ ok: true, content: "spawned" });
+			expect(await service.handle("task", { context: "Shared scope", tasks: [{ agent: "frank-poteto-agent", task: "single-slice: indivisible task" }] })).toEqual({ ok: true, content: "spawned" });
 			expect(invocations).toBe(1);
-			const accepted = await service.handle("task", { context: "Shared scope", tasks: [{ agent: "poteto-agent", task: "Implement A\ndelegable: source inspection" }, { agent: "poteto-agent-deep", task: "Implement B\ndelegable: test review" }] });
+			const accepted = await service.handle("task", { context: "Shared scope", tasks: [{ agent: "frank-poteto-agent", task: "Implement A\ndelegable: source inspection" }, { agent: "frank-poteto-agent-deep", task: "Implement B\ndelegable: test review" }] });
 			expect(accepted).toEqual({ ok: true, content: "spawned" });
 			expect(invocations).toBe(2);
 			const malformed = await service.handle("task", { task: "missing a batch" });
 			expect(malformed).toEqual({ ok: false, error: "Delegation required: coordinator task call must contain a non-empty tasks batch." });
+			const registeredRead = { execute: async () => ({ content: [{ type: "text", text: "read" }] }) };
+			const unlockedService = createFrankHostToolService({ session: { toolRegistry: new Map([["read", registeredRead]]) } as unknown as ToolSession, agentId: "pot", names: ["task", "read"], workerLane: { agent: "frank-poteto-agent-deep", prompt: "Coordinate" } });
+			expect(await unlockedService.handle("task", { context: "Shared", tasks: [{ agent: "implementer", task: "child" }] })).toEqual({ ok: true, content: "spawned" });
+			expect(await unlockedService.handle("read", {})).toEqual({ ok: true, content: "read" });
 		} finally {
 			BUILTIN_TOOLS.task = original;
 		}

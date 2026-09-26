@@ -146,6 +146,8 @@ function laneSessionView(host: ReadonlySessionManager, lane: { prompt: string; a
 }
 
 const COORDINATOR_SEATS: Readonly<Record<string, true>> = {
+	"frank-poteto-agent": true,
+	"frank-poteto-agent-deep": true,
 	"poteto-agent": true,
 	"poteto-agent-deep": true,
 };
