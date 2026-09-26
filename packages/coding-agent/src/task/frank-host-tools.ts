@@ -145,6 +145,38 @@ function laneSessionView(host: ReadonlySessionManager, lane: { prompt: string; a
 	});
 }
 
+const COORDINATOR_SEATS: Readonly<Record<string, true>> = {
+	"frank-poteto-agent": true,
+	"frank-poteto-agent-deep": true,
+	"poteto-agent": true,
+	"poteto-agent-deep": true,
+};
+
+const FIRST_WORK_TOOLS: Readonly<Record<string, true>> = {
+	read: true,
+	grep: true,
+	glob: true,
+	ast_grep: true,
+	ast_edit: true,
+	bash: true,
+	run: true,
+	edit: true,
+	write: true,
+	eval: true,
+};
+
+function coordinatorItemsMissingDelegable(args: unknown): string[] {
+	if (typeof args !== "object" || args === null || !("tasks" in args) || !Array.isArray(args.tasks)) return ["batch"];
+	if (args.tasks.length === 0) return ["batch"];
+	return args.tasks.flatMap((item, index) => {
+		if (typeof item !== "object" || item === null) return [String(index + 1)];
+		if (!("agent" in item) || typeof item.agent !== "string" || !COORDINATOR_SEATS[item.agent]) return [];
+		const task = "task" in item && typeof item.task === "string" ? item.task : "";
+		return /^[ \t]*(?:delegable[ \t]*:|single-slice[ \t]*:)[ \t]*\S/im.test(task) ? [] : [String(index + 1)];
+	});
+}
+
+
 export function createFrankHostToolService(options: {
 	session: ToolSession;
 	agentId: string;
@@ -168,6 +200,8 @@ export function createFrankHostToolService(options: {
 		(options.names ?? ["task", "hub"]).map(name => [name, true]),
 	);
 	let closed = false;
+	const coordinator = options.workerLane !== undefined && COORDINATOR_SEATS[options.workerLane.agent] === true;
+	let dispatchedTask = !coordinator || (options.workerLane !== undefined && /^[ \t]*single-slice[ \t]*:[ \t]*\S/im.test(options.workerLane.prompt));
 	options.signal?.addEventListener(
 		"abort",
 		() => {
@@ -281,6 +315,18 @@ export function createFrankHostToolService(options: {
 				return { ok: false, error: "host tool service is closed" };
 			}
 			if (!enabled[name]) return { ok: false, error: `host tool is not enabled: ${name}` };
+			if (coordinator && !dispatchedTask && FIRST_WORK_TOOLS[name]) {
+				return { ok: false, error: `Delegation required: dispatch a task before calling \`${name}\`, or declare \`single-slice: <reason>\` in the worker brief.` };
+			}
+			if (name === "task" && coordinator) {
+				const missing = coordinatorItemsMissingDelegable(args);
+				if (missing.length > 0) {
+					const reason = missing.includes("batch")
+						? "call must contain a non-empty tasks batch"
+						: `item${missing.length === 1 ? "" : "s"} ${missing.join(", ")} must each declare their own \`delegable: <scope>\` or \`single-slice: <reason>\` in its task text`;
+					return { ok: false, error: `Delegation required: coordinator task ${reason}.` };
+				}
+			}
 			const params = (args ?? {}) as ChildDrainCall;
 			const hostMail = hostMailFor(options.agentId);
 			if (name === "hub" && params.op === "wait") {
@@ -337,6 +383,7 @@ export function createFrankHostToolService(options: {
 					undefined,
 					context,
 				);
+				if (name === "task" && coordinator && result.isError !== true) dispatchedTask = true;
 				let text = result.content
 					.filter((part): part is { type: "text"; text: string } => part.type === "text")
 					.map(part => part.text)
