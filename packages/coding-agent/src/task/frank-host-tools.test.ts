@@ -105,6 +105,43 @@ describe("Frank host tool service", () => {
 		}
 	});
 
+	// 2026-09-26: Frank leaves (frank-explorer, frank-reviewer-fast) spawned children because
+	// every Frank lane got `task` and the host session's "*" spawn list.
+	test("a Frank leaf without task in its names cannot dispatch children", async () => {
+		const original = BUILTIN_TOOLS.task;
+		let built = false;
+		BUILTIN_TOOLS.task = async () => {
+			built = true;
+			return { name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text", text: "spawned" }] }) } as never;
+		};
+		try {
+			const hostSession = { getAgentId: () => "Host", getToolContext: () => undefined, getSessionSpawns: () => "*" } as unknown as ToolSession;
+			const service = createFrankHostToolService({ session: hostSession, agentId: "Leaf", names: ["hub", "write", "edit", "bash"], spawns: "" });
+			const result = await service.handle("task", { task: "child" });
+			expect(result.ok).toBe(false);
+			expect(built).toBe(false);
+		} finally {
+			BUILTIN_TOOLS.task = original;
+		}
+	});
+
+	test("the task tool a Frank pot builds sees the pot's spawn list, not the host's", async () => {
+		const original = BUILTIN_TOOLS.task;
+		let seen: string | null | undefined;
+		BUILTIN_TOOLS.task = async session => {
+			seen = session.getSessionSpawns?.();
+			return { name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text", text: "spawned" }] }) } as never;
+		};
+		try {
+			const hostSession = { getAgentId: () => "Host", getToolContext: () => undefined, getSessionSpawns: () => "*" } as unknown as ToolSession;
+			const service = createFrankHostToolService({ session: hostSession, agentId: "Pot", names: ["task"], spawns: "frank-explorer,frank-implementer" });
+			await service.handle("task", { task: "child" });
+			expect(seen).toBe("frank-explorer,frank-implementer");
+		} finally {
+			BUILTIN_TOOLS.task = original;
+		}
+	});
+
 	test("task bridge with session hooks builds the tool for the Frank worker and wraps it", async () => {
 		let factorySession: ToolSession | undefined;
 		const wrapped: string[] = [];

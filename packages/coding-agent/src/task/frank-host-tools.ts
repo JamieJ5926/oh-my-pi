@@ -151,12 +151,15 @@ export function createFrankHostToolService(options: {
 	signal?: AbortSignal;
 	names?: string[];
 	workerCwd?: string;
+	/** The worker seat's spawn list ("" none, "*" any, or CSV). Omitted keeps the host session's. */
+	spawns?: string;
 	/** The worker's rendered prompt and seat; when set, bridged tool hooks run in the worker's lane scope. */
 	workerLane?: { prompt: string; agent: string };
 }): FrankHostToolService {
 	const bridgedSession: ToolSession = {
 		...options.session,
 		getAgentId: () => options.agentId,
+		...(options.spawns !== undefined ? { getSessionSpawns: () => options.spawns ?? "" } : {}),
 	};
 	const manager = options.session.asyncJobManager;
 	const hostOwnerId = options.session.getAgentId?.() ?? undefined;
