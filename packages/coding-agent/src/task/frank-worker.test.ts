@@ -1,20 +1,21 @@
-import { attachFrankDaemonLane, readFrankLaneResult, spawnFrankDaemonWorker } from "./frank-daemon-worker";
+import { attachFrankDaemonLane, daemonStateDir, readFrankLaneResult, spawnFrankDaemonWorker } from "./frank-daemon-worker";
 import { AgentRegistry } from "../registry/agent-registry";
 import { runFrankSubagent } from "./executor";
 import { watch } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { parseAgent } from "./agents";
 import { DEFAULT_FRANK_WORKER_BUDGETS, FrankProtocolError, frankWorkerEndpoint, parseFrankControl, resolveFrankWorkerBudgets, spawnFrankWorker, startFrankWorker, type FrankEvent } from "./frank-worker";
+import { SETTINGS_SCHEMA } from "../config/settings-schema";
 
 let received: number[] = [];
 
 async function makeStub(body: string): Promise<{ cwd: string; exe: string }> {
 	const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-worker-"));
 	const exe = path.join(cwd, "frank-stub");
-	await writeFile(exe, `#!/bin/sh\n${body}\n`, { mode: 0o700 });
+	await writeFile(exe, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\n${body}\n`, { mode: 0o700 });
 	await chmod(exe, 0o700);
 	return { cwd, exe };
 }
@@ -364,11 +365,27 @@ describe("Frank daemon lane reader", () => {
 });
 
 describe("Frank daemon transport", () => {
+	let isolatedStateDir = "";
+	let priorStateDir: string | undefined;
+	beforeEach(async () => {
+		priorStateDir = process.env.FRANK_DAEMON_STATE_DIR;
+		isolatedStateDir = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-state-"));
+		process.env.FRANK_DAEMON_STATE_DIR = isolatedStateDir;
+	});
+	afterEach(async () => {
+		if (priorStateDir === undefined) delete process.env.FRANK_DAEMON_STATE_DIR;
+		else process.env.FRANK_DAEMON_STATE_DIR = priorStateDir;
+		await rm(isolatedStateDir, { recursive: true, force: true });
+	});
+	test("the shared host daemon directory defaults to /tmp/omp-frank-daemon/host", () => {
+		delete process.env.FRANK_DAEMON_STATE_DIR;
+		expect(daemonStateDir()).toBe("/tmp/omp-frank-daemon/host");
+	});
 	test("mirrors attach output and forwards transcript events", async () => {
 		const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-cli-"));
 		const bin = path.join(cwd, "frank");
 		const artifactsDir = path.join(cwd, "artifacts");
-		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$FRANK_DAEMON_TOOL_CHOICE" "$FRANK_DAEMON_READ_ROOT" "$FRANK_DAEMON_MODEL" > "$FRANK_PARITY_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$FRANK_DAEMON_TOOL_CHOICE" "$FRANK_DAEMON_READ_ROOT" "$FRANK_DAEMON_MODEL" > "$FRANK_PARITY_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
 		const parityFile = path.join(cwd, "daemon-env");
 		process.env.FRANK_PARITY_FILE = parityFile;
 		const delivered: FrankEvent[] = [];
@@ -379,12 +396,41 @@ describe("Frank daemon transport", () => {
 			expect(delivered.map(event => event.seq)).toEqual([1, 2]);
 			expect((await Bun.file(parityFile).text()).trim().split("\n")).toEqual(["auto", "any", "test-model:high"]);
 			const stateDir = (await Bun.file(path.join(artifactsDir, "lane-1.frank-daemon", "state-dir")).text()).trim();
-			expect(stateDir.startsWith("/tmp/omp-frank-daemon/")).toBe(true);
-			expect(stateDir.length).toBeLessThan(104);
+			expect(stateDir).toBe(isolatedStateDir);
 		} finally {
 			delete process.env.FRANK_PARITY_FILE;
 			await rm(cwd, { recursive: true, force: true });
 		}
+	});
+	test("two lanes share one host daemon directory", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-shared-"));
+		const bin = path.join(cwd, "frank");
+		const artifactsDir = path.join(cwd, "artifacts");
+		const argvFile = path.join(cwd, "frank-argv.txt");
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
+		process.env.FRANK_ARGV_FILE = argvFile;
+		try {
+			for (const id of ["lane-1", "lane-2"]) {
+				await spawnFrankDaemonWorker({ exe: bin, frankBin: bin, endpoint: "http://127.0.0.1:1", model: "test-model:high", cwd, budgets: { maxToolCalls: 4, wallSecs: 9 }, text: "inspect", id, artifactsDir, onEvent: () => {} });
+			}
+			const argv = await Bun.file(argvFile).text();
+			expect(argv).not.toMatch(/--session (?:lane-1|lane-2)(?:\s|$)/);
+			const keys: string[] = [];
+			for (const id of ["lane-1", "lane-2"]) {
+				expect((await Bun.file(path.join(artifactsDir, `${id}.frank-daemon`, "state-dir")).text()).trim()).toBe(isolatedStateDir);
+				const key = (await Bun.file(path.join(artifactsDir, `${id}.frank-daemon`, "session-key")).text()).trim();
+				expect(key).toMatch(/^[0-9a-f]{16}$/);
+				expect(key).not.toBe(id);
+				keys.push(key);
+			}
+			expect(keys[0]).not.toBe(keys[1]);
+			for (const key of keys) {
+				expect(argv).toContain(`attach --session ${key} --json`);
+			}
+		} finally { delete process.env.FRANK_ARGV_FILE; await rm(cwd, { recursive: true, force: true }); }
+	});
+	test("defaults Frank transport to the shared daemon", () => {
+		expect(SETTINGS_SCHEMA["task.frankTransport"].default).toBe("daemon");
 	});
 	test("reattaches when the local mirror is incomplete", async () => {
 		const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-reattach-"));
@@ -392,7 +438,7 @@ describe("Frank daemon transport", () => {
 		const artifactsDir = path.join(cwd, "artifacts");
 		await mkdir(artifactsDir, { recursive: true });
 		await Bun.write(path.join(artifactsDir, "lane-recover.frank.jsonl"), "{\"seq\":1,\"kind\":{\"AssistantDelta\":\"incomplete\"}}\n");
-		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-recover from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-recover from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
 		try {
 			const result = await attachFrankDaemonLane({ artifactsDir, id: "lane-recover", cwd, frankBin: bin });
 			expect(result.text).toBe("daemon answer");

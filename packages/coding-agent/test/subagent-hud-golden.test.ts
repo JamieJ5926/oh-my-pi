@@ -103,13 +103,12 @@ describe("subagent HUD golden render", () => {
 	it("carries the ⟨role⟩ cell on every non-group row and none on a group row", () => {
 		const lines = renderSubagentHudLines(sessions, 120, ancestry).subagents.map(line => Bun.stripANSI(line).trimEnd());
 		expect(lines).toEqual(GOLDEN_SUBAGENTS);
-		const named = lines.filter(line => /(?:RulesTrack|RulesInner|RulesSy…|Owner) \[grok\]/.test(line));
+		const named = lines.filter(line => /[LSO]● /.test(line));
 		expect(named.length).toBe(4);
-		for (const line of named) expect(line).toMatch(/\[grok\]/);
-		const group = lines.find(line => line.includes("RuleA  ● RuleB")) ?? "";
-		expect(group).toContain("RuleA  ● RuleB");
+		for (const line of named) expect(line).toMatch(/[LSO]● \S+ \[[^\]]+\]/);
+		const group = lines.find(line => line.includes("explor…")) ?? "";
+		expect(group).toContain("explor…");
 		expect(group).not.toContain("⟨explorer⟩");
-		expect(group).not.toMatch(/● explor… \[grok\] ⟨[a-z-]+⟩/);
 	});
 
 	it("never renders task prompt text on any row", () => {
