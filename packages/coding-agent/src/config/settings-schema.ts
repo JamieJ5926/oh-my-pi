@@ -4974,6 +4974,22 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.frankTransport": {
+		type: "enum",
+		values: ["process", "daemon"] as const,
+		default: "daemon",
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Frank Transport",
+			description: "Run Frank workers as attached processes or as sessions on one shared daemon",
+			options: [
+				{ value: "process", label: "Process", description: "Run the Frank worker as a child process" },
+				{ value: "daemon", label: "Daemon", description: "Attach the Frank worker to the shared host daemon" },
+			],
+		},
+	},
+
 	"task.batch": {
 		type: "boolean",
 		default: true,
@@ -4998,6 +5014,10 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.startPacing": {
+		type: "object",
+		default: { windowMs: 10000, initial: 15, floor: 1, ceiling: 30 },
+	},
 	"task.maxConcurrency": {
 		type: "number",
 		default: 32,

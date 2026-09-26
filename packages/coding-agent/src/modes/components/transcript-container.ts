@@ -84,9 +84,27 @@ type RetirementPolicy = "pressure" | "flush";
 type Offered =
 	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number }
 	| { batch: HistoryBatch; kind: "commit"; end: number }
-	| { batch: HistoryBatch; kind: "replay" };
+	| {
+			batch: HistoryBatch;
+			kind: "replay";
+			start: number;
+			startOffset: number;
+			end: number;
+			endOffset: number;
+			complete: boolean;
+			headPrefix: boolean;
+	  };
 
 const MAX_LIVE_BLOCKS = 256;
+/**
+ * Upper bound on rows in one replay chunk. A settled resize replays the whole
+ * committed ledger, so one unbounded batch renders O(history) rows in a single
+ * synchronous frame (600 markdown renders / 44k-84k rows at 200 blocks). Chunks
+ * keep each frame's transient allocation bounded no matter how long history
+ * grows; the writer appends chunks across frames and converges on the same
+ * terminal state as the old single write.
+ */
+const REPLAY_CHUNK_ROWS = 2000;
 /** Grace before a pressure-blocked frontier is reported; a streaming block may legitimately hold it briefly. */
 const PINNED_FRONTIER_WARN_MS = 30_000;
 const EMPTY_ROWS: readonly string[] = [];
@@ -141,6 +159,13 @@ export class TranscriptContainer extends Container {
 	#offered: Offered | undefined;
 	#replayPending = false;
 	#replayRequested = false;
+	// Committed-entry cursor where the next replay chunk starts. A settled
+	// resize drains the ledger chunk by chunk across frames; acking a partial
+	// chunk advances this instead of clearing the replay. The row offset tracks
+	// rows already delivered within the cursor entry, so one block larger than
+	// the chunk budget splits across frames instead of defeating the cap.
+	#replayIndex = 0;
+	#replayRowOffset = 0;
 	#toolActivityVisible = true;
 	#lastFrame: AnimationFrame = { tick: 0, now: 0 };
 	// Start rows from the last full render(), keyed by child component (transcript deep-links).
@@ -181,6 +206,8 @@ export class TranscriptContainer extends Container {
 		this.#pinnedFrontier = undefined;
 		this.#replayPending = false;
 		this.#replayRequested = false;
+		this.#replayIndex = 0;
+		this.#replayRowOffset = 0;
 	}
 
 	setToolActivityVisible(visible: boolean): void {
@@ -253,8 +280,7 @@ export class TranscriptContainer extends Container {
 		const active = this.#entries.filter(entry => entry.state === "active").length;
 		return Math.max(0, Math.trunc(rows)) > active && this.#liveCount() < MAX_LIVE_BLOCKS;
 	}
-
-	/** Prepares one atomic replay of the committed ledger and an emitted active-head prefix. */
+	/** Prepares a chunked replay of the committed ledger and an emitted active-head prefix. */
 	beginReplay(): void {
 		this.#syncEntries();
 		if (this.#offered !== undefined) {
@@ -264,13 +290,25 @@ export class TranscriptContainer extends Container {
 		this.#startReplay();
 	}
 	/**
-	 * Drop a not-yet-offered replay so a shutdown flush emits only un-retired
+	 * Drop a not-yet-started replay so a shutdown flush emits only un-retired
 	 * rows. The terminal already holds the committed ledger; re-streaming it at
-	 * quit is pure write volume. An already offered replay batch stays valid.
+	 * quit is pure write volume. An already offered replay batch stays valid. A
+	 * mid-drain cancel is a no-op: the ED3 frame already erased the scrolled
+	 * history the drain was rewriting, so the shutdown flush must finish the
+	 * drain it started instead of stranding the ledger past the cursor.
 	 */
 	cancelReplay(): void {
+		const offered = this.#offered;
+		const midDrain =
+			this.#replayIndex !== 0 ||
+			this.#replayRowOffset !== 0 ||
+			(offered?.kind === "replay" && (offered.start !== 0 || offered.startOffset !== 0));
+		if (midDrain) return;
 		this.#replayPending = false;
 		this.#replayRequested = false;
+		this.#replayIndex = 0;
+		this.#replayRowOffset = 0;
+		if (offered?.kind === "replay") offered.complete = true;
 	}
 
 	/** Total rows the live, un-emitted tail occupies at `width`. */
@@ -357,20 +395,51 @@ export class TranscriptContainer extends Container {
 		return this.#peekBatch(width, capacity, "pressure");
 	}
 
-	/** Returns only a prepared complete replay, never a normal retirement offer. */
-	peekReplayBatch(width: number): HistoryBatch | undefined {
+	/**
+	 * Returns the next prepared replay chunk, never a normal retirement offer.
+	 * A settled resize drains the ledger chunk by chunk: each ack either advances
+	 * the cursor (partial chunk, offered as `append` so the writer pumps the next
+	 * frame) or ends the replay (final chunk, `replay`, exactly like the old
+	 * single batch). Concatenated chunk rows equal one full `#renderRange` over
+	 * the committed prefix plus the head prefix on the final chunk.
+	 */
+	peekReplayBatch(width: number, maxRows: number = REPLAY_CHUNK_ROWS): HistoryBatch | undefined {
 		this.#syncEntries();
 		this.#settleFinalized();
 		if (this.#offered !== undefined) {
 			return this.#offered.kind === "replay" ? this.#offered.batch : undefined;
 		}
 		if (!this.#replayPending) return undefined;
-		const rows = this.#renderReplay(width);
+		const chunk = this.#renderReplayChunk(width, Math.max(1, Math.trunc(maxRows)));
 		this.#replayPending = false;
-		if (rows.length === 0) return undefined;
-		const batch: HistoryBatch = { id: this.#nextBatchId++, rows, kind: "replay" };
-		this.#offered = { batch, kind: "replay" };
+		if (chunk.rows.length === 0) {
+			this.#replayIndex = 0;
+			this.#replayRowOffset = 0;
+			return undefined;
+		}
+		// A partial chunk is finalized rows being re-added, so it rides the
+		// existing append pump (ack schedules the next frame); only the final
+		// chunk keeps the `replay` framing and its viewport split.
+		const batch: HistoryBatch = {
+			id: this.#nextBatchId++,
+			rows: chunk.rows,
+			kind: chunk.complete ? "replay" : "append",
+		};
+		this.#offered = {
+			batch,
+			kind: "replay",
+			start: chunk.start,
+			startOffset: chunk.startOffset,
+			end: chunk.end,
+			endOffset: chunk.endOffset,
+			complete: chunk.complete,
+			headPrefix: chunk.headPrefix,
+		};
 		return batch;
+	}
+	/** Whether a replay still has unoffered or unacknowledged chunks. */
+	hasPendingReplay(): boolean {
+		return this.#replayPending || (this.#offered?.kind === "replay" && !this.#offered.complete);
 	}
 
 	/** Offers the complete currently eligible prefix for graceful shutdown. */
@@ -390,9 +459,9 @@ export class TranscriptContainer extends Container {
 			const after = this.#renderStablePrefix(entry, offered.emittedEnd, width);
 			rows = after.slice(before.length);
 		} else if (offered.kind === "commit") {
-			rows = this.#renderRange(this.#frontier, offered.end, width, true);
+			rows = this.#renderRange(this.#frontier, offered.end, width, true).rows;
 		} else {
-			rows = this.#renderReplay(width);
+			rows = this.#renderReplayRange(width, offered.start, offered.startOffset, offered.end, offered.endOffset, offered.headPrefix);
 		}
 		offered.batch = { id: offered.batch.id, rows, kind: offered.batch.kind };
 		return offered.batch;
@@ -479,7 +548,7 @@ export class TranscriptContainer extends Container {
 		this.#pinnedFrontier = undefined;
 		const batch: HistoryBatch = {
 			id: this.#nextBatchId++,
-			rows: this.#renderRange(this.#frontier, end, width, true),
+			rows: this.#renderRange(this.#frontier, end, width, true).rows,
 			kind: "append",
 		};
 		this.#offered = { batch, end, kind: "commit" };
@@ -501,6 +570,17 @@ export class TranscriptContainer extends Container {
 				this.#entries[index]!.emitted = 0;
 			}
 			this.#frontier = offered.end;
+		} else if (!offered.complete) {
+			// Partial replay chunk accepted: the next peek resumes at the chunk
+			// end, mid-block when the chunk split one block larger than the
+			// budget. Replay never rewinds commit state, so acking only moves
+			// this cursor; a superseding beginReplay resets it via #startReplay.
+			this.#replayIndex = offered.end;
+			this.#replayRowOffset = offered.endOffset;
+			this.#replayPending = true;
+		} else {
+			this.#replayIndex = 0;
+			this.#replayRowOffset = 0;
 		}
 		this.#offered = undefined;
 		if (this.#replayRequested) this.#startReplay();
@@ -620,8 +700,30 @@ export class TranscriptContainer extends Container {
 		});
 	}
 
-	#renderRange(start: number, end: number, width: number, trailingBlank: boolean): readonly string[] {
+	/**
+	 * Render `[start, end)` as joined blocks with `""` separators. With a finite
+	 * `maxRows` budget, a block larger than the remaining budget splits: the
+	 * chunk takes its first fitting rows and `end`/`endOffset` report the resume
+	 * cursor (the split entry plus rows consumed within it), so the next chunk
+	 * continues mid-block from `startOffset`. Blocks under budget still render
+	 * whole, so small-history output is byte-identical to the old boundary stop.
+	 * Only the range head is sliced by its emitted stable prefix; every
+	 * committed entry carries `emitted === 0`, so rows are identical to one call
+	 * per entry while the append-only verification pass runs once per chunk
+	 * instead of once per block.
+	 */
+	#renderRange(
+		start: number,
+		end: number,
+		width: number,
+		trailingBlank: boolean,
+		maxRows = Number.MAX_SAFE_INTEGER,
+		startOffset = 0,
+	): { rows: readonly string[]; end: number; endOffset: number } {
 		const rows: string[] = [];
+		const budget = maxRows;
+		let stop = start;
+		let stopOffset = 0;
 		for (let index = start; index < end; index++) {
 			const entry = this.#entries[index]!;
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
@@ -632,23 +734,136 @@ export class TranscriptContainer extends Container {
 			const rendered =
 				index === start ? this.#renderEntry(entry, width) : trimBlankEdges(entry.component.render(width));
 			const emittedRows = index === start ? this.#renderStablePrefix(entry, entry.emitted, width).length : 0;
-			const block = rendered.slice(emittedRows);
-			if (block.length === 0) continue;
+			const skip = emittedRows + (index === start ? startOffset : 0);
+			const block = rendered.slice(skip);
+			if (block.length === 0) {
+				stop = index + 1;
+				stopOffset = 0;
+				continue;
+			}
+			const separator = rows.length > 0 ? 1 : 0;
+			let remaining = budget - rows.length - separator;
+			if (remaining <= 0) {
+				// No budget left for this entry. Guarantee forward progress when
+				// the chunk is still empty (callers clamp maxRows >= 1, so this
+				// only fires on a saturated budget, never on an empty chunk).
+				if (rows.length === 0) remaining = 1;
+				else break;
+			}
 			if (rows.length > 0) rows.push("");
-			rows.push(...block);
+			if (block.length <= remaining) {
+				rows.push(...block);
+				stop = index + 1;
+				stopOffset = 0;
+			} else {
+				rows.push(...block.slice(0, remaining));
+				stop = index;
+				stopOffset = skip + remaining;
+			}
+			if (rows.length >= budget) break;
 		}
 		if (trailingBlank && rows.length > 0) rows.push("");
-		return rows;
+		return { rows, end: stop, endOffset: stopOffset };
 	}
 
-	#renderReplay(width: number): readonly string[] {
-		const rows = Array.from(this.#renderRange(0, this.#frontier, width, true));
-		const head = this.#entries[this.#frontier];
-		if (head?.mode === "appendOnly" && head.emitted > 0) {
-			this.#setAllocation(head.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-			this.#renderEntry(head, width);
-			rows.push(...this.#renderStablePrefix(head, head.emitted, width));
+	/**
+	 * Render the next replay chunk starting at the replay cursor. A block larger
+	 * than `maxRows` splits across chunks and the cursor resumes mid-block, so
+	 * no single chunk exceeds the budget; concatenated chunk rows equal one full
+	 * `#renderRange` plus the head prefix on the final chunk.
+	 */
+	#renderReplayChunk(
+		width: number,
+		maxRows: number,
+	): {
+		rows: readonly string[];
+		start: number;
+		startOffset: number;
+		end: number;
+		endOffset: number;
+		complete: boolean;
+		headPrefix: boolean;
+	} {
+		const start = Math.min(this.#replayIndex, this.#frontier);
+		const startOffset = start === this.#replayIndex ? this.#replayRowOffset : 0;
+		// One ranged call for the whole chunk: only the chunk head goes through
+		// #renderEntry, so the append-only verification pass runs once per chunk
+		// instead of once per block. Committed entries carry emitted === 0, so
+		// rows are unchanged.
+		const range = this.#renderRange(start, this.#frontier, width, false, Math.max(1, Math.trunc(maxRows)), startOffset);
+		const rows = Array.from(range.rows);
+		const end = range.end;
+		const endOffset = range.endOffset;
+		const complete = end >= this.#frontier && endOffset === 0;
+		const headPrefix = complete;
+		let headPushed = false;
+		if (headPrefix) {
+			const head = this.#entries[this.#frontier];
+			if (head?.mode === "appendOnly" && head.emitted > 0) {
+				this.#setAllocation(head.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+				this.#renderEntry(head, width);
+				if (rows.length > 0) rows.push("");
+				const before = rows.length;
+				rows.push(...this.#renderStablePrefix(head, head.emitted, width));
+				if (rows.length > before) headPushed = true;
+			}
 		}
+		if (rows.length > 0 && !headPushed) rows.push("");
+		return { rows, start, startOffset, end, endOffset, complete, headPrefix };
+	}
+
+	/**
+	 * Re-render one offered replay chunk (same cursor-bounded entry range, new
+	 * width). The chunk covers entries `[start, end)` plus, when `endOffset` is
+	 * nonzero, the first `endOffset` rows of entry `end` — the resume cursor the
+	 * split left behind. No budget applies: the range itself is the bound.
+	 */
+	#renderReplayRange(
+		width: number,
+		start: number,
+		startOffset: number,
+		end: number,
+		endOffset: number,
+		headPrefix: boolean,
+	): readonly string[] {
+		const last = endOffset > 0 ? end + 1 : end;
+		const rows = Array.from(this.#renderRange(start, last, width, false, Number.MAX_SAFE_INTEGER, startOffset).rows);
+		if (endOffset > 0) {
+			// Drop the unconsumed tail: entries past `end`, their separators,
+			// and rows of entry `end` past the resume cursor.
+			const tail = Array.from(this.#renderRange(end, last, width, false).rows);
+			const tailEntry = this.#entries[end];
+			let keep = rows.length;
+			if (tailEntry !== undefined) {
+				this.#setAllocation(tailEntry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+				const rendered =
+					end === start
+						? this.#renderEntry(tailEntry, width)
+						: trimBlankEdges(tailEntry.component.render(width));
+				const emittedRows =
+					end === start ? this.#renderStablePrefix(tailEntry, tailEntry.emitted, width).length : 0;
+				const skip = emittedRows + (end === start ? startOffset : 0);
+				const unconsumed = Math.max(0, rendered.slice(skip).length - endOffset + skip - skip);
+				void unconsumed;
+				const tailRows = tail.length > 0 ? tail.length : 0;
+				keep = rows.length - tailRows - (tailRows > 0 && rows.length > tailRows ? 1 : 0);
+				void keep;
+			}
+			return rows.slice(0, rows.length - tail.length - (tail.length > 0 ? 1 : 0));
+		}
+		let headPushed = false;
+		if (headPrefix) {
+			const head = this.#entries[this.#frontier];
+			if (head?.mode === "appendOnly" && head.emitted > 0) {
+				this.#setAllocation(head.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+				this.#renderEntry(head, width);
+				if (rows.length > 0) rows.push("");
+				const before = rows.length;
+				rows.push(...this.#renderStablePrefix(head, head.emitted, width));
+				if (rows.length > before) headPushed = true;
+			}
+		}
+		if (rows.length > 0 && !headPushed) rows.push("");
 		return rows;
 	}
 
@@ -670,6 +885,7 @@ export class TranscriptContainer extends Container {
 		const head = this.#entries[this.#frontier];
 		this.#replayPending = this.#frontier > 0 || (head?.mode === "appendOnly" && head.emitted > 0);
 		this.#replayRequested = false;
+		this.#replayIndex = 0;
 	}
 
 	#renderEmergency(

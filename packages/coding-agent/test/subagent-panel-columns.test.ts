@@ -139,6 +139,11 @@ describe("subagents panel column snapshot", () => {
 		const pendingRow = all.find(line => line.includes("ConfigLanding"));
 		expect(pendingRow).toBeDefined();
 		expect(pendingRow!).toContain("○");
+		const activeBelow = panel.find(line => line.includes("active below"));
+		expect(activeBelow).toBeDefined();
+		expect(activeBelow).toMatch(/└─1 active below/);
+		expect(activeBelow).not.toMatch(/[○●]/);
+		expect(Bun.stringWidth(activeBelow!)).toBeLessThanOrEqual(ROW_WIDTH);
 	});
 
 	it("truncates depth-4 with stable columns and an N-deep strip marker", () => {
@@ -249,6 +254,6 @@ describe("subagents panel column snapshot", () => {
 		const twelve = panel.find(line => line.includes("TwelveStrip"));
 		expect(twelve).toBeDefined();
 		expectLockedRow(twelve!);
-		expectStripAt(twelve!, /●{9}\+3/);
+		expectStripAt(twelve!, /●{7}\+3/);
 	});
 });

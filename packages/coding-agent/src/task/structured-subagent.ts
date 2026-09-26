@@ -8,8 +8,9 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveAgentModelSelection } from "../config/model-resolver";
+import { resolveAgentModelSelection, resolveModelScope, type ScopedModel } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -17,13 +18,15 @@ import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import type { TaskEffort } from "../thinking";
+import { parseThinkingLevel, type TaskEffort, toReasoningEffort } from "../thinking";
 import type { ToolSession } from "../tools";
+import { createFrankHostToolService } from "./frank-host-tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
-import { type ExecutorOptions, runSubprocess } from "./executor";
+import { type ExecutorOptions, runFrankSubagent, runSubagentFollowUpTurn, runSubprocess } from "./executor";
+import { frankWorkerEndpoint, resolveFrankWorkerBudgets } from "./frank-worker";
 import {
 	applyEligibleNestedPatches,
 	type IsolationContext,
@@ -44,6 +47,109 @@ import {
 } from "./types";
 import { type NestedRepoPatch, parseIsolationMode } from "./worktree";
 
+export async function resolveFrankAcceptExe(cwd: string): Promise<string> {
+	const pinned = process.env.FRANK_ACCEPT_BIN?.trim();
+	if (pinned) return pinned;
+	const userInstall = path.join(os.homedir(), ".local", "bin", "frank_accept");
+	if (process.env.FRANK_ACCEPT_ALLOW_REPO_BUILD === "1") {
+		const repoBuild = path.join(cwd, "target", "debug", "frank_accept");
+		try {
+			await fs.access(repoBuild, fs.constants.X_OK);
+			return repoBuild;
+		} catch {}
+	}
+	return userInstall;
+}
+
+async function resolveFrankBin(cwd: string): Promise<string> {
+	const pinned = process.env.FRANK_BIN?.trim();
+	if (pinned) return pinned;
+	const repoBuild = path.join(cwd, "target", "debug", "frank");
+	try {
+		await fs.access(repoBuild, fs.constants.X_OK);
+		return repoBuild;
+	} catch {
+		return "frank";
+	}
+}
+
+/**
+ * Frank reads the provider off the hop's `provider/alias` prefix and
+ * reasoning effort off a trailing `:effort`, so the hop always carries the
+ * provider even when no effort level resolved. Frank splits the alias at the
+ * first colon, so a level is appended only to an id that carries no colon of
+ * its own; a literal level already on the id is replaced rather than doubled,
+ * and any other suffixed id keeps the provider-qualified raw id.
+ */
+export function frankModelHop(
+	model: Pick<Model<Api>, "provider" | "id">,
+	thinkingLevel: ScopedModel["thinkingLevel"],
+): string {
+	const qualified = `${model.provider}/${model.id}`;
+	const effort = toReasoningEffort(thinkingLevel);
+	if (effort === undefined) return qualified;
+	const colon = model.id.lastIndexOf(":");
+	const literal = colon > 0 ? model.id.slice(colon + 1) : "";
+	const id = literal && parseThinkingLevel(literal) !== undefined ? model.id.slice(0, colon) : model.id;
+	if (id.includes(":")) return qualified;
+	return `${model.provider}/${id}:${effort}`;
+}
+
+async function frankWorkerOptions(
+	options: ExecutorOptions,
+	session: ToolSession,
+	modelPattern: string | string[] | undefined,
+	signal?: AbortSignal,
+) {
+	const patterns =
+		modelPattern ??
+		options.modelOverride ??
+		options.agent.model ??
+		[session.getModelString?.()].filter((value): value is string => !!value);
+	if (!session.modelRegistry)
+		throw new StructuredSubagentError(
+			"preflight",
+			"No model registry is available for the selected Frank worker seat.",
+		);
+	const selected = await resolveModelScope(
+		Array.isArray(patterns) ? patterns : [patterns],
+		session.modelRegistry,
+		undefined,
+		session.settings,
+	);
+	const scope = selected[0];
+	const model = scope?.model;
+	if (!scope || !model)
+		throw new StructuredSubagentError("preflight", "No available model for the selected Frank worker seat.");
+	const endpoint = model.baseUrl ?? session.modelRegistry.getProviderBaseUrl(model.provider);
+	if (!endpoint)
+		throw new StructuredSubagentError(
+			"preflight",
+			`No provider base URL for Frank worker model ${model.provider}/${model.id}.`,
+		);
+	const apiKey = await session.modelRegistry.getApiKey(model, undefined, { signal });
+	return {
+		...options,
+		exe: await resolveFrankAcceptExe(session.cwd),
+		endpoint: frankWorkerEndpoint(endpoint),
+		model: frankModelHop(model, scope.thinkingLevel),
+		apiKey,
+		budgets: resolveFrankWorkerBudgets(options.agent),
+		transport: options.frankTransport ?? session.settings.get("task.frankTransport"),
+		frankBin: await resolveFrankBin(session.cwd),
+		apiKeyEnv: "PI_TRACK_API_KEY",
+		text: options.context ? `${options.context}\n\n${options.task}` : options.task,
+		session,
+		hostToolService: createFrankHostToolService({
+			session,
+			agentId: options.id,
+			signal,
+			names: ["task", "hub", "write", "edit", "bash"],
+			workerCwd: options.cwd,
+			workerLane: { prompt: options.task, agent: options.agent.name },
+		}),
+	};
+}
 /** Validation behavior requested for an effective output schema. */
 export type StructuredSubagentSchemaMode = "permissive" | "strict";
 
@@ -90,12 +196,15 @@ export interface StructuredSubagentRequest {
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
 	outputSchema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
+	/** Working directory for a runtime-frank spawn; absolute, or relative to the session cwd. */
+	cwd?: string;
 	/** Per-spawn thinking effort mapped onto the resolved model's supported range; overrides the agent's default selector. */
 	effort?: TaskEffort;
 	identity?: StructuredSubagentIdentity;
 	index?: number;
 	parentToolCallId?: string;
 	detached?: boolean;
+	frankTransport?: "process" | "daemon";
 	invokedAt?: number;
 	acquiredAt?: number;
 	isolation?: StructuredSubagentIsolationControls;
@@ -103,6 +212,8 @@ export interface StructuredSubagentRequest {
 	blockedAgent?: string;
 	/** Preserve a completed temporary artifacts directory for an agent:// handle. */
 	retainArtifacts?: boolean;
+	/** Continue a keep-alive Frank worker with a separate follow-up prompt. */
+	followUpMessage?: string;
 	/** Task UI agents keep live registry references; eval one-shots normally do not. */
 	keepAlive?: boolean;
 	/** Task subagents share their parent's eval kernel; eval bridge children must not. */
@@ -375,7 +486,7 @@ async function resolveRoleInputs(session: ToolSession, agent: AgentDefinition) {
 		file => [file.path, path.basename(file.path)],
 	);
 	const rules = select(agent.instructions, session.rules ?? [], rule => [rule.name, rule.path]);
-	const skills = select(agent.skills, session.skills ?? [], skill => [skill.name, skill.filePath]);
+	const skills = select(agent.skills, [...(session.skills ?? [])], skill => [skill.name, skill.filePath]);
 	const autoloadSkills = agent.autoloadSkills?.flatMap(name => skills.filter(skill => skill.name === name)) ?? [];
 	const roleHooks = Array.isArray(agent.hooks)
 		? agent.hooks.map(hook => path.resolve(agent.filePath ? path.dirname(agent.filePath) : session.cwd, hook))
@@ -445,6 +556,7 @@ async function buildExecutorOptions(
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
+		frankTransport: request.frankTransport ?? session.settings.get("task.frankTransport"),
 		...(policy.schema.source === "none"
 			? {}
 			: {
@@ -592,6 +704,18 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
 	const policy = await resolveEffectiveSubagentPolicy(request);
+	if (request.followUpMessage !== undefined) {
+		if (
+			request.invocationKind !== "task" ||
+			request.keepAlive !== true ||
+			policy.effectiveAgent.runtime !== "frank"
+		) {
+			throw new StructuredSubagentError("preflight", "Follow-up turns require a keep-alive Frank task subagent.");
+		}
+		if (!request.identity?.id) {
+			throw new StructuredSubagentError("preflight", "A Frank follow-up turn requires the existing subagent id.");
+		}
+	}
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
 	let mergeSummary = "";
@@ -626,7 +750,43 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			}
 		}
 		let result: SingleResult;
-		if (!isolationContext) {
+		if (
+			!isolationContext &&
+			policy.effectiveAgent.runtime === "frank" &&
+			request.keepAlive &&
+			request.followUpMessage !== undefined
+		) {
+			result = await runSubagentFollowUpTurn({
+				id,
+				agent: policy.effectiveAgent,
+				message: request.assignment,
+				followUpMessage: request.followUpMessage,
+				keepAlive: true,
+				index: request.index,
+				description: trimToUndefined(request.identity?.label),
+				modelRole: policy.modelRole,
+				outputSchema: policy.schema.schema,
+				outputSchemaMode: policy.schema.mode,
+				outputSchemaSource: policy.schema.source,
+				signal: request.signal,
+				onProgress: request.onProgress,
+				eventBus: request.session.eventBus,
+				subagentEventBus: request.session.subagentEventBus,
+				parentToolCallId: request.parentToolCallId,
+				artifactsDir: lease.artifactsDir,
+				maxRuntimeMs: request.maxRuntimeMs,
+			});
+		} else if (!isolationContext && policy.effectiveAgent.runtime === "frank") {
+			result = await runFrankSubagent(
+				await frankWorkerOptions(
+					request.cwd ? { ...baseOptions, cwd: path.resolve(request.session.cwd, request.cwd) } : baseOptions,
+					request.session,
+					policy.modelOverride,
+					request.signal,
+				),
+			);
+			onSubprocessResult?.(result);
+		} else if (!isolationContext) {
 			result = await runSubprocess(baseOptions);
 			onSubprocessResult?.(result);
 		} else {
@@ -641,6 +801,19 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				buildCommitMessage: makeIsolationCommitMessage(request.session),
 				buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
 				onSubprocessResult,
+				...(policy.effectiveAgent.runtime === "frank"
+					? {
+							run: async isolatedOptions =>
+								runFrankSubagent(
+									await frankWorkerOptions(
+										{ ...isolatedOptions, cwd: isolatedOptions.worktree ?? isolatedOptions.cwd },
+										request.session,
+										policy.modelOverride,
+										request.signal,
+									),
+								),
+						}
+					: undefined),
 			});
 		}
 		attachStructuredOutputMetadata(result, policy.schema);

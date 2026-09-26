@@ -160,7 +160,7 @@ function RunBlock({ run }: { run: Record<string, unknown> }): ReactNode {
 					<span className="tv-faint">waiting for workflow jobs…</span>
 				</Row>
 			)}
-			{jobs.map((job, index) => {
+			{jobs.slice(0, 100).map((job, index) => {
 				if (!isRecord(job)) return null;
 				const visual = jobVisual(job);
 				const duration = num(job.durationSeconds);
@@ -171,6 +171,11 @@ function RunBlock({ run }: { run: Record<string, unknown> }): ReactNode {
 					</Row>
 				);
 			})}
+			{jobs.length > 100 && (
+				<Row>
+					<span className="tv-faint">{`${jobs.length - 100} more`}</span>
+				</Row>
+			)}
 		</div>
 	);
 }

@@ -38317,6 +38317,69 @@
 				"injectClaudeCodeInstruction": true,
 				"stripImageInput": false
 			}
+		},
+		"claude-opus-5-5": {
+			"id": "claude-opus-5-5",
+			"name": "Claude Opus 5.5",
+			"api": "anthropic-messages",
+			"provider": "anthropic",
+			"baseUrl": "https://api.anthropic.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 4,
+				"output": 20,
+				"cacheRead": 0.2,
+				"cacheWrite": 5
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "anthropic-adaptive",
+				"efforts": [
+					"low",
+					"medium",
+					"high",
+					"xhigh",
+					"max"
+				],
+				"supportsDisplay": true
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "opus",
+				"revision": "5.5.0"
+			},
+			"requiresGlyphTokenization": true,
+			"tokenizer": "claude-v5",
+			"supportsComputerUse": false,
+			"compat": {
+				"officialEndpoint": true,
+				"signingEndpoint": true,
+				"supportsContextManagement": true,
+				"supportsOutputEffort": true,
+				"disableStrictTools": false,
+				"disableAdaptiveThinking": false,
+				"allowAnthropicHeaderOverrides": false,
+				"supportsEagerToolInputStreaming": true,
+				"supportsLongCacheRetention": true,
+				"supportsMidConversationSystem": true,
+				"supportsTurnScopedSystem": true,
+				"supportsMidConversationToolChanges": true,
+				"supportsPerMessageEffort": true,
+				"supportsThinkingBindingControls": false,
+				"supportsForcedToolChoice": true,
+				"supportsSamplingParams": false,
+				"requiresToolResultId": false,
+				"requiresThinkingEnabled": false,
+				"replayUnsignedThinking": false,
+				"escapeBuiltinToolNames": false,
+				"injectClaudeCodeInstruction": true,
+				"stripImageInput": false
+			}
 		}
 	},
 	"azure": {

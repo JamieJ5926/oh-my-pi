@@ -7,8 +7,19 @@ import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task";
 // Golden render accepted by Jamie on 2026-09-08 ("no its right", pane w2B:pDQ, build cf46fb59).
 // Changing this snapshot requires a brief that quotes the ask changing the HUD.
 // Standing order 14, reviews/orchestrate/2026-09-08-autonomous-repairs/preferences.md.
+// Ask changing this snapshot, Jamie 2026-09-20: "instead of gem at the end can we make it like
+// ⟨poteto-agent⟩⟨model-thinking⟩⟨provider emoji⟩". The 2026-09-11 "model-emoji" clause described the
+// row when the emoji WAS the model information. Once id:level is on the row the emoji is redundant
+// and drops before the model id. Seat stays on the name. Strip still counts child rows a lane draws.
 
-function session(id: string, agent: string, status: ObservableSession["status"], tokens: number, description?: string): ObservableSession {
+function session(
+	id: string,
+	agent: string,
+	status: ObservableSession["status"],
+	tokens: number,
+	description?: string,
+	resolvedModel = "cli-proxy/dddai.grok-4.6:high",
+): ObservableSession {
 	const progress: AgentProgress = {
 		id,
 		index: 0,
@@ -23,6 +34,7 @@ function session(id: string, agent: string, status: ObservableSession["status"],
 		tokens,
 		cost: 0,
 		durationMs: 0,
+		resolvedModel,
 	};
 	return { kind: "subagent", id, label: id, status, detached: true, lastUpdate: 0, agent, description, progress };
 }
@@ -49,11 +61,11 @@ const GOLDEN_SUBAGENTS = [
 	"",
 	"Subagents                                                     9 agents · 2.20M",
 	"",
-	"▾ L● RulesTrack [?]       Nested rules synthesis            ●●         Σ 2.13M",
-	"  ├─▾ L● RulesInner [?]                                     ●            Σ 82k",
-	"  │ └─▾ S● RulesSynth [?]                                   ●●●          Σ 40k",
-	"  │   ├─ R● explorer … [?]● RuleA  ● RuleB  ● RuleC                         1k",
-	"  └─ O● Owner [?]         Writes the merged file            —            2.00M",
+	"▾ L● RulesTrack [grok]    Nested rules synthesis            ●●         Σ 2.13M",
+	"  ├─▾ L● RulesInner [grok]                                  ●            Σ 82k",
+	"  │ └─▾ S● RulesSy… [grok]                                  ●●●          Σ 40k",
+	"  │   ├─ R● explor… [grok]● RuleA  ● RuleB  ● RuleC                         1k",
+	"  └─ O● Owner [grok]      Writes the merged file            —            2.00M",
 ];
 
 describe("subagent HUD golden render", () => {
@@ -86,6 +98,17 @@ describe("subagent HUD golden render", () => {
 			"-> ✗ ReviewTrack",
 		]);
 		for (const line of out.completed) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(60);
+	});
+
+	it("carries the ⟨role⟩ cell on every non-group row and none on a group row", () => {
+		const lines = renderSubagentHudLines(sessions, 120, ancestry).subagents.map(line => Bun.stripANSI(line).trimEnd());
+		expect(lines).toEqual(GOLDEN_SUBAGENTS);
+		const named = lines.filter(line => /[LSO]● /.test(line));
+		expect(named.length).toBe(4);
+		for (const line of named) expect(line).toMatch(/[LSO]● \S+ \[[^\]]+\]/);
+		const group = lines.find(line => line.includes("explor…")) ?? "";
+		expect(group).toContain("explor…");
+		expect(group).not.toContain("⟨explorer⟩");
 	});
 
 	it("never renders task prompt text on any row", () => {

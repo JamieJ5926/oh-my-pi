@@ -8,6 +8,7 @@ import { parseThinkingLevel } from "../../thinking";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import type { ObservableSession } from "../session-observer-registry";
 import { theme } from "../theme/theme";
+import { resolveServedModel } from "../served-model";
 import type { AgentMetrics } from "./agent-hub-projection";
 
 export interface RosterRender {
@@ -105,16 +106,15 @@ function formatResolvedModelBadge(resolved: string, preserveProvider = false, fa
 export function modelBadge(ref: AgentRef, observed: ObservableSession | undefined): string | undefined {
 	const progress = observed?.progress;
 	const liveThinkingLevel = ref.session?.thinkingLevel;
-	const serving = ref.session?.servingModel;
-	const fallbackSelector =
-		(serving?.isFallback ? serving.selector : undefined) ??
-		(progress?.resolvedModelIsFallback ? progress.resolvedModel : undefined) ??
-		(ref.history?.resolvedModelIsFallback ? ref.history.resolvedModel : undefined);
-	if (fallbackSelector) {
-		return `${theme.fg("warning", "fallback →")} ${formatResolvedModelBadge(fallbackSelector, true, liveThinkingLevel)}`;
+	const served = resolveServedModel({
+		serving: ref.session?.servingModel,
+		progress,
+		history: ref.history,
+	});
+	if (served?.isFallback) {
+		return `${theme.fg("warning", "fallback →")} ${formatResolvedModelBadge(served.selector, true, liveThinkingLevel)}`;
 	}
-	const resolvedModel = progress?.resolvedModel ?? ref.history?.resolvedModel ?? serving?.selector;
-	if (resolvedModel) return formatResolvedModelBadge(resolvedModel, false, liveThinkingLevel);
+	if (served) return formatResolvedModelBadge(served.selector, false, liveThinkingLevel);
 	const model = ref.session?.model;
 	if (!model) return undefined;
 	const level = model.thinking ? liveThinkingLevel : undefined;

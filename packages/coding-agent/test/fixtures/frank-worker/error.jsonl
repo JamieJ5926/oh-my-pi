@@ -1,0 +1,6 @@
+{"event":{"kind":{"User":"say fixture answer"},"run_id":"run-1790150504696-67622-1","seq":1},"seq":1,"type":"event"}
+{"event":{"kind":{"AssistantDelta":"partial"},"run_id":"run-1790150504696-67622-1","seq":2},"seq":2,"type":"event"}
+{"event":{"kind":{"Meter":{"cached_tokens":null,"done_ms":1790150504766,"first_token_ms":1790150504766,"input_tokens":null,"lane":"agent","model":"fixture","outcome":"Error","output_tokens":null,"run_id":"run-1790150504696-67622-1"}},"run_id":"run-1790150504696-67622-1","seq":3},"seq":3,"type":"event"}
+{"event":{"kind":{"Fault":{"message":"[openai-compat] fixture Protocol: premature EOF: stream ended without finish","source":"provider"}},"run_id":"run-1790150504696-67622-1","seq":4},"seq":4,"type":"event"}
+{"event":{"kind":{"Terminal":"Error"},"run_id":"run-1790150504696-67622-1","seq":5},"seq":5,"type":"event"}
+{"event":{"kind":{"TerminalDone":{"outcome":"Error","seq":5}},"run_id":"run-1790150504696-67622-1","seq":6},"seq":6,"type":"event"}

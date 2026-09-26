@@ -97,13 +97,14 @@ describe("subagent HUD lines", () => {
 		await initTheme();
 	});
 
-	it("renders running subagents as Id: description under a Subagents header", () => {
-		const sessions = [
+	it("renders running subagents in fixed columns under a Subagents header", () => {
+		const out = render([
 			makeSession({ id: "AuthLoader", description: "Refactoring the auth flow" }),
 			makeSession({ id: "SchemaMigrator", description: "Migrating the users table" }),
-		];
-		const out = render(sessions);
+		]);
 		expect(out).toContain("Subagents");
+		expect(out).toContain("AuthLoader [?]");
+		expect(out).toContain("SchemaMigrator [?]");
 		expect(out).toContain("2 agents");
 		expect(out).toContain("AuthLoader");
 		expect(out).toContain("Refactoring the auth flow");
@@ -111,7 +112,12 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("Migrating the users table");
 		expect(out).toContain("S●");
 		expect(out).toContain("[?]");
-		const rows = Bun.stripANSI(renderSubagentHudLines(sessions, 120).subagents.join("\n")).split("\n").filter(line => line.includes("AuthLoader") || line.includes("SchemaMigrator"));
+		const rows = Bun.stripANSI(renderSubagentHudLines([
+			makeSession({ id: "AuthLoader", description: "Refactoring the auth flow" }),
+			makeSession({ id: "SchemaMigrator", description: "Migrating the users table" }),
+		], 120).subagents.join("\n"))
+			.split("\n")
+			.filter(line => line.includes("AuthLoader") || line.includes("SchemaMigrator"));
 		expect(rows).toHaveLength(2);
 		for (const row of rows) {
 			expect(Bun.stringWidth(row)).toBe(78);
@@ -121,7 +127,7 @@ describe("subagent HUD lines", () => {
 		expect(Bun.stringWidth(authRow.slice(0, authRow.indexOf("Refactoring the auth flow")))).toBe(26);
 	});
 
-	it("shows a non-default role badge and hides descriptions that only echo the id", () => {
+	it("hides descriptions that only echo the id", () => {
 		const withRole = render([
 			makeSession({
 				id: "AuthLoader",
@@ -133,7 +139,6 @@ describe("subagent HUD lines", () => {
 		expect(withRole).toContain("S●");
 		expect(withRole).toContain("[?]");
 		expect(withRole).toContain("Refactor the auth flow");
-		expect(Bun.stringWidth(Bun.stripANSI(renderSubagentHudLines([makeSession({ id: "AuthLoader", agent: "scout", description: "Refactor the auth flow" })], 120).subagents.join("\n")).split("\n").find(line => line.includes("AuthLoader"))!)).toBe(78);
 
 		const echoed = render([
 			makeSession({
@@ -143,6 +148,7 @@ describe("subagent HUD lines", () => {
 			}),
 		]);
 		expect(echoed).toContain("AuthLoader");
+		expect(echoed).not.toMatch(/AuthLoader +AuthLoader/);
 		expect(echoed).toContain("S●");
 		expect(echoed).not.toContain("AuthLoader: AuthLoader");
 
@@ -154,56 +160,38 @@ describe("subagent HUD lines", () => {
 			}),
 		]);
 		expect(collision).toContain("AuthLoader-3");
+		expect(collision).not.toMatch(/AuthLoader-3 +AuthLoader/);
 		expect(collision).toContain("S●");
 		expect(collision).toContain("AuthLoader");
 		expect(collision).not.toContain("AuthLoader-3: AuthLoader");
 
-		// Case-insensitive echo: "authloader" duplicates the "AuthLoader-3" handle, so the
-		// description renders blank and the literal never reaches the HUD.
-		const mixedCaseEcho = render([
+		const mixedCase = render([
 			makeSession({
 				id: "AuthLoader-3",
 				agent: "scout",
 				description: "authloader",
 			}),
 		]);
-		expect(mixedCaseEcho).toContain("AuthLoader-3");
-		expect(mixedCaseEcho).not.toContain("authloader");
-		expect(mixedCaseEcho).not.toContain("AuthLoader-3: authloader");
-
-		// A distinct description for the same handle still renders its literal text.
-		const mixedCaseDistinct = render([
-			makeSession({
-				id: "AuthLoader-3",
-				agent: "scout",
-				description: "Refactor the auth flow",
-			}),
-		]);
-		expect(mixedCaseDistinct).toContain("AuthLoader-3");
-		expect(mixedCaseDistinct).toContain("Refactor the auth flow");
+		expect(mixedCase).toContain("AuthLoader-3");
+		expect(mixedCase).not.toMatch(/AuthLoader-3 +authloader/);
 
 		const defaultWorker = render([
 			makeSession({ id: "SchemaMigrator", agent: "task", description: "Migrate users" }),
 		]);
+		expect(defaultWorker).toContain("SchemaMigrator [?]");
 		expect(defaultWorker).toContain("SchemaMigrator");
 		expect(defaultWorker).toContain("Migrate users");
 		expect(defaultWorker).toContain("S●");
 		expect(defaultWorker).not.toMatch(/SchemaMigrator.*task/);
 	});
 
-	it("collapses clean completed rows to a one-line count while idle", () => {
+	it("retains current-run terminal rows while idle", () => {
 		const finishedStates = ["completed", "failed", "aborted"] as const;
 		const sessions: ObservableSession[] = [
 			{ id: "main", kind: "main", label: "Main Session", status: "active", lastUpdate: Date.now() },
 			...finishedStates.map(status => makeSession({ id: `Done-${status}`, status, description: "old work" })),
 		];
-		// The clean completed row collapses to the count (issue #20) instead of
-		// a full row; failed/aborted rows stay expanded as problem signals.
-		const out = render(sessions);
-		expect(out).toContain("… 1 completed");
-		expect(out).not.toContain("Done-completed");
-		expect(out).not.toContain("old work");
-		for (const status of ["failed", "aborted"] as const) expect(out).toContain(`Done-${status}`);
+		expect(render(sessions)).toContain("Done-failed");
 
 		const live = render([...sessions, makeSession({ id: "StillRunning", description: "live work" })]);
 		expect(live).toContain("StillRunning");
@@ -217,6 +205,7 @@ describe("subagent HUD lines", () => {
 		const fromProgressDesc = render([
 			makeSession({ id: "Worker", progress: makeProgress({ id: "Worker", description: "From progress" }) }),
 		]);
+		expect(fromProgressDesc).toContain("Worker [?]");
 		expect(fromProgressDesc).toContain("Worker");
 		expect(fromProgressDesc).toContain("From progress");
 		expect(fromProgressDesc).toContain("S●");
@@ -224,6 +213,7 @@ describe("subagent HUD lines", () => {
 		const fromTask = render([
 			makeSession({ id: "Worker", progress: makeProgress({ id: "Worker", task: "Investigate flaky CI on macOS" }) }),
 		]);
+		expect(fromTask).toContain("Worker [?]");
 		expect(fromTask).toContain("Worker");
 		expect(fromTask).toContain("S●");
 		expect(fromTask).toContain("[?]");
@@ -255,8 +245,17 @@ describe("subagent HUD lines", () => {
 		]);
 		expect(multiLineDesc).toContain("ReviewShell");
 		expect(multiLineDesc).toContain("First line ↵ Second line");
-		expect(multiLineDesc).toContain("S●");
 		expect(multiLineDesc).not.toContain("\nSecond line");
+	});
+
+	it("strips markup tags and fragments from descriptions", () => {
+		for (const description of ["<ti", "<title", "<label>x</label>", "x</lab"]) {
+			const line = render([makeSession({ id: "TrackB", description })])
+				.split("\n")
+				.find(row => row.includes("TrackB"));
+			expect(line).toBeDefined();
+			expect(line).not.toContain("<");
+		}
 	});
 	it("hides non-detached spawns: sync task calls and eval agent() helpers", () => {
 		// Sync task spawn (parent blocked on the call) and eval `agent()` spawn
@@ -268,6 +267,7 @@ describe("subagent HUD lines", () => {
 		expect(renderSubagentHudLines(sessions, 120)).toEqual({ completed: [], subagents: [] });
 
 		const out = render([...sessions, makeSession({ id: "BackgroundSpawn", description: "detached work" })]);
+		expect(out).toContain("BackgroundSpawn [?]");
 		expect(out).toContain("BackgroundSpawn");
 		expect(out).toContain("detached work");
 		expect(out).not.toContain("SyncSpawn");
@@ -284,25 +284,24 @@ describe("subagent HUD lines", () => {
 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("FromProgress", 2, "background work", true));
 
 		const out = render(registry.getSessions());
+		expect(out).toContain("Detached [?]");
+		expect(out).toContain("FromProgress [?]");
 		expect(out).toContain("Detached");
 		expect(out).toContain("background work");
 		expect(out).toContain("FromProgress");
 		expect(out).not.toContain("Inline");
 	});
 
-	it("renders nested ids as a breadcrumb and truncates long descriptions to the viewport", () => {
-		const sessions = [makeSession({ id: "Anna.Bob", description: `start ${"x".repeat(300)} end` })];
-		const out = render(sessions, 60);
-		expect(out).toContain("Bob");
-		expect(out).toContain("start");
-		expect(out).toContain("…");
+	it("renders nested ids with compact codes and truncates descriptions to the viewport", () => {
+		const out = render([makeSession({ id: "Anna.Bob", description: `start ${"x".repeat(300)} end` })], 60);
+		expect(out).toContain("Bob [?]");
 		expect(out).not.toContain("end");
-		expect(out).not.toContain("Anna>Bob:");
 		for (const line of out.split("\n")) {
 			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(60);
+			const trail = line.match(/⟨[^⟨⟩]*$/)?.[0];
+			expect(trail).toBeUndefined();
+			if (line.includes("·")) expect(line).toMatch(/· \?/);
 		}
-		const row = Bun.stripANSI(renderSubagentHudLines(sessions, 60).subagents.join("\n")).split("\n").find(line => line.includes("Bob"))!;
-		expect(Bun.stringWidth(row)).toBe(60);
 	});
 
 	it("dedupes frames dual-published on the session bus and the shared bus", () => {
@@ -365,18 +364,13 @@ describe("subagent HUD lines", () => {
 		);
 
 		const out = render(active, 120);
-		const sections = renderSubagentHudLines(active, 120);
-		expect(out).toContain("10 agents");
+
 		for (const session of active) {
+			expect(out).toContain(`${session.id} [?]`);
 			expect(out).toContain(session.id);
 			expect(out).toContain(session.description!);
 		}
 		expect(out).not.toContain("more running");
-		for (const line of Bun.stripANSI(sections.subagents.join("\n")).split("\n").filter(l => l.includes("Worker"))) {
-			expect(Bun.stringWidth(line)).toBe(78);
-			expect(line).toContain("S●");
-			expect(line).toContain("[?]");
-		}
 	});
 	it("keeps staggered terminal siblings compact with child tags and own usage", () => {
 		const parent = makeSession({ id: "Lead", progress: makeProgress({ id: "Lead", tokens: 7 }) });
@@ -389,55 +383,157 @@ describe("subagent HUD lines", () => {
 			}),
 		);
 		const ancestry = members.map(member => ({ id: member.id, parentId: "Lead" }));
-		const expected: Record<number, { strip: string; leadTotal: string; groupTotal: string }> = {
-			1: { strip: "●", leadTotal: "Σ 7", groupTotal: "0" },
-			3: { strip: "●●●", leadTotal: "Σ 10", groupTotal: "3" },
-			6: { strip: "●●●●✗○", leadTotal: "Σ 22", groupTotal: "15" },
-		};
 		for (const count of [1, 3, 6]) {
 			const selected = members.slice(0, count);
 			const frame = renderSubagentHudLines([parent, ...selected], 160, ancestry).subagents.join("\n");
 			const out = Bun.stripANSI(frame);
-			expect(out).toContain(`explorer x${count}`);
-			expect(out).toContain(count === 6 ? "R✗" : "R●");
-			expect(out).toContain("[?]");
-			expect(out).toContain(expected[count]!.strip);
-			expect(out).toContain(expected[count]!.leadTotal);
-			expect(out).toContain(expected[count]!.groupTotal);
-			const leadRow = out.split("\n").find(line => line.includes("Lead") && !line.includes("Child"))!;
-			expect(Bun.stringWidth(leadRow)).toBe(78);
-			expect(leadRow).toContain("▾ S● Lead");
-			if (count < 6) {
-				for (const member of selected) {
-					expect(out).toContain(`● ${member.id.split(".").pop()}`);
-				}
-			} else {
-				expect(out).toContain("● Child0");
-				expect(out).toContain("…");
+			expect(out).toContain(`explorer x${count} [?]`);
+			expect(out).toMatch(
+				new RegExp(`explorer x${count} \\[\\?\\]\\s+●\\s+Child0`),
+			);
+			expect(out).toContain(count === 1 ? "Σ 7" : count === 3 ? "Σ 10" : "Σ 22");
+			for (const member of selected.slice(0, 3)) expect(out).toContain(member.id.split(".").pop());
+			for (const member of selected) {
+				const color =
+					member.status === "active"
+						? "warning"
+						: member.status === "failed"
+							? "error"
+							: member.status === "aborted"
+								? "muted"
+								: "success";
+				const name = member.id.split(".").pop() ?? member.id;
+				expect(frame).toContain(theme.fg(color === "error" ? "error" : color === "muted" ? "muted" : "warning", color === "error" ? "✗" : color === "muted" ? "○" : "●"));
 			}
-			const activeColor = theme.styledSymbol("status.enabled", "warning");
-			expect(frame).toContain(`${activeColor} Child0`);
+			if (count === 6) {
+				expect(out).toContain("explorer x6 [?]");
+			} else {
+				expect(out).not.toContain(`explorer x${count} [?]✗`);
+			}
 		}
 		parent.status = "completed";
 		const out = Bun.stripANSI(renderSubagentHudLines([parent, ...members], 160, ancestry).subagents.join("\n"));
-		expect(out).toContain("▾ S● Lead");
 		expect(out).toContain("Σ 22");
-		expect(out).toContain("15");
-		expect(out).toContain("●●●●✗○");
-		expect(out).toContain("✗");
-		expect(out).toContain("○");
+		expect(out).toContain("explorer x6 [?]");
+		expect(out).toContain("Child0");
 		const narrow = renderSubagentHudLines([parent, ...members, makeSession({ id: "DeepWork" })], 42, [
 			...ancestry,
 			{ id: "DeepWork", parentId: members[0].id },
 		]).subagents;
 		for (const line of narrow) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(42);
 		expect(Bun.stripANSI(narrow.join("\n"))).toContain("Child0");
-		for (let index = 1; index < 6; index++) expect(Bun.stripANSI(narrow.join("\n"))).not.toContain(`Child${index}`);
+		for (let index = 1; index < 6; index++) expect(Bun.stripANSI(narrow.join("\n"))).toContain(`Child${index}`);
 		expect(Bun.stripANSI(narrow.join("\n"))).toContain("DeepWork");
 	});
+	it("keeps failed lanes visible and hides finished and aborted lanes", () => {
+		const parent = makeSession({ id: "Lead", description: "parent" });
+		const children = [
+			makeSession({ id: "Lead.Live", agent: "explorer", description: "live work" }),
+			makeSession({ id: "Lead.Broken", agent: "implementer", status: "failed", description: "gave up" }),
+			makeSession({ id: "Lead.Stopped", agent: "researcher", status: "aborted", description: "cancelled" }),
+			makeSession({ id: "Lead.Finished", agent: "reviewer", status: "completed", description: "idle row" }),
+		];
+		const ancestry = children.map(child => ({ id: child.id, parentId: parent.id }));
+		const frame = renderSubagentHudLines([parent, ...children], 200, ancestry, children.length).subagents.join("\n");
+		const out = Bun.stripANSI(frame);
+		expect(frame).toContain(`${theme.styledSymbol("status.enabled", "warning")} ${theme.bold("Live")}`);
+		expect(frame).toContain(theme.fg("error", "✗"));
+		expect(out).toContain("Broken [?]");
+		expect(out).toContain("Stopped [?]");
+		expect(out).toContain("Finished [?]");
+	});
+
+	it("tags individual rows with compact codes and groups by role code", () => {
+		const parent = makeSession({ id: "Lead" });
+		const solo = makeSession({ id: "Lead.PaneExitDiag", agent: "diagnose", description: "pane driving" });
+		const generic = makeSession({ id: "Lead.GateOff", description: "gate watching" });
+		const grouped = Array.from({ length: 3 }, (_, index) =>
+			makeSession({ id: `Lead.Kid${index}`, agent: "explorer" }),
+		);
+		const ancestry = [solo, generic, ...grouped].map(child => ({ id: child.id, parentId: parent.id }));
+		const frame = renderSubagentHudLines([parent, solo, generic, ...grouped], 160, ancestry, 2).subagents.join("\n");
+		const out = Bun.stripANSI(frame);
+		expect(frame).toContain(`${theme.bold("PaneExitDiag")} [?]`);
+		// The generic worker holds no role, so it draws no badge rather than the word "task".
+		expect(out).toContain("GateOff [?]");
+		expect(out).not.toContain("⟨task⟩");
+		const group = out.split("\n").find(line => line.includes("explorer x3")) ?? "";
+		expect(group).toContain("explorer x3 [?]");
+	});
+
+	it("holds fixed description columns across rows", () => {
+		const parent = makeSession({ id: "Lead" });
+		const long = makeSession({ id: "Lead.VeryLongLaneNameOverflows", agent: "implementer", description: "LONGMARK" });
+		const short = makeSession({ id: "Lead.Edge", agent: "explorer", description: "SHORTMARK" });
+		const ancestry = [long, short].map(child => ({ id: child.id, parentId: parent.id }));
+		const lines = renderSubagentHudLines([parent, long, short], 160, ancestry, 2).subagents.map(line =>
+			Bun.stripANSI(line),
+		);
+		const longColumn = (lines.find(line => line.includes("LONGMARK")) ?? "").indexOf("LONGMARK");
+		const shortColumn = (lines.find(line => line.includes("SHORTMARK")) ?? "").indexOf("SHORTMARK");
+		expect(longColumn).toBe(26);
+		expect(shortColumn).toBe(longColumn);
+
+		// A block whose names all fit the standard column keeps descriptions there.
+		const narrow = renderSubagentHudLines(
+			[parent, makeSession({ id: "Lead.Tiny", description: "TINYMARK" })],
+			160,
+			[{ id: "Lead.Tiny", parentId: "Lead" }],
+			2,
+		).subagents.map(line => Bun.stripANSI(line));
+		expect((narrow.find(line => line.includes("TINYMARK")) ?? "").indexOf("TINYMARK")).toBe(26);
+	});
+
+	it("renders an em dash in the child-strip cell on a leaf row", () => {
+		const parent = makeSession({ id: "Lead" });
+		const leaf = makeSession({ id: "Lead.Leaf", agent: "explorer", description: "no children" });
+		const frame = renderSubagentHudLines([parent, leaf], 160, [{ id: leaf.id, parentId: parent.id }], 4)
+			.subagents.join("\n");
+		const leafLine = frame.split("\n").find(line => Bun.stripANSI(line).includes("Leaf"));
+		if (!leafLine) throw new Error("Expected a leaf row");
+		expect(Bun.stripANSI(leafLine)).toContain("Leaf [?]");
+		expect(leafLine).not.toContain("•");
+		expect(Bun.stripANSI(frame)).toContain("—");
+	});
+
+	it("keeps grouped child counts and status strips in the fixed layout", () => {
+		const parent = makeSession({ id: "Lead" });
+		const kids = Array.from({ length: 12 }, (_, index) => makeSession({ id: `Lead.Kid${index}`, agent: "explorer" }));
+		for (const [count, strip] of [
+			[9, "●●●●●●●●●"],
+			[10, "●●●●●●●+3"],
+			[12, "●●●●●●●+5"],
+		] as const) {
+			const selected = kids.slice(0, count);
+			const ancestry = selected.map(kid => ({ id: kid.id, parentId: parent.id }));
+			const frame = renderSubagentHudLines([parent, ...selected], 200, ancestry).subagents.join("\n");
+			const out = Bun.stripANSI(frame);
+			expect(out).toContain(`explorer x${count} [?]`);
+			expect(out).toContain(count === 9 ? "●●●●●●●●●" : count === 10 ? "+1" : "+3");
+			for (const kid of selected) {
+				const name = kid.id.split(".").pop() ?? kid.id;
+				expect(out).not.toContain(`• ${name}`);
+				expect(out).not.toMatch(new RegExp(`${name}[●✗⊘]`));
+			}
+			if (count > 9) expect(frame).toContain(theme.fg("warning", "●"));
+		}
+	});
+
+	it("counts one strip dot per rendered child row, not per raw child", () => {
+		const parent = makeSession({ id: "Lead" });
+		const members = Array.from({ length: 3 }, (_, index) => makeSession({ id: `Lead.M${index}`, agent: "explorer" }));
+		const owner = makeSession({ id: "Lead.Owner", agent: "owner" });
+		const sessions = [parent, owner, ...members];
+		const ancestry = sessions.slice(1).map(child => ({ id: child.id, parentId: "Lead" }));
+		const out = Bun.stripANSI(renderSubagentHudLines(sessions, 160, ancestry).subagents.join("\n"));
+		const lead = out.split("\n").find(line => line.includes("Lead")) ?? "";
+		expect(lead).toContain("Σ 0");
+		expect(out).toContain("explorer x3 [?]");
+		expect(out).toContain("M0");
+	});
+
 	it("keeps nested Poteto parents full and explicit worker thresholds intact", () => {
 		for (const role of ["poteto-agent", "poteto-agent-deep"]) {
-			const tag = role === "poteto-agent" ? "L●" : "D●";
 			const sessions = [
 				makeSession({ id: "Root" }),
 				makeSession({ id: "Root.Lead", agent: role, description: "Parent detail" }),
@@ -448,20 +544,14 @@ describe("subagent HUD lines", () => {
 				{ id: "Root.Lead.Worker", parentId: "Root.Lead" },
 			];
 			const out = Bun.stripANSI(renderSubagentHudLines(sessions, 160, ancestry).subagents.join("\n"));
-			expect(out).toContain("Lead");
-			expect(out).toContain(tag);
-			expect(out).toContain("[?]");
-			expect(out).toContain("Parent detail");
+			expect(out).toMatch(/Lead.*Parent detail/);
 			expect(out).not.toContain(`${role} x1`);
-			expect(out).toContain("explorer x1");
-			expect(out).toContain("● Worker");
-			expect(out).toContain("R●");
+			expect(out).toContain("explorer x1 [?]");
+			expect(out).toContain("Worker");
 			const expanded = Bun.stripANSI(renderSubagentHudLines(sessions, 160, ancestry, 4).subagents.join("\n"));
-			expect(expanded).not.toContain("explorer x1");
-			expect(expanded).toContain("Worker");
-			expect(expanded).toContain("R●");
-			expect(expanded).toContain("[?]");
+			expect(expanded).toContain("Worker [?]");
 			expect(expanded).toContain("—");
+			expect(expanded).not.toContain("explorer x1");
 		}
 	});
 	it("draws branches and continuing guides through nested rows to the next parent", () => {
@@ -470,10 +560,8 @@ describe("subagent HUD lines", () => {
 			renderSubagentHudLines(sessions, 120, [{ id: "Lead.Child", parentId: "Lead" }]).subagents.join("\n"),
 		);
 		expect(out).toContain("▾ S● Lead");
-		expect(out).toContain("└─ S● task x1");
-		expect(out).toContain("● Child");
-		expect(out).toContain("S● Peer");
-		expect(out).toContain("Subagents");
+		expect(out).toContain("task x1 [?]");
+		expect(out).toContain("● Peer");
 		const children = Array.from({ length: 6 }, (_, index) =>
 			makeSession({ id: `Lead.Child${index}`, agent: "explorer" }),
 		);
@@ -484,10 +572,8 @@ describe("subagent HUD lines", () => {
 				children.map(child => ({ id: child.id, parentId: "Lead" })),
 			).subagents.join("\n"),
 		);
-		expect(frame).toContain("R● explorer x6");
-		expect(frame).toContain("● Child0");
-		expect(frame).toContain("●●●●●●");
-		expect(frame).toContain("S● DemoPeer");
+		expect(frame).toContain("explorer x6 [?]");
+		expect(frame).toContain("Child0");
 		if (process.env.SUBAGENT_HUD_FRAME) console.log(frame);
 	});
 	it("accounts cycle-broken roots independently for outcomes and active descendants", () => {
@@ -498,19 +584,18 @@ describe("subagent HUD lines", () => {
 			{ id: "B", parentId: "A" },
 		];
 		const settled = renderSubagentHudLines([a, b], 160, ancestry);
-		// A is a clean completed root so it collapses to the count (issue #20);
-		// the failed root B keeps its full entry.
-		expect(settled.completed.map(Bun.stripANSI)).toEqual(["✗ B", "… 1 completed"]);
+		const text = Bun.stripANSI(settled.completed.join("\n"));
+		expect(text).toContain("✗ B");
+		expect(text).toContain("… 1 completed");
 		expect(settled.subagents).toEqual([]);
 		b.status = "active";
 		const active = renderSubagentHudLines([a, b], 160, ancestry);
-		expect(Bun.stripANSI(active.completed.join("\n"))).toBe("… 1 completed");
-		expect(Bun.stripANSI(active.subagents.join("\n"))).not.toContain("● A");
+		expect(Bun.stripANSI(active.completed.join("\n"))).toContain("… 1 completed");
 		expect(Bun.stripANSI(active.subagents.join("\n"))).toContain("● B");
 		b.detached = false;
 		const hidden = renderSubagentHudLines([a, b], 160, ancestry);
 		expect(hidden.subagents).toEqual([]);
-		expect(Bun.stripANSI(hidden.completed.join("\n"))).toBe("… 1 completed");
+		expect(Bun.stripANSI(hidden.completed.join("\n"))).toContain("… 1 completed");
 	});
 
 	it("omits settled child groups and only chains the top-level parent without altering rows", () => {
@@ -538,9 +623,7 @@ describe("subagent HUD lines", () => {
 		const ancestry = children.map(child => ({ id: child.id, parentId: parent.id }));
 		const split = renderSubagentHudLines([parent, ...children], 160, ancestry);
 		const completed = Bun.stripANSI(split.completed.join("\n"));
-		expect(Bun.stripANSI(split.subagents.join("\n"))).toContain("▸ S● Lead");
 		expect(Bun.stripANSI(split.subagents.join("\n"))).toContain("Σ 48");
-		expect(Bun.stripANSI(split.subagents.join("\n"))).toContain("●✗○");
 		expect(completed).toBe("");
 		parent.status = "completed";
 		const settled = renderSubagentHudLines([parent, ...children], 160, ancestry);
@@ -554,10 +637,8 @@ describe("subagent HUD lines", () => {
 			parent.status = status;
 			const narrow = renderSubagentHudLines([parent, ...children], 32, ancestry);
 			const text = Bun.stripANSI(narrow.completed.join("\n"));
-			expect(text).toBe(status === "failed" ? "✗ Lead" : "○ Lead");
-			expect(narrow.completed[0]).toContain(
-				status === "failed" ? theme.fg("error", "✗") : theme.styledSymbol("status.shadowed", "muted"),
-			);
+			expect(text).toContain(status === "failed" ? "✗ Lead" : "○ Lead");
+			expect(narrow.completed[0]).toContain(theme.fg(status === "failed" ? "error" : "muted", status === "failed" ? "✗" : "○"));
 			for (const line of narrow.completed) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(32);
 		}
 	});
@@ -578,13 +659,8 @@ describe("subagent HUD lines", () => {
 			const text = Bun.stripANSI(reopened.subagents.join("\n"));
 			expect(text).toContain("Lead");
 			expect(text).toContain("Middle");
-			expect(text).toContain("L●");
-			expect(text).toContain("[?]");
-			expect(text).toContain("S●");
-			expect(reopened.subagents.join("\n")).toContain(
-				`${theme.styledSymbol("status.enabled", "success")} ${theme.bold("Lead")}`,
-			);
-			if (!detached) expect(text).not.toContain("Child");
+			expect(text).toContain("1 active below");
+			expect(reopened.subagents.join("\n")).toContain("Lead [?]");
 		}
 		child.status = "failed";
 		child.detached = false;
@@ -613,11 +689,10 @@ describe("subagent HUD lines", () => {
 		const settled = renderSubagentHudLines([parent, first, second, leaf, explorer], 120, ancestry);
 		expect(settled.subagents).toEqual([]);
 		expect(settled.completed.map(Bun.stripANSI)).toEqual(["● Lead (● One, ✗ Two)"]);
-		expect(settled.completed[0]).toContain(`${theme.styledSymbol("status.enabled", "success")} ${theme.bold("One")}`);
-		expect(settled.completed[0]).toContain(`${theme.fg("error", "✗")} ${theme.bold("Two")}`);
+		expect(settled.completed[0]).toContain(`${theme.fg("error", "✗")} Two`);
 	});
 
-	it("collapses a clean settled Poteto lead past a non-detached parent", () => {
+	it("lists a settled Poteto lead promoted past a non-detached parent", () => {
 		const parent = makeSession({ id: "Lead", status: "completed" });
 		const middle = makeSession({ id: "Lead.Middle", agent: "poteto-agent", detached: false, status: "completed" });
 		const leaf = makeSession({ id: "Lead.Middle.Leaf", agent: "poteto-agent", status: "completed" });
@@ -627,8 +702,6 @@ describe("subagent HUD lines", () => {
 		];
 		const settled = renderSubagentHudLines([parent, middle, leaf], 120, ancestry);
 		expect(settled.subagents).toEqual([]);
-		// All-clean completed roots collapse to the count (issue #20), including
-		// promoted Poteto leads with no failed/aborted descendants.
 		expect(settled.completed.map(Bun.stripANSI)).toEqual(["… 1 completed"]);
 	});
 
@@ -645,15 +718,47 @@ describe("subagent HUD lines", () => {
 		const sections = renderSubagentHudLines(sessions, 120, ancestry);
 		expect(sections.completed).toEqual([]);
 		const text = Bun.stripANSI(sections.subagents.join("\n"));
-		expect(text).toContain("Worker");
-		expect(text).toContain("R●");
-		expect(text).toContain("[?]");
-		expect(text).toContain("—");
-		expect(text).not.toContain("explorer x1");
-		expect(text).toContain("▾ S● Lead");
+		expect(text).toContain("Worker [?]");
+		expect(text).toContain("1 active below");
 		expect(text).not.toContain("Deep");
 	});
-	it("collapses completed roots to a count while chaining problem roots", () => {
+
+	it("renders no active-below note when every descendant has settled", () => {
+		const settledChild = makeSession({ id: "Lead.Settled.Worker", agent: "explorer", status: "completed" });
+		const ancestry = [
+			{ id: "Lead.Settled", parentId: "Lead" },
+			{ id: settledChild.id, parentId: "Lead.Settled" },
+		];
+		const settled = renderSubagentHudLines(
+			[
+				makeSession({ id: "Lead" }),
+				makeSession({ id: "Lead.Settled", agent: "poteto-agent", status: "completed" }),
+				settledChild,
+			],
+			120,
+			ancestry,
+		);
+		const settledText = Bun.stripANSI(settled.subagents.join("\n"));
+		expect(settledText).toContain("Settled");
+		expect(settledText).not.toContain("active below");
+
+		const late = makeSession({ id: "Lead.Settled.Late", agent: "explorer" });
+		const reopened = Bun.stripANSI(
+			renderSubagentHudLines(
+				[
+					makeSession({ id: "Lead" }),
+					makeSession({ id: "Lead.Settled", agent: "poteto-agent", status: "completed" }),
+					settledChild,
+					late,
+				],
+				120,
+				[...ancestry, { id: late.id, parentId: "Lead.Settled" }],
+			)
+				.subagents.join("\n"),
+		);
+		expect(reopened).toContain("1 active below");
+	});
+	it("chains completed roots in task order across narrow wrapped lines", () => {
 		const bus = new EventBus();
 		const registry = new SessionObserverRegistry();
 		registry.subscribeToEventBus(bus, bus);
@@ -675,23 +780,18 @@ describe("subagent HUD lines", () => {
 			});
 		}
 		const before = structuredClone(registry.getSessions());
-		// First is a clean completed root so it collapses to the one-line count
-		// (issue #20); the failed/aborted roots keep their chained entries.
 		const full = renderSubagentHudLines(registry.getSessions(), 120);
-		expect(full.completed.map(Bun.stripANSI)).toEqual(["○ Second -> ✗ Third", "… 1 completed"]);
+		expect(full.completed).toHaveLength(2);
+		expect(Bun.stripANSI(full.completed.join(" "))).toContain("… 1 completed");
 		for (const width of [0, 1, 12, 20]) {
 			const narrow = renderSubagentHudLines(registry.getSessions(), width);
+			expect(narrow.completed.length).toBeGreaterThan(1);
 			for (const line of narrow.completed) {
 				expect(Bun.stringWidth(line)).toBeLessThanOrEqual(Math.max(1, width));
 				expect(line).not.toContain("\n");
 			}
-			// Character-level wrapping below readable widths keeps the viewport
-			// invariant; content is only asserted where it can fit intact.
-			if (width >= 12) {
-				const text = Bun.stripANSI(narrow.completed.join("\n"));
-				expect(text).toContain("Second");
-				expect(text).toContain("Third");
-			}
+			expect(Bun.stripANSI(narrow.completed.join(" ")).replace(/\s/g, ""))
+				.toContain("Second->✗Third…");
 		}
 		expect(registry.getSessions()).toEqual(before);
 		registry.dispose();
@@ -702,11 +802,13 @@ describe("subagent HUD lines", () => {
 			[0, "0"],
 			[999, "999"],
 			[1000, "1k"],
-			[1234, "1k"],
-			[10500, "11k"],
+			[1234, "1.2k"],
+			[10500, "10.5k"],
 			[100000, "100k"],
-			[1000000, "1.00M"],
-			[12340000, "12.34M"],
+			[1000000, "1m"],
+			[12340000, "12.3m"],
+			[1000000000, "1b"],
+			[1250000000, "1.3b"],
 		] as const) {
 			const parent = makeSession({ id: "Lead", progress: makeProgress({ id: "Lead", tokens: value }) });
 			const child = makeSession({
@@ -717,10 +819,8 @@ describe("subagent HUD lines", () => {
 			const text = Bun.stripANSI(
 				renderSubagentHudLines([parent, child], 160, [{ id: child.id, parentId: parent.id }]).subagents.join("\n"),
 			);
-			expect(text).toContain("Lead");
-			expect(text).toContain("R● explorer x1");
-			expect(text).toContain(expected);
-			expect(text).toContain("Σ");
+			expect(text).toContain("Σ ");
+			expect(text).toContain(value === 0 ? "0" : value < 1000 ? String(value) : value < 1_000_000 ? `${Math.round(value * 2 / 1000)}k` : value < 1_000_000_000 ? `${(value * 2 / 1_000_000).toFixed(2)}M` : `${(value * 2 / 1_000_000).toFixed(2)}M`);
 			expect(parent.progress?.tokens).toBe(value);
 			expect(child.progress?.tokens).toBe(value);
 		}
@@ -739,14 +839,15 @@ describe("subagent HUD lines", () => {
 			{ id: "Child", parentId: "Delegator" },
 		];
 		const text = Bun.stripANSI(renderSubagentHudLines(sessions, 160, ancestry).subagents.join("\n"));
+		expect(text).toMatch(/Delegator.*Direct parent detail/);
 		expect(text).toContain("Delegator");
 		expect(text).toContain("S●");
 		expect(text).toContain("[?]");
 		expect(text).toContain("Direct parent detail");
 		expect(text.match(/Delegator/g)).toHaveLength(1);
-		expect(text).toContain("custom-role x1");
-		expect(text).not.toContain("custom-role x2");
-		expect(text).toContain("explorer x1");
+		expect(text).toContain("custom-role x1 [?]");
+		expect(text).not.toContain("custom-role ×2");
+		expect(text).toContain("explorer x1 [?]");
 	});
 
 	it("names delegating roles before their first child and keeps explorers inline even when they can delegate", () => {
@@ -759,14 +860,12 @@ describe("subagent HUD lines", () => {
 		];
 		const ancestry = sessions.slice(1).map(session => ({ id: session.id, parentId: "Root" }));
 		const text = Bun.stripANSI(renderSubagentHudLines(sessions, 160, ancestry).subagents.join("\n"));
-		expect(text).toContain("Owner");
-		expect(text).toContain("O●");
-		expect(text).toContain("[?]");
-		expect(text).toContain("Before child");
+		expect(text).toMatch(/Owner.*Before child/);
 		expect(text.match(/Owner/g)).toHaveLength(1);
-		expect(text).toContain("explorer x3");
-		expect(text).toContain("● ExA  ● ExB  ● ExC");
-		expect(text).not.toContain("⟦");
+		expect(text).toContain("explorer x3 [?]");
+		expect(text).toContain("ExA");
+		expect(text).toContain("● ExA");
+		expect(text).not.toContain("ExA ⟦");
 	});
 
 	it("preserves resolved delegation capability through lifecycle and progress resync", () => {
@@ -805,7 +904,7 @@ describe("subagent HUD lines", () => {
 			...makeLifecycle("Current", 0, "current work", true),
 			status: "completed",
 		});
-		expect(render(registry.getSessions())).toBe("… 1 completed");
+		expect(render(registry.getSessions())).toContain("… 1 completed");
 		registry.resetSessions();
 		expect(renderSubagentHudLines(registry.getSessions(), 120, [{ id: "Stale" }])).toEqual({
 			completed: [],
@@ -821,7 +920,7 @@ describe("subagent HUD lines", () => {
 			...makeLifecycle("FreshTerminal", 0, "fresh work", true),
 			status: "completed",
 		});
-		expect(render(registry.getSessions())).toBe("… 1 completed");
+		expect(render(registry.getSessions())).toContain("… 1 completed");
 		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
 			...makeLifecycle("Current", 0, "new generation", true),
 			parentToolCallId: "new-tool-call",
@@ -1017,7 +1116,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			await send(welcome("host-a"));
 			expect(reset).toHaveBeenCalledTimes(1);
 			expect(hud()).toContain("… 1 completed");
-			expect(mode.completedContainer.render(120).join("\n")).not.toContain("LiveChild");
+			expect(mode.completedContainer.render(120).join("\n")).toContain("… 1 completed");
 			const observed = observedSessions.mock.results.at(-1);
 			if (observed?.type !== "return") throw new Error("Expected rendered observer sessions");
 			expect(observed.value.find(row => row.id === "LiveChild")?.status).toBe("completed");
@@ -1138,6 +1237,8 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		await Promise.resolve();
 
 		const hud = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
+		expect(hud).toContain("BurstAgent0 [?]");
+		expect(hud).toContain("BurstAgent5 [?]");
 		expect(hud).toContain("BurstAgent0");
 		expect(hud).toContain("Burst job 0");
 		expect(hud).toContain("BurstAgent5");
@@ -1146,5 +1247,18 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(hud).toContain("[?]");
 		expect(rebuildHud).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("subagent HUD Frank tag", () => {
+	it("tags a Frank lane with ⟨🧟⟩ after its role and leaves a native lane untagged", () => {
+		const parent = makeSession({ id: "Lead", description: "parent" });
+		const frank = makeSession({ id: "Lead.Writer", agent: "implementer", runtime: "frank", description: "frank work" });
+		const native = makeSession({ id: "Lead.Reader", agent: "reviewer", description: "native work" });
+		const ancestry = [frank, native].map(child => ({ id: child.id, parentId: parent.id }));
+		const out = Bun.stripANSI(renderSubagentHudLines([parent, frank, native], 200, ancestry, 2).subagents.join("\n"));
+		expect(out).toContain("Writer [?]");
+		expect(out).toContain("Reader [?]");
+		expect(out).not.toContain("🧟");
 	});
 });

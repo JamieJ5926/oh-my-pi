@@ -214,7 +214,7 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 			{context && <Output text={context} maxLines={4} title="context" />}
 			{tasks.length > 0 && (
 				<div className="tv-list">
-					{tasks.map((t, i) => (
+					{tasks.slice(0, 100).map((t, i) => (
 						<div key={t.id ?? i}>
 							<Row
 								k={
@@ -233,21 +233,36 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 							{t.assignment && <Output text={t.assignment} maxLines={6} title="assignment" />}
 						</div>
 					))}
+					{tasks.length > 100 && (
+						<Row>
+							<span className="tv-faint">{`${tasks.length - 100} more`}</span>
+						</Row>
+					)}
 				</div>
 			)}
 			{ordered.length > 0 && (
 				<div className="tv-list">
-					{ordered.map((res, i) => (
+					{ordered.slice(0, 100).map((res, i) => (
 						<AgentResult key={str(res.id) ?? i} res={res} host={host} />
 					))}
+					{ordered.length > 100 && (
+						<Row>
+							<span className="tv-faint">{`${ordered.length - 100} more`}</span>
+						</Row>
+					)}
 					{footer}
 				</div>
 			)}
 			{showProgress && (
 				<div className="tv-list">
-					{progress.map((p, i) => (
+					{progress.slice(0, 100).map((p, i) => (
 						<AgentProgressRow key={str(p.id) ?? i} p={p} host={host} />
 					))}
+					{progress.length > 100 && (
+						<Row>
+							<span className="tv-faint">{`${progress.length - 100} more`}</span>
+						</Row>
+					)}
 				</div>
 			)}
 			{ordered.length === 0 && !showProgress && <ResultText result={result} maxLines={12} />}

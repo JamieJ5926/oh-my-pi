@@ -102,6 +102,8 @@ export interface SubagentLifecyclePayload {
 	 */
 	detached?: boolean;
 	canDelegate?: boolean;
+	/** "frank" when the lane runs through the Frank worker; absent for native lanes. */
+	runtime?: "frank";
 }
 
 /** Display cap for a normalized one-line label (roster line, registry `displayName`, prompt field). */
@@ -118,6 +120,12 @@ export const taskItemSchema = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"cwd?": "string",
+	"seat?": "string",
+	"delegable?": "string",
+	"width?": "number",
+	"childrenReadOnly?": "boolean",
+	"frankTransport?": '"process" | "daemon"',
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -126,6 +134,12 @@ const taskItemSchemaIsolated = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"cwd?": "string",
+	"seat?": "string",
+	"delegable?": "string",
+	"width?": "number",
+	"childrenReadOnly?": "boolean",
+	"frankTransport?": '"process" | "daemon"',
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -138,22 +152,36 @@ export interface TaskItem {
 	agent?: string;
 	/** The work; required by the schema. */
 	task?: string;
+	/** Orchestration seat and delegable sub-scope carried into the spawned child's brief. */
+	seat?: string;
+	delegable?: string;
+	width?: number;
+	childrenReadOnly?: boolean;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
 	effort?: TaskEffort;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
 	schemaMode?: "permissive" | "strict";
+	/** Working directory for a runtime-frank spawn; absolute, or relative to the session cwd. */
+	cwd?: string;
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
+	/** Transport used for a runtime Frank spawn. */
+	frankTransport?: "process" | "daemon";
 }
-
 export const taskSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"cwd?": "string",
+	"seat?": "string",
+	delegable: "string = 'none'",
+	width: "number = 1",
+	childrenReadOnly: "boolean = false",
+	"frankTransport?": '"process" | "daemon"',
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -163,21 +191,47 @@ const taskSchemaNoIsolation = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
-	"+": "delete",
+	"cwd?": "string",
+	"seat?": "string",
+	delegable: "string = 'none'",
+	width: "number = 1",
+	childrenReadOnly: "boolean = false",
+	"frankTransport?": '"process" | "daemon"',
 });
+
 const taskSchemaBatch = type({
 	context: "string",
-	tasks: taskItemSchemaIsolated.array(),
+	tasks: type({
+		"name?": "string",
+		agent: "string = 'task'",
+		task: "string",
+		"outputSchema?": outputSchemaInputSchema,
+		"schemaMode?": '"permissive" | "strict"',
+		"cwd?": "string",
+		"frankTransport?": '"process" | "daemon"',
+		"isolated?": "boolean",
+		"+": "delete",
+	}).array(),
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
 	context: "string",
-	tasks: taskItemSchema.array(),
+	tasks: type({
+		"name?": "string",
+		agent: "string = 'task'",
+		task: "string",
+		"outputSchema?": outputSchemaInputSchema,
+		"schemaMode?": '"permissive" | "strict"',
+		"cwd?": "string",
+		"frankTransport?": '"process" | "daemon"',
+		"+": "delete",
+	}).array(),
 	"+": "delete",
 });
 const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
 
 type DynamicTaskSchema = (typeof ALL_TASK_SCHEMAS)[number];
+
 export type TaskSchema = typeof taskSchema;
 /** Active task tool parameter schema for the current isolation / batch flags */
 export type TaskToolSchemaInstance = DynamicTaskSchema | BaseType;
@@ -210,6 +264,8 @@ function createTaskSchema(options: {
 				...effortField,
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
+				"cwd?": "string",
+				"frankTransport?": '"process" | "daemon"',
 				"isolated?": "boolean",
 				"+": "delete",
 			});
@@ -226,6 +282,13 @@ function createTaskSchema(options: {
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
+			"frankTransport?": '"process" | "daemon"',
+			"cwd?": "string",
+			"seat?": "string",
+			"delegable?": "string",
+			"width?": "number",
+			"childrenReadOnly?": "boolean",
+			...(options.isolationEnabled ? { "isolated?": "boolean" } : {}),
 			"+": "delete",
 		});
 		return type.raw({
@@ -241,7 +304,9 @@ function createTaskSchema(options: {
 			task: "string",
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
+			"frankTransport?": '"process" | "daemon"',
 			"schemaMode?": '"permissive" | "strict"',
+			"cwd?": "string",
 			"isolated?": "boolean",
 			"+": "delete",
 		});
@@ -253,10 +318,16 @@ function createTaskSchema(options: {
 		...effortField,
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
+		"frankTransport?": '"process" | "daemon"',
+		"cwd?": "string",
+		"seat?": "string",
+		"delegable?": "string",
+		"width?": "number",
+		"childrenReadOnly?": "boolean",
+		...(options.isolationEnabled ? { "isolated?": "boolean" } : {}),
 		"+": "delete",
 	});
 }
-
 /** Build the task wire schema for the current settings and spawn policy. */
 export function getTaskSchema(options: {
 	isolationEnabled: boolean;
@@ -291,17 +362,25 @@ export interface TaskParams {
 	agent?: string;
 	/** The work (flat form). */
 	task?: string;
+	seat?: string;
+	delegable?: string;
+	width?: number;
+	childrenReadOnly?: boolean;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
 	effort?: TaskEffort;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
 	schemaMode?: "permissive" | "strict";
+	/** Working directory for a runtime-frank spawn; absolute, or relative to the session cwd. */
+	cwd?: string;
 	/** Batch form (`task.batch`): one subagent per item. */
 	tasks?: TaskItem[];
 	/** Batch form: shared background prepended to every assignment; required by the batch schema. */
 	context?: string;
 	/** Run in an isolated worktree (flat form; per-item in batch form). */
+	/** Transport for runtime Frank tasks. */
+	frankTransport?: "process" | "daemon";
 	isolated?: boolean;
 }
 
@@ -361,6 +440,7 @@ export interface AgentDefinition {
 	name: string;
 	description: string;
 	systemPrompt: string;
+	runtime?: "frank";
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
@@ -378,6 +458,10 @@ export interface AgentDefinition {
 	prewalk?: boolean | string;
 	/** Advisor for spawned sessions of this agent: `true` = advise with the default advisor-role model, string = advise with that model pattern (optional `:level` suffix). Absent/`false` = no advisor. */
 	advisor?: boolean | string;
+	/** Frank worker budget: max tool calls per turn. Absent = host default. */
+	maxToolCalls?: number;
+	/** Frank worker budget: wall-clock seconds per turn. Absent = host default. */
+	wallSecs?: number;
 	source: AgentSource;
 	filePath?: string;
 }

@@ -1,0 +1,4 @@
+{"event":{"kind":{"User":"Reply with exactly OK."},"run_id":"run-1790150505049-67733-1","seq":1},"seq":1,"type":"event"}
+{"event":{"kind":{"AssistantDelta":"before cancel"},"run_id":"run-1790150505049-67733-1","seq":2},"seq":2,"type":"event"}
+{"event":{"kind":{"Terminal":"Cancelled"},"run_id":"run-1790150505049-67733-1","seq":3},"seq":3,"type":"event"}
+{"event":{"kind":{"TerminalDone":{"outcome":"Cancelled","seq":3}},"run_id":"run-1790150505049-67733-1","seq":4},"seq":4,"type":"event"}

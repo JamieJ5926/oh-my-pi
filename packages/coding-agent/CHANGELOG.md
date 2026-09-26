@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Frank worker seats may now read absolute paths outside their working directory, matching native seats; Frank writes, edits and the run directory stay confined to the worker cwd.
+
 - Completed subagents now appear under an explicit Completed heading as one outcome-dot and name chain in task order above Todo and Subagents. The chain restores its names after terminal expansion. Child details remain in Agent Hub, active delegators retain named hierarchy rows, and HUD token displays use compact k/m/b units. Direct compact rows omit redundant role badges and task prompt excerpts.
 
 ### Fixed
@@ -11,6 +13,8 @@
 - Claude marketplace MCP servers now resolve environment placeholders in stdio environment values instead of passing strings such as `${NAME:-}` literally ([#10481](https://github.com/can1357/oh-my-pi/pull/10481) by [@mrexodia](https://github.com/mrexodia)).
 - Fixed prewalk conflicting with `todo.eager=always`: the forced eager-todo prelude ("call todo first this turn") was injected alongside the prewalk plan nudge ("write a complete plan first, then todo"), giving the model contradictory instructions; the eager-todo prelude is now suppressed only when prewalk will perform a handoff ([#10510](https://github.com/can1357/oh-my-pi/issues/10510)).
 - Fixed the Agent Hub roster shuffling erratically while open: rows no longer re-sort on every agent heartbeat, so the list stays stable and navigable with many active agents ([#10524](https://github.com/can1357/oh-my-pi/issues/10524)).
+- Fixed Frank task seats dropping their resolved reasoning effort. The worker now receives the model hop as `provider/model:effort`, which Frank turns into the request's `reasoning_effort`.
+- Fixed Frank seats losing a settled child's body. A bridged `hub wait` that names a child now answers from the job row, so a completion the host session's async-result sink already took stays readable; an `inbox` drain joins the same bodies, the dispatch ack names the drain path, and a body over the inline budget is left intact on the row instead of being consumed.
 ## [18.1.2] - 2026-09-01
 
 ### Added
