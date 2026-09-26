@@ -195,6 +195,37 @@ describe("Agent hub row ordering", () => {
 			setSystemTime();
 		}
 	});
+	it("groups same-parent leaves by seat without collapsing coordinators or other groups", () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(60);
+		const agents = new AgentRegistry();
+		const leaves = [
+			{ id: "leaf-a", displayName: "Leaf A", kind: "sub" as const, parentId: "parent-a", session: null, history: { modelRole: "explorer" } },
+			{ id: "leaf-b", displayName: "Leaf B", kind: "sub" as const, parentId: "parent-a", session: null, history: { modelRole: "explorer" } },
+			{ id: "leaf-c", displayName: "Leaf C", kind: "sub" as const, parentId: "parent-a", session: null, history: { modelRole: "reviewer" } },
+			{ id: "leaf-d", displayName: "Leaf D", kind: "sub" as const, parentId: "parent-b", session: null, history: { modelRole: "explorer" } },
+		];
+		for (const leaf of leaves) agents.register(leaf);
+		agents.register({ id: "coordinator-a", displayName: "Coordinator A", kind: "main", parentId: "parent-a", session: null, history: { modelRole: "explorer" } });
+		agents.register({ id: "coordinator-b", displayName: "Coordinator B", kind: "main", parentId: "parent-a", session: null, history: { modelRole: "explorer" } });
+
+		const hub = makeHub(agents);
+		try {
+			hub.handleInput("t");
+			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(rendered).toContain("leaf-a");
+			expect(rendered).toContain("leaf-b");
+			expect(rendered).toContain("leaf-c");
+			expect(rendered).toContain("leaf-d");
+			expect(rendered.match(/leaf-a/g)).toHaveLength(1);
+			expect(rendered.match(/leaf-b/g)).toHaveLength(1);
+			expect(rendered).toContain("2 explorer");
+			expect(rendered.match(/Coordinator A/g)).toHaveLength(1);
+			expect(rendered.match(/coordinator-b/g)).toHaveLength(1);
+		} finally {
+			hub.dispose();
+		}
+	});
 	it("reseeds an empty capture so a restored aborted agent does not top running rows", () => {
 		vi.useFakeTimers();
 		let hub: AgentHubOverlayComponent | undefined;
