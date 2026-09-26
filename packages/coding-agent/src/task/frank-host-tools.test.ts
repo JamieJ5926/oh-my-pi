@@ -433,4 +433,35 @@ describe("Frank hub send mailbox", () => {
 		expect(IrcBus.global().unreadCount(id)).toBe(0);
 		AgentRegistry.global().unregister(id);
 	});
+
+	// 2026-09-26: FFExp02/03/07 could not report to Main: the bridge served the
+	// host's own hub instance, so the lane's send carried the host identity and
+	// tripped "Cannot send a message to yourself."
+	test("a bridged hub send carries the Frank lane identity, so a report to Main is delivered", async () => {
+		const registry = AgentRegistry.global();
+		const leaf = "FrankLeafReport";
+		registry.unregister(leaf);
+		registry.register({ id: leaf, displayName: leaf, kind: "sub", session: null, status: "running" });
+		let seen: string | null | undefined;
+		const original = BUILTIN_TOOLS.hub;
+		BUILTIN_TOOLS.hub = async session => {
+			seen = session.getAgentId?.();
+			return { name: "hub", label: "Hub", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text", text: "queued" }] }) } as never;
+		};
+		try {
+			const hostHub = { execute: async () => ({ content: [{ type: "text" as const, text: "Cannot send a message to yourself." }] }) };
+			const hostSession = {
+				getAgentId: () => "Main",
+				getToolContext: () => undefined,
+				toolRegistry: new Map([["hub", hostHub]]),
+			} as unknown as ToolSession;
+			const service = createFrankHostToolService({ session: hostSession, agentId: leaf, names: ["hub"] });
+			const result = await service.handle("hub", { op: "send", to: "Main", message: "report" });
+			expect(seen).toBe(leaf);
+			expect(result.content ?? "").not.toContain("Cannot send a message to yourself");
+		} finally {
+			BUILTIN_TOOLS.hub = original;
+			registry.unregister(leaf);
+		}
+	});
 });
