@@ -140,6 +140,27 @@ function dedupeAlwaysApplyRules(
 	);
 }
 
+export const LEAF_OMITTED_RULE_HEADINGS = ["Coordinator"] as const;
+
+export function omitLeafRuleSections(content: string, headings: readonly string[]): string {
+	const lines = content.split("\n");
+	const sections: Array<{ heading: string | null; lines: string[] }> = [];
+	let current: { heading: string | null; lines: string[] } = { heading: null, lines: [] };
+
+	for (const line of lines) {
+		if (/^# /.test(line)) {
+			sections.push(current);
+			current = { heading: line.slice(2), lines: [] };
+		}
+		current.lines.push(line);
+	}
+	sections.push(current);
+
+	const kept = sections.filter(section => section.heading === null || !headings.includes(section.heading));
+	if (!kept.some(section => section.heading !== null)) return content;
+	return kept.flatMap(section => section.lines).join("\n");
+}
+
 function dedupePromptSource(source: string | null | undefined, otherSources: Array<string | null | undefined>): string {
 	const resolvedSource = firstNonEmpty(source);
 	if (!resolvedSource) return "";
@@ -661,6 +682,12 @@ export interface BuildSystemPromptOptions {
 	autoQaEnabled?: boolean;
 	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
 	writeTransportOnly?: boolean;
+	/**
+	 * Skill names this agent loads by name (`autoloadSkills`). When set, the rendered
+	 * `<skills>` catalog keeps only those names. `skill://` resolution is unchanged.
+	 * Omit it for a session that discovers skills (the full visible catalog).
+	 */
+	catalogSkillNames?: readonly string[];
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -720,6 +747,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs = "",
 		autoQaEnabled = false,
 		writeTransportOnly = false,
+		catalogSkillNames,
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
@@ -955,9 +983,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 	// Filter skills for the rendered system prompt:
 	// - require the `read` tool so the model can actually fetch skill content;
-	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
+	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>);
+	// - when the agent names its skills, render only those. An empty list renders none.
 	const hasRead = toolNames.includes("read");
-	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	const visibleSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	const filteredSkills =
+		catalogSkillNames === undefined
+			? visibleSkills
+			: visibleSkills.filter(skill => catalogSkillNames.includes(skill.name));
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,
@@ -970,7 +1003,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		resolvedAppendPrompt,
 		...contextPromptSources,
 	];
-	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
+	const dedupedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
+	const injectedAlwaysApplyRules =
+		catalogSkillNames === undefined
+			? dedupedAlwaysApplyRules
+			: dedupedAlwaysApplyRules.map(rule => ({
+					...rule,
+					content: omitLeafRuleSections(rule.content, LEAF_OMITTED_RULE_HEADINGS),
+				}));
 
 	const environment = getEnvironmentInfo(cpuModel, gpu);
 	const data = {

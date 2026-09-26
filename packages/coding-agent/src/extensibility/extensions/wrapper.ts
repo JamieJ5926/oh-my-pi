@@ -221,6 +221,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						),
 					},
 					signal,
+					context?.hookScope,
 				)) as ToolCallEventResult | undefined;
 
 				if (callResult?.block) {
@@ -370,18 +371,21 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 
 		// Emit tool_result event - extensions can modify the result and error status
 		if (this.runner.hasHandlers("tool_result")) {
-			const resultResult = await this.runner.emitToolResult({
-				type: "tool_result",
-				toolName: this.tool.name,
-				toolCallId,
-				input: normalizeToolEventInput(
-					this.tool.name,
-					resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
-				),
-				content: result.content,
-				details: result.details,
-				isError: !!executionError,
-			});
+			const resultResult = await this.runner.emitToolResult(
+				{
+					type: "tool_result",
+					toolName: this.tool.name,
+					toolCallId,
+					input: normalizeToolEventInput(
+						this.tool.name,
+						resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
+					),
+					content: result.content,
+					details: result.details,
+					isError: !!executionError,
+				},
+				context?.hookScope,
+			);
 
 			if (resultResult) {
 				const modifiedContent: (TextContent | ImageContent)[] = resultResult.content ?? result.content;

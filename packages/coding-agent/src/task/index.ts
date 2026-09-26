@@ -50,6 +50,7 @@ import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
+import { StartPacer, routeOf } from "./start-pacer";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
@@ -278,7 +279,9 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
 	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
+	if ("cwd" in params) item.cwd = params.cwd;
 	if ("effort" in params) item.effort = params.effort;
+	if ("frankTransport" in params) item.frankTransport = params.frankTransport;
 	if ("isolated" in params) item.isolated = params.isolated;
 	return [item];
 }
@@ -296,9 +299,15 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
 	if (item.name !== undefined) spawn.name = item.name;
 	if (item.task !== undefined) spawn.task = item.task;
+	spawn.seat = item.seat ?? spawn.agent;
+	spawn.delegable = item.delegable ?? "none";
+	spawn.width = item.width ?? 1;
+	spawn.childrenReadOnly = item.childrenReadOnly ?? false;
 	if (params.context !== undefined) spawn.context = params.context;
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
+	if (item.frankTransport !== undefined) spawn.frankTransport = item.frankTransport;
+	if (item.cwd !== undefined) spawn.cwd = item.cwd;
 	if ("effort" in item) spawn.effort = item.effort;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
@@ -662,6 +671,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			agent: params.agent,
 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
+			...(params.cwd !== undefined ? { cwd: params.cwd } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
@@ -841,6 +851,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			item: TaskItem;
 			index: number;
 			blocking: boolean;
+			route: string;
 			progress: AgentProgress;
 		}> = [];
 		for (const [index, item] of spawnItems.entries()) {
@@ -854,6 +865,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				item,
 				index,
 				blocking: itemBlocking[index],
+				route: routeOf(Array.isArray(policy.modelOverride) ? policy.modelOverride[0] : policy.modelOverride),
 				progress: {
 					index,
 					id: agentId,
@@ -915,6 +927,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
 					agentId: spawn.agentId,
 					progress: spawn.progress,
+					route: spawn.route,
 					ircEnabled,
 					buildDetails: buildAsyncDetails,
 					onUpdate,
@@ -1074,12 +1087,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawnParams: TaskParams;
 		agentId: string;
 		progress: AgentProgress;
+		route: string;
 		ircEnabled: boolean;
 		buildDetails: () => TaskToolDetails;
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
 		onSettled?: (failed: boolean) => void;
 	}): string {
-		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
+		const { manager, toolCallId, spawnParams, agentId, progress, route, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			if (aborted) {
@@ -1115,6 +1129,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					this.#releaseSpawnSemaphore();
 				};
 				try {
+					const pacing = this.session.settings.get("task.startPacing");
+					StartPacer.instance().apply(pacing);
+					await StartPacer.instance().acquire(route, runSignal);
 					await semaphore.acquire(runSignal);
 					semaphoreHeld = true;
 				} catch {
@@ -1215,12 +1232,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					if (error instanceof TaskJobError) {
 						throw error;
 					}
+					const message = error instanceof Error ? error.message : String(error);
+					if (!runSignal.aborted && (message.includes("429") || message.includes("model_cooldown"))) {
+						StartPacer.instance().penalize(route);
+					}
 					progress.status = "failed";
 					progress.durationMs = Math.max(0, Date.now() - startedAt);
 					onSettled?.(true);
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
-					const message = error instanceof Error ? error.message : String(error);
 					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
@@ -1432,7 +1452,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				context,
 				agent: params.agent,
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
+				...(params.frankTransport !== undefined ? { frankTransport: params.frankTransport } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
+				...(params.cwd !== undefined ? { cwd: params.cwd } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
 				// `name` is the spawn handle: keep it for id allocation when this
 				// path did not pre-reserve one. Do not treat it as a HUD description.

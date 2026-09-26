@@ -249,6 +249,51 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		expect(result.output).toContain("STALE: build passing");
 	});
 
+	it("settles a live owner job instead of reaping it when the run never yields", async () => {
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const lane = Promise.withResolvers<string>();
+		const harness = createAsyncSession(({ promptIndex, harness: h }) => {
+			if (promptIndex === 1) {
+				// The model reports progress in prose and never submits a yield.
+				h.emitAssistant("ten lanes live at cap; waiting on completions");
+			}
+		});
+		// One real owner job stands in for a live child lane. The teardown reap
+		// aborts it; the barrier's settle is the only path that lets it finish.
+		const laneId = manager.register(
+			"task",
+			"live review lane",
+			ctx => {
+				ctx.signal.addEventListener("abort", () => lane.resolve("LANE REAPED"), { once: true });
+				return lane.promise;
+			},
+			{ ownerId: "no-yield-owner-jobs" },
+		);
+		harness.session.settleAsyncWork = async () => {
+			lane.resolve("LANE OUTPUT");
+			await manager.getJob(laneId)?.promise;
+			harness.finishJob();
+		};
+		mockCreateAgentSession(harness.session);
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			task: "do the work",
+			index: 0,
+			id: "no-yield-owner-jobs",
+		});
+
+		// The owner job the run left behind must have been settled by the
+		// barrier rather than cancelled by the teardown reap; the settle's
+		// async-result reaction is the run's closing output.
+		expect(manager.getJob(laneId)?.status).toBe("completed");
+		expect(manager.getJob(laneId)?.resultText).toBe("LANE OUTPUT");
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("The background build failed after I yielded.");
+	}, 15_000);
+
 	it("terminates immediately on yield when no owner async work is pending", async () => {
 		const harness = createAsyncSession(({ promptIndex, harness: h }) => {
 			if (promptIndex === 1) {

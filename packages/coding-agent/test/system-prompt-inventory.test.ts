@@ -681,6 +681,80 @@ describe("system prompt tool inventory", () => {
 		expect(text).toContain("- frontend-design: Frontend UI workflow");
 	});
 
+	it("omits Coordinator rule sections for leaf catalogs but preserves them for roots", async () => {
+		const content = `---\nalwaysApply: true\n---\n\n# First rule\n\nKeep this.\n\n# Coordinator\n\nDrop this coordinator text.\n\n# Project vault writes\n\nKeep this too.`;
+		const options = {
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			alwaysApplyRules: [{ name: "RULES", content, path: "RULES.md" }],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		};
+		const leaf = await buildSystemPrompt({ ...options, catalogSkillNames: [] });
+		const leafText = leaf.systemPrompt.join("\n\n");
+		expect(leafText).toContain("Keep this.");
+		expect(leafText).toContain("Keep this too.");
+		expect(leafText).not.toContain("Drop this coordinator text.");
+		expect(leafText).not.toContain("# Coordinator");
+
+		const root = await buildSystemPrompt(options);
+		expect(root.systemPrompt.join("\n\n")).toContain("Drop this coordinator text.");
+
+		const onlyRouting = await buildSystemPrompt({
+			...options,
+			catalogSkillNames: [],
+			alwaysApplyRules: [{ name: "RULES", content: "# Coordinator\n\nOnly heading.\n", path: "RULES.md" }],
+		});
+		expect(onlyRouting.systemPrompt.join("\n\n")).toContain("Only heading.");
+	});
+
+	it("renders only named skills when the agent names its catalog", async () => {
+		const skills = [
+			{
+				name: "poteto-mode",
+				description: "Named skill a leaf loads",
+				filePath: path.join(tempDir, "poteto.md"),
+				baseDir: tempDir,
+				source: "test",
+			},
+			{
+				name: "browser-drive",
+				description: "Unnamed skill a leaf never loads",
+				filePath: path.join(tempDir, "browser.md"),
+				baseDir: tempDir,
+				source: "test",
+			},
+		];
+		const named = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills,
+			catalogSkillNames: ["poteto-mode"],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const namedText = named.systemPrompt.join("\n\n");
+		expect(namedText).toContain("- poteto-mode: Named skill a leaf loads");
+		expect(namedText).not.toContain("browser-drive");
+
+		const empty = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills,
+			catalogSkillNames: [],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		expect(empty.systemPrompt.join("\n\n")).not.toContain("<skills>");
+	});
+
 	it("omits the read-only scout delegation gate when scout is unavailable", async () => {
 		const opts = { toolNames: ["read", "bash", "task"], tools: TOOLS };
 		const withScout = (

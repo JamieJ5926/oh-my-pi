@@ -277,6 +277,16 @@ export interface ToolSession {
 	getToolByName?: (name: string) => AgentTool | undefined;
 	/** Look up an enabled tool through the eval bridge's normal permission pipeline. */
 	getToolForEvalBridge?: (name: string) => AgentTool | undefined;
+	/**
+	 * The `replace`-mode `edit` instance a bridge must run for `old_string` /
+	 * `new_string` frames, served by the session (which owns the runner needed
+	 * to wrap it with extension hooks). Undefined when the session grants no
+	 * `edit` at all; the bridge refuses then instead of constructing one.
+	 */
+	getEditReplaceTool?: () => AgentTool | undefined;
+	/** Wraps a tool with the session's extension hooks, for bridges that must
+	 *  build a tool bound to another agent id (Frank `task`/`hub`). */
+	wrapWithHooks?: (tool: AgentTool) => AgentTool;
 	/** Current session context for eval-bridged tool execution. */
 	getToolContext?: () => AgentToolContext | undefined;
 	/** Names currently authorized for invocation through the eval bridge. */

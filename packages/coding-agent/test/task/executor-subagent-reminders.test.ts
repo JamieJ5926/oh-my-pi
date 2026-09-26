@@ -76,6 +76,11 @@ function createMockSession(
 			await onPrompt({ text, options, promptIndex, emit, state });
 		},
 		waitForIdle: async () => {},
+		// The quiescence barrier's never-yield path polls this; the real
+		// AgentSession implements it (agent-session.ts), so a double that
+		// omits it is an incomplete AgentSession rather than a missing
+		// production contract.
+		hasPendingAsyncWork: () => false,
 		prepareForHeadlessAdvisorDrain: () => {},
 		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],

@@ -66,6 +66,7 @@ function shouldPollWindowsTerminalAppearance(env: NodeJS.ProcessEnv = Bun.env): 
  * their safety margin.
  */
 const MAX_CONPTY_WRITE_CHUNK_BYTES = 16 * 1024;
+const MAX_FALLBACK_SLICE_THRESHOLD_BYTES = 2 * 1024 * 1024;
 
 /**
  * Split `data` into chunks whose encoded UTF-8 byte length is no greater than
@@ -701,6 +702,31 @@ export class ProcessTerminal implements Terminal {
 	// enqueues frames and performs the blocking write(2) on its own thread;
 	// `pendingOutputBytes` exposes the backlog for render-side frame skipping.
 	#outputPump?: TtyWriter;
+	#pumpAttempted = false;
+	#fallbackQueue: string[] = [];
+	#fallbackDraining = false;
+	#drainFallbackQueue = (): void => {
+		const chunk = this.#fallbackQueue.shift();
+		if (this.#dead || chunk === undefined) {
+			this.#fallbackQueue.length = 0;
+			this.#fallbackDraining = false;
+			return;
+		}
+		try {
+			process.stdout.write(chunk);
+			this.#trackStdoutBacklog(process.stdout.writableLength ?? 0);
+		} catch (err) {
+			this.#fallbackQueue.length = 0;
+			this.#fallbackDraining = false;
+			this.#markTerminalDisconnected("stdout failed", err);
+			return;
+		}
+		if (this.#fallbackQueue.length > 0) {
+			setImmediate(this.#drainFallbackQueue);
+		} else {
+			this.#fallbackDraining = false;
+		}
+	};
 
 	#windowsVTInputRestore?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
@@ -846,7 +872,8 @@ export class ProcessTerminal implements Terminal {
 		// prebuilt natives module without the export falls back to direct writes.
 		// Test suites spy on `process.stdout.write` with a faked isTTY, so the
 		// pump stays off under `bun test` — same philosophy as isTerminalHeadless.
-		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
+		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump && !this.#pumpAttempted) {
+			this.#pumpAttempted = true;
 			try {
 				this.#outputPump = new TtyWriter(1);
 			} catch (err) {
@@ -1890,6 +1917,14 @@ export class ProcessTerminal implements Terminal {
 		if (!process.stdout.isTTY) return;
 		this.#ensureStdoutErrorHandler();
 		this.#trackCursorVisibility(data);
+		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump && !this.#pumpAttempted) {
+			this.#pumpAttempted = true;
+			try {
+				this.#outputPump = new TtyWriter(1);
+			} catch (err) {
+				logger.debug("tty output pump unavailable; using direct stdout writes", { err: String(err) });
+			}
+		}
 		const pump = this.#outputPump;
 		if (pump) {
 			if (pump.dead) {
@@ -1930,6 +1965,20 @@ export class ProcessTerminal implements Terminal {
 					if (this.#dead) break;
 					process.stdout.write(chunk);
 				}
+			} else if (!this.#conpty && (this.#fallbackQueue.length > 0 || bytes > MAX_FALLBACK_SLICE_THRESHOLD_BYTES)) {
+				// Slices drain one per event-loop turn so a multi-MB repaint cannot
+				// block the loop. Every later write joins the same queue; a direct
+				// write here would overtake slices still queued.
+				if (bytes > MAX_FALLBACK_SLICE_THRESHOLD_BYTES) {
+					this.#fallbackQueue.push(...chunkForConPTY(data, MAX_CONPTY_WRITE_CHUNK_BYTES));
+				} else {
+					this.#fallbackQueue.push(data);
+				}
+				if (!this.#fallbackDraining) {
+					this.#fallbackDraining = true;
+					setImmediate(this.#drainFallbackQueue);
+				}
+				return;
 			} else {
 				process.stdout.write(data);
 			}
