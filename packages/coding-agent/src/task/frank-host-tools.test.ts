@@ -46,6 +46,39 @@ describe("Frank host tool service", () => {
 		expect(result).toEqual({ ok: false, error: `host tool is not registered in the host session: ${name}` });
 	});
 
+	test("coordinator work is blocked until dispatch unless the brief declares single-slice", async () => {
+		let invoked = 0;
+		const sessionWithRegistry = {
+			toolRegistry: new Map([["read", { execute: async () => { invoked++; return { content: [{ type: "text", text: "read" }] }; } }]]),
+		} as unknown as ToolSession;
+		const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "pot", names: ["read"], workerLane: { agent: "poteto-agent", prompt: "Coordinate this work" } });
+		expect(await service.handle("read", {})).toEqual({ ok: false, error: "Delegation required: dispatch a task before calling `read`, or declare `single-slice: <reason>` in the worker brief." });
+		expect(invoked).toBe(0);
+		const singleSlice = createFrankHostToolService({ session: sessionWithRegistry, agentId: "solo", names: ["read"], workerLane: { agent: "poteto-agent", prompt: "single-slice: this is indivisible" } });
+		expect(await singleSlice.handle("read", {})).toEqual({ ok: true, content: "read" });
+	});
+
+	test("coordinator batch requires each coordinator item to declare its own delegable scope", async () => {
+		let invocations = 0;
+		const original = BUILTIN_TOOLS.task;
+		BUILTIN_TOOLS.task = async () => ({ name: "task", label: "Task", description: "", parameters: {}, execute: async () => { invocations++; return { content: [{ type: "text", text: "spawned" }] }; } } as never);
+		try {
+			const service = createFrankHostToolService({ session: {} as ToolSession, agentId: "pot", workerLane: { agent: "poteto-agent-deep", prompt: "Coordinate" } });
+			const rejected = await service.handle("task", { context: "delegable: shared scope", tasks: [{ agent: "poteto-agent", task: "Implement A\ndelegable: source inspection" }, { agent: "poteto-agent-deep", task: "Implement B" }] });
+			expect(rejected).toEqual({ ok: false, error: "Delegation required: coordinator task item 2 must each declare their own `delegable: <scope>` in its task text." });
+			expect(invocations).toBe(0);
+			const accepted = await service.handle("task", { context: "Shared scope", tasks: [{ agent: "poteto-agent", task: "Implement A\ndelegable: source inspection" }, { agent: "poteto-agent-deep", task: "Implement B\ndelegable: test review" }] });
+			expect(accepted).toEqual({ ok: true, content: "spawned" });
+			expect(invocations).toBe(1);
+			const registeredRead = { execute: async () => ({ content: [{ type: "text", text: "read" }] }) };
+			const unlockedService = createFrankHostToolService({ session: { toolRegistry: new Map([["read", registeredRead]]) } as unknown as ToolSession, agentId: "pot", names: ["task", "read"], workerLane: { agent: "poteto-agent-deep", prompt: "Coordinate" } });
+			expect(await unlockedService.handle("task", { task: "child" })).toEqual({ ok: true, content: "spawned" });
+			expect(await unlockedService.handle("read", {})).toEqual({ ok: true, content: "read" });
+		} finally {
+			BUILTIN_TOOLS.task = original;
+		}
+	});
+
 	test("task bridge passes a 10-item batch through as one call", async () => {
 		let capturedArgs: unknown;
 		let invocations = 0;
