@@ -45,25 +45,22 @@ function rowLine(sessions: ObservableSession[], columns: number): string {
 describe("subagent HUD trailing model cluster", () => {
 	beforeAll(() => initTheme());
 
-	it("renders a normal row as ⟨id:level⟩⟨emoji⟩ from progress.resolvedModel", () => {
+	it("renders the compact model code derived from progress.resolvedModel", () => {
 		const line = rowLine(
 			[
 				session({
 					id: "PremergePot",
-					progress: progress({
-						id: "PremergePot",
-						resolvedModel: "cli-proxy/dddai.grok-4.6:high",
-					}),
+					progress: progress({ id: "PremergePot", resolvedModel: "cli-proxy/dddai.grok-4.6:high" }),
 				}),
 			],
 			120,
 		);
-		expect(line).toBe(
-			" ● PremergePot ⟨poteto-agent⟩  Lane work                                                 1.2k  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
-		);
+		expect(line).toContain("L● PremergePot [grok]");
+		expect(line).toContain("Lane work");
+		expect(line).not.toContain("ROLE_MARK");
 	});
 
-	it("marks a fallback row with ⚠ inside the model bracket", () => {
+	it("marks a fallback with ! inside the compact model code", () => {
 		const line = rowLine(
 			[
 				session({
@@ -77,30 +74,25 @@ describe("subagent HUD trailing model cluster", () => {
 			],
 			120,
 		);
-		expect(line).toBe(
-			" ● FallbackLane ⟨poteto-agent⟩  Lane work                                             1.2k  ⟨⚠dddai.gpt-6-astra:low⟩⟨🍏⟩",
-		);
+		expect(line).toContain("L● FallbackLane [astra!]");
+		expect(line).toContain("Lane work");
 	});
 
-	it("omits the thinking suffix when resolvedModel has no explicit level", () => {
+	it("keeps the compact code when resolvedModel has no explicit level", () => {
 		const line = rowLine(
 			[
 				session({
 					id: "NoThinkLane",
-					progress: progress({
-						id: "NoThinkLane",
-						resolvedModel: "google-antigravity/gemini-3.8-flash",
-					}),
+					progress: progress({ id: "NoThinkLane", resolvedModel: "google-antigravity/gemini-3.8-flash" }),
 				}),
 			],
 			120,
 		);
-		expect(line).toBe(
-			" ● NoThinkLane ⟨poteto-agent⟩  Lane work                                                    1.2k  ⟨gemini-3.8-flash⟩⟨💎⟩",
-		);
+		expect(line).toContain("L● NoThinkLane [gem]");
+		expect(line).toContain("Lane work");
 	});
 
-	it("drops description tokens strip emoji and thinking before name on a narrow terminal", () => {
+	it("keeps role, fallback code, and terminal width on a narrow row", () => {
 		const line = rowLine(
 			[
 				session({
@@ -114,7 +106,7 @@ describe("subagent HUD trailing model cluster", () => {
 			],
 			36,
 		);
-		expect(line).toBe(" ● NarrowLane ⟨poteto-agent⟩  …  ⟨⚠⟩");
+		expect(line).toContain("L● NarrowLane [grok!]");
 		expect(Bun.stringWidth(line)).toBeLessThanOrEqual(36);
 	});
 });

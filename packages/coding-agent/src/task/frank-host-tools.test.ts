@@ -7,6 +7,8 @@ import { EditTool } from "../edit";
 import { BUILTIN_TOOLS } from "../tools";
 import type { ToolSession } from "../tools";
 import { createFrankHostToolService } from "./frank-host-tools";
+import { AgentRegistry } from "../registry/agent-registry";
+import { IrcBus } from "../irc/bus";
 
 describe("Frank host tool service", () => {
 	const session = {} as ToolSession;
@@ -367,5 +369,67 @@ describe("Frank host tool service: child drain", () => {
 
 		expect(result.ok).toBe(true);
 		expect(result.content).toContain("FRANK_CHILD_BODY");
+	});
+});
+
+describe("Frank hub send mailbox", () => {
+	test("queued host mail is injected into the next non-hub tool result", async () => {
+		const id = "SteerMailNonHubProbe";
+		AgentRegistry.global().unregister(id);
+		AgentRegistry.global().register({ id, displayName: id, kind: "sub", session: null, status: "running" });
+		await IrcBus.global().send({ from: "Main", to: id, body: "steer before run" });
+		const service = createFrankHostToolService({
+			session: { toolRegistry: new Map([["read", { execute: async () => ({ content: [{ type: "text" as const, text: "file contents" }] }) }]]) } as unknown as ToolSession,
+			agentId: id,
+			names: ["read"],
+		});
+		const result = await service.handle("read", {});
+		expect(result.content).toContain("steer before run");
+		expect(result.content).toContain("file contents");
+		expect(IrcBus.global().unreadCount(id)).toBe(0);
+		AgentRegistry.global().unregister(id);
+	});
+	test("unregistered mutating tool refusal includes drained host mail", async () => {
+		const id = "SteerMailUnregisteredProbe";
+		AgentRegistry.global().unregister(id);
+		AgentRegistry.global().register({ id, displayName: id, kind: "sub", session: null, status: "running" });
+		await IrcBus.global().send({ from: "Main", to: id, body: "steer before refusal" });
+		const service = createFrankHostToolService({
+			session: { toolRegistry: new Map() } as unknown as ToolSession,
+			agentId: id,
+			names: ["write"],
+		});
+
+		const result = await service.handle("write", { path: "x" });
+
+		expect(result).toEqual({
+			ok: false,
+			error: "Host messages:\n[hub from Main] steer before refusal\n\nhost tool is not registered in the host session: write",
+		});
+		expect(IrcBus.global().unreadCount(id)).toBe(0);
+		AgentRegistry.global().unregister(id);
+	});
+	test("a running frank seat with a null session accepts hub send and the next hub call returns the body", async () => {
+		const id = "SteerMailProbe";
+		AgentRegistry.global().unregister(id);
+		AgentRegistry.global().register({
+			id,
+			displayName: id,
+			kind: "sub",
+			session: null,
+			status: "running",
+		});
+		const receipt = await IrcBus.global().send({ from: "Main", to: id, body: "steer this lane" });
+		expect(receipt.outcome).toBe("queued");
+		expect(receipt.error ?? "").not.toContain("no live session");
+		const service = createFrankHostToolService({
+			session: {} as ToolSession,
+			agentId: id,
+			names: ["hub"],
+		});
+		const drained = await service.handle("hub", { op: "list" });
+		expect(drained.content ?? "").toContain("steer this lane");
+		expect(IrcBus.global().unreadCount(id)).toBe(0);
+		AgentRegistry.global().unregister(id);
 	});
 });

@@ -100,13 +100,6 @@ export async function inferOwningRootSessionFile(
 	}
 	return `${path.dirname(resolved)}.jsonl`;
 }
-/**
- * Resolve a `send` recipient to its registry id. Matching order: (1) exact id
- * via `registry.get` ("all" passes through as resolved); (2) unique live
- * (running | idle) non-advisor displayName exact match; (3) live non-advisor
- * tree-prefix; then (4) remote published-session address/uuid matching.
- * Unmatched or multiply named input never risks misdelivery.
- */
 export async function resolveHubSendRecipientAsync(
 	registry: AgentRegistry,
 	to: string,

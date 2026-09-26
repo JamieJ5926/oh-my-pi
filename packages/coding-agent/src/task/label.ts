@@ -42,7 +42,7 @@ export function labelEchoesHandle(handle: string | undefined, label: string): bo
 }
 
 /** Drops the prompt scaffolding an assignment may open with or be cut into, so no section header, role mark, envelope tag, or tag fragment reaches a HUD row. */
-function stripLabelScaffolding(text: string): string {
+export function sanitizeTaskLabel(text: string): string {
 	let out = text;
 	// Each pass strictly shortens the text, so this always terminates.
 	for (;;) {
@@ -76,7 +76,7 @@ function firstHumanClause(text: string): string {
  */
 function deriveLocalLabel(assignment: string, handle: string | undefined): string | null {
 	try {
-		const clause = firstHumanClause(stripLabelScaffolding(assignment));
+		const clause = firstHumanClause(sanitizeTaskLabel(assignment));
 		if (!clause) return null;
 		const label = oneLineLabel(clause, LABEL_MAX);
 		if (!label || labelEchoesHandle(handle, label)) return null;
@@ -110,7 +110,7 @@ export async function generateTaskLabel(
 		// The model's own output is stripped exactly like the local fallback, then
 		// capped: a `<title>` envelope or a tag the model's output cap cut in half
 		// (`<ti`) must not reach a row. A clean label survives both untouched.
-		const sanitized = label ? stripLabelScaffolding(label) : "";
+		const sanitized = label ? sanitizeTaskLabel(label) : "";
 		if (sanitized && !labelEchoesHandle(sessionId, sanitized)) return oneLineLabel(sanitized, LABEL_MAX);
 	} catch (err) {
 		logger.debug("task-label: generation failed", {

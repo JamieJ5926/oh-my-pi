@@ -121,10 +121,9 @@ import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
-import { labelEchoesHandle } from "../task/label";
-import { oneLineLabel } from "../task/types";
+import { labelEchoesHandle, sanitizeTaskLabel } from "../task/label";
 import { formatTaskId } from "../task/render";
-import { parseThinkingLevel, type ConfiguredThinkingLevel } from "../thinking";
+import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
@@ -214,14 +213,13 @@ import {
 	type SessionObserverChangeKind,
 	SessionObserverRegistry,
 } from "./session-observer-registry";
-import { resolveServedModel } from "./served-model";
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
 import { sanitizeStatusText } from "./shared";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
 import { clearMermaidCache } from "./theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerText } from "./theme/shimmer";
-import type { Theme, ThemeColor } from "./theme/theme";
+import type { Theme } from "./theme/theme";
 import {
 	getEditorTheme,
 	getMarkdownTheme,
@@ -495,6 +493,7 @@ const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
 
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
 
+/** Locked subagents-panel columns (1-based): description 27, child-strip 61, tokens end 78. */
 const SUBAGENT_PANEL_DESC_COL = 27;
 const SUBAGENT_PANEL_STRIP_COL = 61;
 const SUBAGENT_PANEL_TOKEN_END_COL = 78;
@@ -721,7 +720,7 @@ export function renderSubagentHudLines(
 				completed.push(`${stateGlyph(session.status)} ${theme.bold(formatTaskId(session.id))}${leads ? ` (${leads})` : ""}`);
 				continue;
 			}
-			const rawDescription = session.description?.trim() || session.progress?.description?.trim() || "";
+			const rawDescription = sanitizeTaskLabel(session.description?.trim() || session.progress?.description?.trim() || "");
 			const description = labelEchoesHandle(session.id, rawDescription) ? "" : rawDescription;
 			const hasChildren = (children.get(session.id) ?? []).length > 0;
 			rows.push({
