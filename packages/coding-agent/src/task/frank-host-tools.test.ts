@@ -83,6 +83,25 @@ describe("Frank host tool service", () => {
 		expect(result.error).not.toContain("Delegation required");
 	});
 
+	test("structured delegable scope satisfies coordinator child declaration", async () => {
+		const original = BUILTIN_TOOLS.task;
+		BUILTIN_TOOLS.task = async () => ({ name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text" as const, text: "spawned" }] }) } as never);
+		try {
+			const service = createFrankHostToolService({ session: {} as ToolSession, agentId: "pot", workerLane: { agent: "frank-poteto-agent", prompt: "Coordinate" } });
+			expect(await service.handle("task", { tasks: [{ agent: "frank-poteto-agent", task: "Inspect files", delegable: "inspect source only" }] })).toEqual({ ok: true, content: "spawned" });
+		} finally {
+			BUILTIN_TOOLS.task = original;
+		}
+	});
+
+	test("aborting the bridge closes its tool service", async () => {
+		const controller = new AbortController();
+		const service = createFrankHostToolService({ session, agentId: "frank-test", signal: controller.signal });
+		controller.abort();
+		expect(service.closed).toBe(true);
+		expect(await service.handle("hub", {})).toEqual({ ok: false, error: "host tool service is closed" });
+	});
+
 	test("coordinator batch requires each coordinator item to declare its own delegable scope", async () => {
 		let invocations = 0;
 		const original = BUILTIN_TOOLS.task;
