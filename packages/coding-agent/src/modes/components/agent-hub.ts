@@ -883,9 +883,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		for (let index = 0; index < this.#rows.length; index++) {
 			const ref = this.#rows[index];
 			if (ref.kind !== "sub" || !ref.parentId || this.#childrenByParent.has(ref.id)) continue;
-			const role = this.#observableFor(ref.id)?.progress?.modelRole ?? ref.history?.modelRole;
-			if (!role) continue;
-			const key = `${ref.parentId}\u0000${role}`;
+			const seat = this.#observableFor(ref.id)?.progress?.agent ?? ref.history?.agent;
+			if (!seat) continue;
+			const key = `${ref.parentId}\u0000${seat}`;
 			const members = groupIndexes.get(key);
 			if (members) members.push(index);
 			else groupIndexes.set(key, [index]);
@@ -917,11 +917,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				appendEntry(index);
 				return;
 			}
-			const role = key.slice(key.indexOf("\u0000") + 1);
+			const seat = key.slice(key.indexOf("\u0000") + 1);
 			const representative = this.#rows[index];
 			const cursor = members.includes(this.#selectedRow) ? theme.fg("accent", theme.nav.cursor) : " ";
 			const ids = members.map(member => sanitizeDisplayText(this.#rows[member].id)).join(", ");
-			lines.push(truncateToWidth(`${cursor} ${statusGlyph(representative.status)} ${theme.bold(sanitizeDisplayText(representative.id))} ${members.length} ${sanitizeDisplayText(role)} · ${ids}`, Math.max(1, width)));
+			lines.push(truncateToWidth(`${cursor} ${statusGlyph(representative.status)} ${theme.bold(sanitizeDisplayText(representative.id))} ${members.length} ${sanitizeDisplayText(seat)} · ${ids}`, Math.max(1, width)));
 			hitRows.push(index);
 		};
 		const selectedGroup = groupAt.get(this.#selectedRow);

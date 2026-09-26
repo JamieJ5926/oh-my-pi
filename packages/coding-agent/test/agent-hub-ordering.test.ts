@@ -200,14 +200,14 @@ describe("Agent hub row ordering", () => {
 		geometry.setRows(60);
 		const agents = new AgentRegistry();
 		const leaves = [
-			{ id: "leaf-a", displayName: "Leaf A", kind: "sub" as const, parentId: "parent-a", session: null, history: { modelRole: "explorer" } },
-			{ id: "leaf-b", displayName: "Leaf B", kind: "sub" as const, parentId: "parent-a", session: null, history: { modelRole: "explorer" } },
-			{ id: "leaf-c", displayName: "Leaf C", kind: "sub" as const, parentId: "parent-a", session: null, history: { modelRole: "reviewer" } },
-			{ id: "leaf-d", displayName: "Leaf D", kind: "sub" as const, parentId: "parent-b", session: null, history: { modelRole: "explorer" } },
+			{ id: "leaf-a", displayName: "Leaf A", kind: "sub" as const, parentId: "parent-a", session: null, history: { agent: "explorer", modelRole: "alias-one" } },
+			{ id: "leaf-b", displayName: "Leaf B", kind: "sub" as const, parentId: "parent-a", session: null, history: { agent: "explorer", modelRole: "alias-two" } },
+			{ id: "leaf-c", displayName: "Leaf C", kind: "sub" as const, parentId: "parent-a", session: null, history: { agent: "reviewer", modelRole: "alias-one" } },
+			{ id: "leaf-d", displayName: "Leaf D", kind: "sub" as const, parentId: "parent-b", session: null, history: { agent: "explorer", modelRole: "alias-one" } },
 		];
 		for (const leaf of leaves) agents.register(leaf);
-		agents.register({ id: "coordinator-a", displayName: "Coordinator A", kind: "main", parentId: "parent-a", session: null, history: { modelRole: "explorer" } });
-		agents.register({ id: "coordinator-b", displayName: "Coordinator B", kind: "main", parentId: "parent-a", session: null, history: { modelRole: "explorer" } });
+		agents.register({ id: "coordinator-a", displayName: "Coordinator A", kind: "main", parentId: "parent-a", session: null, history: { agent: "explorer", modelRole: "alias-one" } });
+		agents.register({ id: "coordinator-b", displayName: "Coordinator B", kind: "main", parentId: "parent-a", session: null, history: { agent: "explorer", modelRole: "alias-one" } });
 
 		const hub = makeHub(agents);
 		try {
@@ -221,20 +221,37 @@ describe("Agent hub row ordering", () => {
 			hub.dispose();
 		}
 	});
+	it("groups by seat across model-role aliases but separates seats sharing an alias", () => {
+		geometry = stubStdoutGeometry(120);
+		const agents = new AgentRegistry();
+		agents.register({ id: "explorer-a", displayName: "Explorer A", kind: "sub", parentId: "parent", session: null, history: { agent: "explorer", modelRole: "same-alias" } });
+		agents.register({ id: "explorer-b", displayName: "Explorer B", kind: "sub", parentId: "parent", session: null, history: { agent: "explorer", modelRole: "different-alias" } });
+		agents.register({ id: "reviewer-a", displayName: "Reviewer A", kind: "sub", parentId: "parent", session: null, history: { agent: "reviewer", modelRole: "same-alias" } });
+		const hub = makeHub(agents);
+		try {
+			hub.handleInput("t");
+			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(rendered).toContain("2 explorer");
+			expect(rendered).toContain("reviewer-a");
+			expect(rendered).not.toContain("3 same-alias");
+		} finally {
+			hub.dispose();
+		}
+	});
 	it("keeps a sub-coordinator separate from same-seat sibling leaves", () => {
 		geometry = stubStdoutGeometry(120);
 		geometry.setRows(40);
 		const agents = new AgentRegistry();
-		agents.register({ id: "coordinator", displayName: "Coordinator", kind: "sub", parentId: "root", session: null, history: { modelRole: "explorer" } });
-		agents.register({ id: "child", displayName: "Child", kind: "sub", parentId: "coordinator", session: null, history: { modelRole: "explorer" } });
-		agents.register({ id: "sibling", displayName: "Sibling", kind: "sub", parentId: "root", session: null, history: { modelRole: "explorer" } });
+		agents.register({ id: "coordinator", displayName: "Coordinator", kind: "sub", parentId: "root", session: null, history: { agent: "explorer", modelRole: "alias-one" } });
+		agents.register({ id: "child", displayName: "Child", kind: "sub", parentId: "coordinator", session: null, history: { agent: "explorer", modelRole: "alias-two" } });
+		agents.register({ id: "sibling", displayName: "Sibling", kind: "sub", parentId: "root", session: null, history: { agent: "explorer", modelRole: "alias-two" } });
 		const hub = makeHub(agents);
 		try {
 			hub.handleInput("t");
 			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
 			expect(rendered).toContain("coordinator");
 			expect(rendered).toContain("sibling");
-			expect(rendered).toContain("explorer");
+			expect(rendered).toContain("alias-two");
 		} finally {
 			hub.dispose();
 		}
@@ -244,8 +261,8 @@ describe("Agent hub row ordering", () => {
 		geometry = stubStdoutGeometry(120);
 		geometry.setRows(40);
 		const agents = new AgentRegistry();
-		agents.register({ id: "leaf-a", displayName: "Leaf A", kind: "sub", parentId: "parent", session: {} as AgentSession, history: { modelRole: "explorer" }, lastActivity: 1 });
-		agents.register({ id: "leaf-b", displayName: "Leaf B", kind: "sub", parentId: "parent", session: {} as AgentSession, history: { modelRole: "explorer" }, lastActivity: 2 });
+		agents.register({ id: "leaf-a", displayName: "Leaf A", kind: "sub", parentId: "parent", session: {} as AgentSession, history: { agent: "explorer", modelRole: "alias-one" }, lastActivity: 1 });
+		agents.register({ id: "leaf-b", displayName: "Leaf B", kind: "sub", parentId: "parent", session: {} as AgentSession, history: { agent: "explorer", modelRole: "alias-two" }, lastActivity: 2 });
 		agents.register({ id: "unrelated", displayName: "Unrelated", kind: "sub", parentId: "other", session: {} as AgentSession, lastActivity: 3 });
 		const focused: string[] = [];
 		const hub = makeHub(agents, { focusAgent: async id => { focused.push(id); } });
@@ -267,8 +284,8 @@ describe("Agent hub row ordering", () => {
 		geometry = stubStdoutGeometry(120);
 		geometry.setRows(40);
 		const agents = new AgentRegistry();
-		agents.register({ id: "leaf-a", displayName: "Leaf A", kind: "sub", parentId: "parent", session: null, history: { modelRole: "explorer" } });
-		agents.register({ id: "leaf-b", displayName: "Leaf B", kind: "sub", parentId: "parent", session: null, history: { modelRole: "explorer" } });
+		agents.register({ id: "leaf-a", displayName: "Leaf A", kind: "sub", parentId: "parent", session: null, history: { agent: "explorer", modelRole: "alias-one" } });
+		agents.register({ id: "leaf-b", displayName: "Leaf B", kind: "sub", parentId: "parent", session: null, history: { agent: "explorer", modelRole: "alias-two" } });
 		const hub = makeHub(agents);
 		try {
 			hub.handleInput("t");
@@ -287,7 +304,7 @@ describe("Agent hub row ordering", () => {
 		const agents = new AgentRegistry();
 		for (let i = 0; i < 5_000; i++) {
 			const id = `Grouped-${i.toString().padStart(4, "0")}`;
-			agents.register({ id, displayName: id, kind: "sub", parentId: "parent", session: null, status: "parked", history: { modelRole: "explorer" } });
+			agents.register({ id, displayName: id, kind: "sub", parentId: "parent", session: null, status: "parked", history: { agent: "explorer", modelRole: "alias-one" } });
 		}
 		const hub = makeHub(agents);
 		try {
