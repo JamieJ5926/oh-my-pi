@@ -57,7 +57,7 @@ describe("Frank host tool service", () => {
 		const singleSlice = createFrankHostToolService({ session: sessionWithRegistry, agentId: "solo", names: ["read"], workerLane: { agent: "frank-poteto-agent", prompt: "single-slice: this is indivisible" } });
 		expect(await singleSlice.handle("read", {})).toEqual({ ok: true, content: "read" });
 	});
-	test("Frank coordinator first bash, write, and edit are blocked before dispatch", async () => {
+	test("coordinator first bash, write, and edit are blocked before dispatch", async () => {
 		const registry = new Map(["bash", "write", "edit"].map(name => [name, { execute: async () => ({ content: [{ type: "text" as const, text: "unexpected" }] }) }]));
 		const service = createFrankHostToolService({ session: { toolRegistry: registry } as unknown as ToolSession, agentId: "pot", names: ["bash", "write", "edit"], workerLane: { agent: "frank-poteto-agent", prompt: "Coordinate work" } });
 		for (const name of ["bash", "write", "edit"]) {
@@ -65,7 +65,7 @@ describe("Frank host tool service", () => {
 		}
 	});
 
-	test("Frank coordinator child task without delegable declaration is blocked", async () => {
+	test("coordinator child task without delegable declaration is blocked", async () => {
 		const original = BUILTIN_TOOLS.task;
 		BUILTIN_TOOLS.task = async () => ({ name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text" as const, text: "unexpected" }] }) } as never);
 		try {
