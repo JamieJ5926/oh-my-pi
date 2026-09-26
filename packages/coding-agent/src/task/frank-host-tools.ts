@@ -299,7 +299,7 @@ export function createFrankHostToolService(options: {
 			const requireRegistry = name === "write" || name === "edit" || name === "bash" || name === "run";
 			const registeredTool = options.session.toolRegistry?.get(name);
 			if (requireRegistry && !registeredTool) {
-				return { ok: false, error: `host tool is not registered in the host session: ${name}` };
+				return { ok: false, error: hostMail ? `${hostMail}host tool is not registered in the host session: ${name}` : `host tool is not registered in the host session: ${name}` };
 			}
 			try {
 				const beforeDispatch = name === "task" && manager ? new Set(ownedJobs().map(job => job.id)) : undefined;
