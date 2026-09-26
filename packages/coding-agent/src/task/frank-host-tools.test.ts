@@ -57,6 +57,31 @@ describe("Frank host tool service", () => {
 		const singleSlice = createFrankHostToolService({ session: sessionWithRegistry, agentId: "solo", names: ["read"], workerLane: { agent: "frank-poteto-agent", prompt: "single-slice: this is indivisible" } });
 		expect(await singleSlice.handle("read", {})).toEqual({ ok: true, content: "read" });
 	});
+	test("Frank coordinator first bash, write, and edit are blocked before dispatch", async () => {
+		const registry = new Map(["bash", "write", "edit"].map(name => [name, { execute: async () => ({ content: [{ type: "text" as const, text: "unexpected" }] }) }]));
+		const service = createFrankHostToolService({ session: { toolRegistry: registry } as unknown as ToolSession, agentId: "pot", names: ["bash", "write", "edit"], workerLane: { agent: "frank-poteto-agent", prompt: "Coordinate work" } });
+		for (const name of ["bash", "write", "edit"]) {
+			expect(await service.handle(name, {})).toEqual({ ok: false, error: `Delegation required: dispatch a task before calling \`${name}\`, or declare \`single-slice: <reason>\` in the worker brief.` });
+		}
+	});
+
+	test("Frank coordinator child task without delegable declaration is blocked", async () => {
+		const original = BUILTIN_TOOLS.task;
+		BUILTIN_TOOLS.task = async () => ({ name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text" as const, text: "unexpected" }] }) } as never);
+		try {
+			const service = createFrankHostToolService({ session: {} as ToolSession, agentId: "pot", workerLane: { agent: "frank-poteto-agent-deep", prompt: "Coordinate" } });
+			expect(await service.handle("task", { tasks: [{ agent: "frank-poteto-agent", task: "Implement without delegation metadata" }] })).toEqual({ ok: false, error: "Delegation required: coordinator task item 1 must each declare their own `delegable: <scope>` or `single-slice: <reason>` in its task text." });
+		} finally {
+			BUILTIN_TOOLS.task = original;
+		}
+	});
+
+	test("Frank explorer is not subject to coordinator dispatch guard", async () => {
+		const service = createFrankHostToolService({ session: {} as ToolSession, agentId: "explorer", names: ["read"], workerLane: { agent: "frank-explorer", prompt: "Inspect" } });
+		const result = await service.handle("read", {});
+		expect(result.ok).toBe(false);
+		expect(result.error).not.toContain("Delegation required");
+	});
 
 	test("coordinator batch requires each coordinator item to declare its own delegable scope", async () => {
 		let invocations = 0;
