@@ -116,7 +116,7 @@ async function runLoggedCli(executable: string, args: string[], options: { cwd: 
 async function admitRun(options: DaemonOptions, env: NodeJS.ProcessEnv, stateDir: string): Promise<void> {
 	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
 	const logPath = path.join(stateDir, "cli.log");
-	const args = ["daemon", "start", "--task", options.text, "--session", daemonSessionKey(options.artifactsDir, options.id), "--allow", "all", "--key-env", options.apiKeyEnv ?? "PI_TRACK_API_KEY", "--cwd", options.cwd, "--endpoint", options.endpoint, "--model", options.model, "--budgets", JSON.stringify(options.budgets), ...(options.role ? ["--profile", options.role.name] : []), "--json"];
+	const args = ["daemon", "start", "--task", options.text, "--session", daemonSessionKey(options.artifactsDir, options.id), "--allow", "all", "--key-env", options.apiKeyEnv ?? "PI_TRACK_API_KEY", "--cwd", options.cwd, "--endpoint", options.endpoint, "--model", options.model, "--max-tool-calls", String(options.budgets.maxToolCalls), "--wall-secs", String(options.budgets.wallSecs), ...(options.role ? ["--profile", options.role.name] : []), "--json"];
 	const startCode = await runLoggedCli(bin, args, { cwd: options.cwd, env, logPath });
 	if (startCode === 0) return;
 	const existingStatus = await runLoggedCli(bin, ["daemon", "status"], { cwd: options.cwd, env, logPath });
