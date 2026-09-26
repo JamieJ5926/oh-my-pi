@@ -93,7 +93,7 @@ function daemonSessionKey(artifactsDir: string, id: string): string {
 	return createHash("sha1").update(`${artifactsDir}:${id}`).digest("hex").slice(0, 16);
 }
 
-function daemonStateDir(): string {
+export function daemonStateDir(): string {
 	const override = process.env.FRANK_DAEMON_STATE_DIR?.trim();
 	if (override) return override;
 	return path.join("/tmp", "omp-frank-daemon", "host");
