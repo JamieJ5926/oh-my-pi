@@ -42,6 +42,21 @@ function makeManyFileDiff(fileCount: number): string {
 	).join("\n");
 }
 
+function makeRefactorFileDiff(fileCount: number, changedLinesPerFile: number): string {
+	return Array.from({ length: fileCount }, (_, idx) => {
+		const body = Array.from(
+			{ length: changedLinesPerFile },
+			(_, line) => `-export const old${idx}_${line} = ${line};\n+export const new${idx}_${line} = ${line + 1};`,
+		).join("\n");
+		return `diff --git a/src/refactor-${idx}.ts b/src/refactor-${idx}.ts
+--- a/src/refactor-${idx}.ts
++++ b/src/refactor-${idx}.ts
+@@ -1 +1 @@
+${body}
+`;
+	}).join("\n");
+}
+
 interface SelectCall {
 	title: string;
 	options: string[];
@@ -292,7 +307,7 @@ describe("ReviewCommand", () => {
 
 	it("uses PR diff URLs for omitted large PR diff instructions", async () => {
 		const dir = await createTempDir();
-		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(makeManyFileDiff(21)));
+		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(makeManyFileDiff(51)));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		const ctx = { hasUI: false } as unknown as HookCommandContext;
 
@@ -701,5 +716,21 @@ describe("ReviewCommand", () => {
 		expect(result).toBeDefined();
 		const promptText = result!;
 		expect(promptText).toContain("focus auth");
+	});
+
+	it("inlines the full diff for refactor-sized multi-file reviews", async () => {
+		const dir = await createTempDir();
+		const refactorDiff = makeRefactorFileDiff(25, 40);
+		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(refactorDiff));
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = { hasUI: false } as unknown as HookCommandContext;
+
+		const result = await command.execute(["https://github.com/owner/repo/pull/123"], ctx);
+
+		expect(result).toBeDefined();
+		const promptText = result!;
+		expect(promptText).toContain("MUST use diff hunks below (NEVER re-run git diff)");
+		expect(promptText).not.toContain("Full diff too large");
+		expect(promptText).toContain("new24_39");
 	});
 });
