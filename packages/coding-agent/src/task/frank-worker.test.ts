@@ -15,7 +15,7 @@ let received: number[] = [];
 async function makeStub(body: string): Promise<{ cwd: string; exe: string }> {
 	const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-worker-"));
 	const exe = path.join(cwd, "frank-stub");
-	await writeFile(exe, `#!/bin/sh\n${body}\n`, { mode: 0o700 });
+	await writeFile(exe, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\n${body}\n`, { mode: 0o700 });
 	await chmod(exe, 0o700);
 	return { cwd, exe };
 }
@@ -369,7 +369,7 @@ describe("Frank daemon transport", () => {
 		const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-cli-"));
 		const bin = path.join(cwd, "frank");
 		const artifactsDir = path.join(cwd, "artifacts");
-		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$FRANK_DAEMON_TOOL_CHOICE" "$FRANK_DAEMON_READ_ROOT" "$FRANK_DAEMON_MODEL" > "$FRANK_PARITY_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$FRANK_DAEMON_TOOL_CHOICE" "$FRANK_DAEMON_READ_ROOT" "$FRANK_DAEMON_MODEL" > "$FRANK_PARITY_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
 		const parityFile = path.join(cwd, "daemon-env");
 		process.env.FRANK_PARITY_FILE = parityFile;
 		const delivered: FrankEvent[] = [];
@@ -391,7 +391,7 @@ describe("Frank daemon transport", () => {
 		const bin = path.join(cwd, "frank");
 		const artifactsDir = path.join(cwd, "artifacts");
 		const argvFile = path.join(cwd, "frank-argv.txt");
-		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
 		process.env.FRANK_ARGV_FILE = argvFile;
 		try {
 			for (const id of ["lane-1", "lane-2"]) {
@@ -422,7 +422,7 @@ describe("Frank daemon transport", () => {
 		const artifactsDir = path.join(cwd, "artifacts");
 		await mkdir(artifactsDir, { recursive: true });
 		await Bun.write(path.join(artifactsDir, "lane-recover.frank.jsonl"), "{\"seq\":1,\"kind\":{\"AssistantDelta\":\"incomplete\"}}\n");
-		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-recover from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-recover from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
 		try {
 			const result = await attachFrankDaemonLane({ artifactsDir, id: "lane-recover", cwd, frankBin: bin });
 			expect(result.text).toBe("daemon answer");
