@@ -94,8 +94,63 @@ function daemonSessionKey(artifactsDir: string, id: string): string {
 }
 
 function daemonStateDir(): string {
+	const override = process.env.FRANK_DAEMON_STATE_DIR?.trim();
+	if (override) return override;
 	return path.join("/tmp", "omp-frank-daemon", "host");
 }
+
+async function frankClientVersion(bin: string, cwd: string, env: NodeJS.ProcessEnv): Promise<string | undefined> {
+	const child = runCli(bin, ["--version"], { cwd, env });
+	let stdout = "";
+	child.stdout?.on("data", chunk => { stdout += chunk.toString(); });
+	try {
+		const code = await waitForClose(child);
+		if (code !== 0) return undefined;
+		const version = stdout.trim();
+		return version ? version : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function statusHasRunningSessions(stdout: string): boolean {
+	const text = stdout.trim();
+	if (!text) return false;
+	try {
+		const value: unknown = JSON.parse(text);
+		if (Array.isArray(value)) return value.length > 0;
+		if (isRecord(value)) {
+			for (const key of ["sessions", "runs", "tasks", "jobs", "lanes"]) {
+				if (Array.isArray(value[key])) return (value[key] as unknown[]).length > 0;
+			}
+			for (const key of ["running", "active", "session_count", "sessionCount"]) {
+				if (typeof value[key] === "number") return (value[key] as number) > 0;
+			}
+		}
+		return false;
+	} catch {
+		return false;
+	}
+}
+
+async function ensureDaemonVersion(bin: string, cwd: string, env: NodeJS.ProcessEnv, stateDir: string, logPath: string): Promise<string | undefined> {
+	const clientVersion = await frankClientVersion(bin, cwd, env);
+	if (!clientVersion) return undefined;
+	const versionFile = path.join(stateDir, "daemon-version");
+	let recorded = "";
+	try { recorded = (await readFile(versionFile, "utf8")).trim(); } catch { recorded = ""; }
+	if (!recorded || recorded === clientVersion) return clientVersion;
+	const probe = runCli(bin, ["daemon", "status", "--json"], { cwd, env });
+	let statusOut = "";
+	probe.stdout?.on("data", chunk => { statusOut += chunk.toString(); });
+	try { await waitForClose(probe); } catch {}
+	await appendFile(logPath, `[daemon-status] ${statusOut}`);
+	if (statusHasRunningSessions(statusOut)) throw new Error(`Frank daemon version mismatch: daemon is ${recorded} but client is ${clientVersion} with running sessions; drain or stop the daemon before retrying`);
+	await runLoggedCli(bin, ["daemon", "stop"], { cwd, env, logPath });
+	try { await writeFile(versionFile, ""); } catch {}
+	return clientVersion;
+}
+
 
 async function runLoggedCli(executable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; logPath: string; detached?: boolean }): Promise<number | null> {
 	if (options.detached) {
@@ -116,9 +171,14 @@ async function runLoggedCli(executable: string, args: string[], options: { cwd: 
 async function admitRun(options: DaemonOptions, env: NodeJS.ProcessEnv, stateDir: string): Promise<void> {
 	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";
 	const logPath = path.join(stateDir, "cli.log");
+	const startedVersion = await ensureDaemonVersion(bin, options.cwd, env, stateDir, logPath);
 	const args = ["daemon", "start", "--task", options.text, "--session", daemonSessionKey(options.artifactsDir, options.id), "--allow", "all", "--key-env", options.apiKeyEnv ?? "PI_TRACK_API_KEY", "--cwd", options.cwd, "--endpoint", options.endpoint, "--model", options.model, "--max-tool-calls", String(options.budgets.maxToolCalls), "--wall-secs", String(options.budgets.wallSecs), ...(options.role ? ["--profile", options.role.name] : []), "--json"];
+	const recordVersion = async () => {
+		const version = startedVersion ?? await frankClientVersion(bin, options.cwd, env);
+		if (version) await writeFile(path.join(stateDir, "daemon-version"), `${version}\n`);
+	};
 	const startCode = await runLoggedCli(bin, args, { cwd: options.cwd, env, logPath });
-	if (startCode === 0) return;
+	if (startCode === 0) { await recordVersion(); return; }
 	const existingStatus = await runLoggedCli(bin, ["daemon", "status"], { cwd: options.cwd, env, logPath });
 	if (existingStatus === 0) throw new Error(`Frank daemon rejected run admission (exit code ${startCode}); see ${logPath}`);
 	await runLoggedCli(bin, ["__daemon-run"], { cwd: options.cwd, env, logPath, detached: true });
@@ -129,6 +189,7 @@ async function admitRun(options: DaemonOptions, env: NodeJS.ProcessEnv, stateDir
 		await Bun.sleep(250);
 	}
 	if (Date.now() >= deadline) throw new Error(`Frank daemon did not start; see ${logPath}`);
+	await recordVersion();
 	const retry = await runLoggedCli(bin, args, { cwd: options.cwd, env, logPath });
 	if (retry !== 0) throw new Error(`Frank daemon start failed with exit code ${retry}; see ${logPath}`);
 }
