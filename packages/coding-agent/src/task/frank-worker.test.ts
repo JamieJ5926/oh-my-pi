@@ -497,4 +497,41 @@ describe("Frank TUI row progress and nesting", () => {
 			await rm(stub.cwd, { recursive: true, force: true });
 		}
 	});
+
+	// 2026-09-26 native-vs-Frank trial: Frank pots started with no skills loaded and
+	// spent 20-40 s reading them one call at a time. Native pots get autoloadSkills
+	// before the first prompt; a Frank lane must get the same bodies in its role file.
+	test("autoload skills ride in the Frank lane's role instructions", async () => {
+		const registry = AgentRegistry.global();
+		const laneId = `frank-autoload-${Date.now()}`;
+		const agent = parseAgent("test.md", "---\nname: frank-autoload-agent\ndescription: test agent\nruntime: frank\nmodel: cli-proxy/test-model\n---\nRole body\n", "project");
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"kind":{"Meter":{"input_tokens":1,"output_tokens":1}}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		const skillFile = path.join(stub.cwd, "SKILL.md");
+		await writeFile(skillFile, "---\nname: probe-skill\ndescription: probe\n---\nSKILL BODY MARKER\n");
+		const artifactsDir = path.join(stub.cwd, "artifacts");
+		await mkdir(artifactsDir, { recursive: true });
+		try {
+			await runFrankSubagent({
+				id: laneId,
+				agent,
+				task: "t",
+				description: "t",
+				index: 0,
+				cwd: stub.cwd,
+				exe: stub.exe,
+				endpoint: "http://127.0.0.1:1",
+				model: "cli-proxy/test-model",
+				budgets: { maxToolCalls: 10, wallSecs: 30 },
+				text: "t",
+				artifactsDir,
+				autoloadSkills: [{ name: "probe-skill", filePath: skillFile, baseDir: stub.cwd } as never],
+			});
+			const instructions = await Bun.file(path.join(artifactsDir, `${laneId}.frank-profiles`, "roles", "frank-autoload-agent", "instructions", "frank-autoload-agent.md")).text();
+			expect(instructions).toContain("Role body");
+			expect(instructions).toContain("SKILL BODY MARKER");
+		} finally {
+			registry.unregister(laneId);
+			await rm(stub.cwd, { recursive: true, force: true });
+		}
+	});
 });
