@@ -155,10 +155,10 @@ function enqueueJournalOperation(file: string, operation: () => Promise<void>): 
   return next;
 }
 
-function enqueueJournalCompaction(file: string, entries: readonly JournalEntry[], removedIds: Set<string>): Promise<void> {
+function enqueueJournalCompaction(file: string, entries: () => readonly JournalEntry[], removedIds: Set<string>): Promise<void> {
   const removed = [...removedIds];
   removedIds.clear();
-  return enqueueJournalOperation(file, () => compactJournal(file, entries, removed));
+  return enqueueJournalOperation(file, () => compactJournal(file, entries(), removed));
 }
 function journalBytes(entries: readonly JournalEntry[]): number {
   let total = 0;
@@ -362,7 +362,7 @@ export class LocalTransportAdapter implements TransportAdapter {
           }
         }
       }
-      this.#journalWrite = this.#journalWrite.then(() => enqueueJournalCompaction(this.#journalPath, [...this.#pending.values()], this.#removed));
+      this.#journalWrite = this.#journalWrite.then(() => enqueueJournalCompaction(this.#journalPath, () => [...this.#pending.values()], this.#removed));
       await this.#journalWrite;
       if (nextAt < Number.POSITIVE_INFINITY && !this.#closed) {
         if (this.#drainTimer) clearTimeout(this.#drainTimer);
@@ -581,6 +581,7 @@ export class BrokerBackedTransportAdapter implements TransportAdapter {
     if (this.#drainTimer) clearTimeout(this.#drainTimer);
     this.#socket?.destroy();
     this.#socket = undefined;
+    await this.#journalWrite;
   }
 }
 
@@ -623,9 +624,11 @@ export class BrokerTransportServer {
       if (!this.#listening) return;
       const now = Date.now();
       let changed = false;
+      const removedIds: string[] = [];
       for (const [id, entry] of this.#pending) {
         if (entry.attempts >= this.#limits.maxAttempts) {
           this.#pending.delete(id);
+          removedIds.push(id);
           await appendDeadLetter(this.#deadLetterPath, { envelope: entry.envelope, attempts: entry.attempts, reason: "maximum delivery attempts exceeded", deadLetteredAt: Date.now() });
           changed = true;
           continue;
@@ -639,7 +642,7 @@ export class BrokerTransportServer {
         changed = true;
       }
       if (changed && this.#listening) {
-        this.#journalWrite = this.#journalWrite.then(() => enqueueJournalOperation(this.#journalPath, () => compactJournal(this.#journalPath, [...this.#pending.values()])));
+        this.#journalWrite = this.#journalWrite.then(() => enqueueJournalOperation(this.#journalPath, () => compactJournal(this.#journalPath, [...this.#pending.values()], removedIds)));
         await this.#journalWrite;
       }
       if (this.#pending.size > 0) this.#scheduleRetry();
@@ -757,9 +760,7 @@ export class BrokerTransportServer {
       if (!this.#pending.delete(message.messageId)) return;
       this.#origins.get(message.messageId)?.write(encodeWire({ type: "accepted", messageId: message.messageId }));
       this.#origins.delete(message.messageId);
-      this.#journalWrite = this.#journalWrite.then(() => enqueueJournalOperation(this.#journalPath, () => compactJournal(this.#journalPath, [...this.#pending.values()])));
-      await this.#journalWrite;
-      this.#scheduleRetry();
+      this.#journalWrite = this.#journalWrite.then(() => enqueueJournalOperation(this.#journalPath, () => compactJournal(this.#journalPath, [...this.#pending.values()], [message.messageId])));
       return;
     }
     if (message.type !== "send") return;
