@@ -628,6 +628,7 @@ export class BrokerTransportServer {
       for (const [id, entry] of this.#pending) {
         if (entry.attempts >= this.#limits.maxAttempts) {
           this.#pending.delete(id);
+          this.#journalBytes -= Buffer.byteLength(journalLine(entry), "utf8");
           removedIds.push(id);
           await appendDeadLetter(this.#deadLetterPath, { envelope: entry.envelope, attempts: entry.attempts, reason: "maximum delivery attempts exceeded", deadLetteredAt: Date.now() });
           changed = true;
@@ -638,6 +639,7 @@ export class BrokerTransportServer {
         if (!target || generationOf(target.address) !== generationOf(entry.envelope.destination) || !target.socket.writable) continue;
         target.socket.write(encodeWire({ type: "delivery", envelope: entry.envelope }));
         const updated: JournalEntry = { envelope: entry.envelope, attempts: entry.attempts + 1, nextAttemptAt: retryAt(entry, this.#limits) };
+        this.#journalBytes += Buffer.byteLength(journalLine(updated), "utf8") - Buffer.byteLength(journalLine(entry), "utf8");
         this.#pending.set(id, updated);
         changed = true;
       }
@@ -658,7 +660,9 @@ export class BrokerTransportServer {
     for (const [id, entry] of this.#pending) {
       if (addressKey(entry.envelope.destination) !== key || generationOf(entry.envelope.destination) !== generationOf(target.address) || entry.attempts >= this.#limits.maxAttempts || entry.nextAttemptAt > now) continue;
       target.socket.write(encodeWire({ type: "delivery", envelope: entry.envelope }));
-      this.#pending.set(id, { envelope: entry.envelope, attempts: entry.attempts + 1, nextAttemptAt: retryAt(entry, this.#limits) });
+      const updated: JournalEntry = { envelope: entry.envelope, attempts: entry.attempts + 1, nextAttemptAt: retryAt(entry, this.#limits) };
+      this.#journalBytes += Buffer.byteLength(journalLine(updated), "utf8") - Buffer.byteLength(journalLine(entry), "utf8");
+      this.#pending.set(id, updated);
       changed = true;
     }
     if (!changed) {
@@ -757,7 +761,10 @@ export class BrokerTransportServer {
       return;
     }
     if (message.type === "ack") {
-      if (!this.#pending.delete(message.messageId)) return;
+      const entry = this.#pending.get(message.messageId);
+      if (!entry) return;
+      this.#pending.delete(message.messageId);
+      this.#journalBytes -= Buffer.byteLength(journalLine(entry), "utf8");
       this.#origins.get(message.messageId)?.write(encodeWire({ type: "accepted", messageId: message.messageId }));
       this.#origins.delete(message.messageId);
       this.#journalWrite = this.#journalWrite.then(() => enqueueJournalOperation(this.#journalPath, () => compactJournal(this.#journalPath, [...this.#pending.values()], [message.messageId])));
