@@ -1418,14 +1418,54 @@ function renderAgentResult(
  * order. Because a finished agent's runtime is fixed, finalization renders
  * the same order and rows never reshuffle.
  */
+type OrderedProgressCache = {
+	items: AgentProgress[];
+	status: AgentProgress["status"][];
+	durationMs: number[];
+	index: number[];
+	ordered: AgentProgress[];
+};
+
+const orderedProgressCache = new WeakMap<readonly AgentProgress[], OrderedProgressCache>();
+
 function orderProgressForDisplay(progress: readonly AgentProgress[]): AgentProgress[] {
+	let cache = orderedProgressCache.get(progress);
+	if (cache && cache.items.length === progress.length) {
+		let unchanged = true;
+		for (let i = 0; i < progress.length; i++) {
+			const item = progress[i]!;
+			if (
+				cache.items[i] !== item ||
+				cache.status[i] !== item.status ||
+				cache.durationMs[i] !== item.durationMs ||
+				cache.index[i] !== item.index
+			) {
+				unchanged = false;
+				break;
+			}
+		}
+		if (unchanged) return cache.ordered;
+	} else {
+		cache = { items: [], status: [], durationMs: [], index: [], ordered: [] };
+		orderedProgressCache.set(progress, cache);
+	}
+
 	const finished: AgentProgress[] = [];
 	const unfinished: AgentProgress[] = [];
-	for (const p of progress) {
-		(p.status === "pending" || p.status === "running" ? unfinished : finished).push(p);
+	for (let i = 0; i < progress.length; i++) {
+		const item = progress[i]!;
+		cache.items[i] = item;
+		cache.status[i] = item.status;
+		cache.durationMs[i] = item.durationMs;
+		cache.index[i] = item.index;
+		(item.status === "pending" || item.status === "running" ? unfinished : finished).push(item);
 	}
+	cache.items.length = progress.length;
+	cache.status.length = progress.length;
+	cache.durationMs.length = progress.length;
+	cache.index.length = progress.length;
 	finished.sort((a, b) => a.durationMs - b.durationMs || a.index - b.index);
-	return finished.concat(unfinished);
+	return (cache.ordered = finished.concat(unfinished));
 }
 
 /**
