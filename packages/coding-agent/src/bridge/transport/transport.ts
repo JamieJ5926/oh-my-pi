@@ -624,13 +624,13 @@ export class BrokerTransportServer {
       const now = Date.now();
       let changed = false;
       for (const [id, entry] of this.#pending) {
-        if (entry.nextAttemptAt > now) continue;
         if (entry.attempts >= this.#limits.maxAttempts) {
           this.#pending.delete(id);
           await appendDeadLetter(this.#deadLetterPath, { envelope: entry.envelope, attempts: entry.attempts, reason: "maximum delivery attempts exceeded", deadLetteredAt: Date.now() });
           changed = true;
           continue;
         }
+        if (entry.nextAttemptAt > now) continue;
         const target = this.#registrations.get(addressKey(entry.envelope.destination));
         if (!target || generationOf(target.address) !== generationOf(entry.envelope.destination) || !target.socket.writable) continue;
         target.socket.write(encodeWire({ type: "delivery", envelope: entry.envelope }));
