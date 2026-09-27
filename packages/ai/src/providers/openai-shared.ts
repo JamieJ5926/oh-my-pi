@@ -3012,8 +3012,22 @@ export async function processResponsesStream<TApi extends Api>(
 		if (entry && identifierlessFunctionDeltaTarget === entry) identifierlessFunctionDeltaTarget = undefined;
 		if (entry && lastOpenItem === entry) lastOpenItem = null;
 	};
-	const contentIndexOf = (block: ThinkingContent | TextContent | StreamingToolCallBlock): number =>
-		output.content.indexOf(block);
+	// Content blocks are append-only for the lifetime of the stream, so each
+	// block's index is stable once pushed. Map block → index to keep the
+	// per-delta contentIndex lookup O(1); the legacy linear scan would turn a
+	// long turn (many blocks × many deltas) quadratic and is what pegs the
+	// shared JS main thread on streaming-heavy sessions (issue #10605).
+	const contentIndexByBlock = new Map<object, number>();
+	const pushContentBlock = (block: ThinkingContent | TextContent | StreamingToolCallBlock | ToolCall): void => {
+		contentIndexByBlock.set(block, output.content.length);
+		output.content.push(block);
+	};
+	const contentIndexOf = (block: ThinkingContent | TextContent | StreamingToolCallBlock): number => {
+		const index = contentIndexByBlock.get(block);
+		// Blocks appended outside this closure (e.g. generated images) retain a
+		// correctness-preserving fallback.
+		return index ?? output.content.indexOf(block);
+	};
 
 	let sawFirstToken = false;
 	// Whether the current stream produced a completed native `web_search_call`
@@ -3033,7 +3047,7 @@ export async function processResponsesStream<TApi extends Api>(
 			const item = event.item;
 			if (item.type === "reasoning") {
 				const block: ThinkingContent = { type: "thinking", thinking: "", itemId: item.id };
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(event.output_index, item.id, { item, block });
 				stream.push({ type: "thinking_start", contentIndex: contentIndexOf(block), partial: output });
 			} else if (item.type === "message") {
@@ -3042,7 +3056,7 @@ export async function processResponsesStream<TApi extends Api>(
 					text: "",
 					textSignature: encodeTextSignatureV1(item.id, item.phase ?? undefined),
 				};
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(event.output_index, item.id, { item, block });
 				stream.push({ type: "text_start", contentIndex: contentIndexOf(block), partial: output });
 			} else if (item.type === "function_call") {
@@ -3053,7 +3067,7 @@ export async function processResponsesStream<TApi extends Api>(
 					arguments: {},
 					[kStreamingPartialJson]: item.arguments || "",
 				};
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(
 					event.output_index,
 					item.id,
@@ -3071,7 +3085,7 @@ export async function processResponsesStream<TApi extends Api>(
 					providerMetadata: computerCallMetadata(item),
 					[kStreamingPartialJson]: "",
 				};
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(event.output_index, item.id, { item, block }, item.call_id);
 				stream.push({ type: "toolcall_start", contentIndex: contentIndexOf(block), partial: output });
 			} else if (item.type === "custom_tool_call") {
@@ -3089,7 +3103,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// accumulation buffer so later code that inspects the field still works.
 					[kStreamingPartialJson]: item.input ?? "",
 				};
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(
 					event.output_index,
 					item.id,
@@ -3238,7 +3252,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// `output_item.added` never arrived (lossy proxy) — synthesize the
 					// block so the final message still carries the authoritative text.
 					const synthesized: TextContent = { type: "text", text, textSignature };
-					output.content.push(synthesized);
+					pushContentBlock(synthesized);
 					contentIndex = output.content.length - 1;
 				}
 				stream.push({ type: "text_end", contentIndex, content: text, partial: output });
@@ -3271,7 +3285,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// `output_item.added` never arrived (lossy proxy) — synthesize the
 					// block so the final message carries the call the consumer was told
 					// completed (the agent loop executes tools from message.content).
-					output.content.push(toolCall);
+					pushContentBlock(toolCall);
 					contentIndex = output.content.length - 1;
 				}
 				closeOpenItem(event.output_index, item.id, entry, item.call_id, prefixedFunctionCallItemKey(item.call_id));
@@ -3292,7 +3306,7 @@ export async function processResponsesStream<TApi extends Api>(
 					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {
-					output.content.push(toolCall);
+					pushContentBlock(toolCall);
 					contentIndex = output.content.length - 1;
 				}
 				closeOpenItem(event.output_index, item.id, entry, item.call_id);
@@ -3315,7 +3329,7 @@ export async function processResponsesStream<TApi extends Api>(
 					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {
-					output.content.push(toolCall);
+					pushContentBlock(toolCall);
 					contentIndex = output.content.length - 1;
 				}
 				closeOpenItem(event.output_index, item.id, entry, item.call_id, prefixedFunctionCallItemKey(item.call_id));
