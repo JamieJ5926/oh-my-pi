@@ -385,6 +385,29 @@ describe("Frank worker transport", () => {
 			await rm(stub.cwd, { recursive: true, force: true });
 		}
 	});
+	test("preserves Frank errors that arrive without a pending steer", async () => {
+		const stub = await makeStub(`IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"do the work"}' ] || exit 4; printf '%s\\n' '{"type":"error","version":1,"message":"original Frank failure"}' >&2; exit 0`);
+		const worker = await startFrankWorker({ ...workerOptions(stub.exe, stub.cwd, () => {}) });
+		try {
+			await expect(worker.runTurn("do the work")).rejects.toThrow("original Frank failure");
+		} finally {
+			await worker.close().catch(() => {});
+			await rm(stub.cwd, { recursive: true, force: true });
+		}
+	});
+	test("turn-scoped errors do not consume a pending steer response", async () => {
+		const stub = await makeStub(`IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"do the work"}' ] || exit 4; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' >&2; IFS= read -r input; [ "$input" = '{"op":"steer","version":1,"message":"hello"}' ] || exit 5; printf '%s\\n' '{"type":"error","version":1,"turn_id":1,"message":"turn failed"}' '{"type":"ack","version":1,"accepted":true,"op":"steer"}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		const worker = await startFrankWorker({ ...workerOptions(stub.exe, stub.cwd, () => {}) });
+		try {
+			const turnFailure = worker.runTurn("do the work").then(() => new Error("turn unexpectedly succeeded"), error => error);
+			const steeringFailure = worker.steer("hello").then(() => new Error("steer unexpectedly succeeded"), error => error);
+			expect((await turnFailure).message).toBe("turn failed");
+			expect((await steeringFailure).message).toBe("turn failed");
+		} finally {
+			await worker.close().catch(() => {});
+			await rm(stub.cwd, { recursive: true, force: true });
+		}
+	});
 	test("reports a clear lane-exited failure when steer targets an exited worker", async () => {
 		const stub = await makeStub(`IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"do the work"}' ] || exit 4; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":0}' >&2; exit 0`);
 		const worker = await startFrankWorker({ ...workerOptions(stub.exe, stub.cwd, () => {}) });

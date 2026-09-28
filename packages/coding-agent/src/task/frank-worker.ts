@@ -249,6 +249,10 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 	const failTurn = (error: Error) => {
 		if (failure) return;
 		failure = error;
+		for (const pending of pendingSteers.splice(0)) {
+			clearTimeout(pending.timeout);
+			pending.reject(error);
+		}
 		activeTurn?.fail(error);
 	};
  	const abort = () => {
@@ -367,11 +371,14 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 					return;
 				}
 				case "error": {
-					const pending = pendingSteers.shift();
-					if (!pending) throw new FrankProtocolError("Unexpected Frank error control");
+					if (control.turn_id !== undefined || pendingSteers.length === 0) {
+						failTurn(new FrankProtocolError(control.message));
+						return;
+					}
+					const pending = pendingSteers.shift()!;
 					clearTimeout(pending.timeout);
 					if (pending.timedOut) return;
-					if (control.turn_id === undefined && /unknown op/i.test(control.message) && /steer/i.test(control.message)) {
+					if (/unknown op/i.test(control.message) && /steer/i.test(control.message)) {
 						pending.resolve("unsupported");
 						return;
 					}
