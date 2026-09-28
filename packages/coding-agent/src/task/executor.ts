@@ -58,7 +58,7 @@ import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLeve
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
-import { LIST_STATUS_ORDER } from "../tools/hub/messaging";
+import { formatIncoming, LIST_STATUS_ORDER } from "../tools/hub/messaging";
 import { DEFAULT_HUB_LIST_LIMIT } from "../tools/hub/types";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
@@ -3167,7 +3167,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				const handle = await startFrankWorker(workerOptions);
 				const removeDelivery = AgentRegistry.global().registerRetainedDelivery(id, async (message: IrcMessage) => {
 					try {
-						const outcome = await handle.steer(`[${message.id}] ${message.from}${message.replyTo ? ` (reply to ${message.replyTo})` : ""}: ${message.body}`);
+						const outcome = await handle.steer(formatIncoming(message));
 						return outcome === "delivered" ? { kind: "delivered" } : outcome === "timeout" ? { kind: "failed", error: "Frank steer acknowledgement timed out; delivery status is unknown" } : { kind: "unsupported" };
 					} catch (error) {
 						return { kind: "failed", error: error instanceof Error ? error.message : String(error) };
