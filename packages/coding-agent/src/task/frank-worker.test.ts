@@ -498,6 +498,49 @@ describe("Frank TUI row progress and nesting", () => {
 		}
 	});
 
+	test("includes the exact OMP parent id in a Frank worker's first prompt", async () => {
+		const id = `frank-parent-prompt-${Date.now()}`;
+		const parentAgentId = "FrankPot0929";
+		const agent = parseAgent(
+			"test.md",
+			"---\nname: frank-test-agent\ndescription: test agent\nruntime: frank\nmodel: cli-proxy/test-model\n---\nTask\n",
+			"project",
+		);
+		let promptText: string | undefined;
+		try {
+			await runFrankSubagent({
+				id,
+				parentAgentId,
+				agent,
+				task: "Complete assignment thoroughly",
+				assignment: "Complete assignment thoroughly",
+				index: 0,
+				cwd: process.cwd(),
+				exe: "unused",
+				endpoint: "http://127.0.0.1:1",
+				model: "cli-proxy/test-model",
+				budgets: { maxToolCalls: 1, wallSecs: 5 },
+				text: "Complete assignment thoroughly",
+				runWorker: async options => {
+					promptText = options.text;
+					return {
+						terminal: { kind: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 0 },
+						exitCode: 0,
+						text: "done",
+					};
+				},
+			});
+			expect(promptText).toContain(`Your OMP parent agent ID is ${parentAgentId}.`);
+			expect(promptText).toContain(
+				"Use this exact ID as the recipient value when messaging your parent with hub.",
+			);
+			expect(promptText).toStartWith("Complete assignment thoroughly");
+		} finally {
+			AgentRegistry.global().unregister(id);
+		}
+	});
+
+
 	// 2026-09-26 native-vs-Frank trial: Frank pots started with no skills loaded and
 	// spent 20-40 s reading them one call at a time. Native pots get autoloadSkills
 	// before the first prompt; a Frank lane must get the same bodies in its role file.
