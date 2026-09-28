@@ -1,5 +1,5 @@
+import { registerLogSink } from "@oh-my-pi/pi-utils/logger";
 import { createHash } from "node:crypto";
-import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -19,14 +19,19 @@ describe("Frank host key refresh", () => {
 	test("refreshes the spawn-time key only when its fingerprint is stale", async () => {
 		const calls: unknown[][] = [];
 		const originalKey = "old-secret";
+		const events: unknown[] = [];
+		const logged: unknown[] = [];
+		const disposeLogSink = registerLogSink(event => logged.push(event));
 		const service = createFrankHostToolService({
 			session: {
-				authStorage: {
-					getApiKey: async (...args: unknown[]) => {
+				authStorage: { getApiKey: async () => "new-secret" },
+				modelRegistry: {
+					getApiKeyForProvider: async (...args: unknown[]) => {
 						calls.push(args);
 						return "new-secret";
 					},
 				},
+				sessionManager: { appendMessage: (event: unknown) => events.push(event) },
 			} as unknown as ToolSession,
 			agentId: "refresh-stale",
 			apiKey: originalKey,
@@ -35,26 +40,38 @@ describe("Frank host key refresh", () => {
 			sessionId: "session-a",
 		});
 
-		const response = await service.handle(
-			"refresh_key",
-			{
-				op: "refresh_key",
-				model: "model-a",
-				stale_key_sha256: staleKeyHash(originalKey),
-			},
-			"call-a",
-		);
+		try {
+			const response = await service.handle(
+				"refresh_key",
+				{
+					op: "refresh_key",
+					model: "openai/model-a:high",
+					stale_key_sha256: staleKeyHash(originalKey),
+				},
+				"call-a",
+			);
 
-		expect(response).toEqual({ ok: true, content: JSON.stringify({ ok: true, key: "new-secret" }) });
-		expect(calls).toEqual([["openai", "session-a", { modelId: "model-a", forceRefresh: true, signal: undefined }]]);
+			expect(response).toEqual({ ok: true, content: JSON.stringify({ ok: true, key: "new-secret" }) });
+			expect(calls).toEqual([
+				["openai", "session-a", { modelId: "model-a", forceRefresh: true, signal: undefined }],
+			]);
+			expect(events).toEqual([]);
+			expect(logged).toHaveLength(1);
+			expect(JSON.stringify(logged)).not.toContain(originalKey);
+			expect(JSON.stringify(logged)).toContain("openai/model-a:high");
+			expect(JSON.stringify(logged)).toContain(staleKeyHash(originalKey).slice(0, 12));
+		} finally {
+			disposeLogSink();
+		}
 	});
 
 	test("returns the current key without refresh when the fingerprint differs", async () => {
 		let refreshes = 0;
 		const service = createFrankHostToolService({
 			session: {
-				authStorage: {
-					getApiKey: async () => {
+				authStorage: { getApiKey: async () => "unexpected" },
+				modelRegistry: {
+					getApiKeyForProvider: async () => {
 						refreshes++;
 						return "unexpected";
 					},
@@ -68,7 +85,7 @@ describe("Frank host key refresh", () => {
 
 		const response = await service.handle("refresh_key", {
 			op: "refresh_key",
-			model: "model-a",
+			model: "different-provider/model-b:high",
 			stale_key_sha256: staleKeyHash("different-secret"),
 		});
 
@@ -81,6 +98,11 @@ describe("Frank host key refresh", () => {
 			session: {
 				authStorage: {
 					getApiKey: async () => {
+						throw new Error("should not be called");
+					},
+				},
+				modelRegistry: {
+					getApiKeyForProvider: async () => {
 						throw new Error("provider rejected secret");
 					},
 				},
@@ -102,10 +124,32 @@ describe("Frank host key refresh", () => {
 		expect(JSON.stringify(response)).not.toContain("provider rejected secret");
 	});
 
+	test("returns an error envelope when auth storage is unavailable", async () => {
+		const service = createFrankHostToolService({
+			session: {} as ToolSession,
+			agentId: "refresh-no-storage",
+			apiKey: "old-secret",
+			authProvider: "openai",
+			modelId: "model-a",
+		});
+
+		const response = await service.handle("refresh_key", {
+			op: "refresh_key",
+			model: "openai/model-a:high",
+			stale_key_sha256: staleKeyHash("old-secret"),
+		});
+
+		expect(response).toEqual({
+			ok: true,
+			content: JSON.stringify({ ok: false, error: "key refresh is unavailable" }),
+		});
+	});
+
 	test("keeps refresh requests out of enabled tool names and recorded events", async () => {
 		const events: unknown[] = [];
 		const session = {
 			authStorage: { getApiKey: async () => "new-secret" },
+			modelRegistry: { getApiKeyForProvider: async () => "new-secret" },
 			sessionManager: { appendMessage: (event: unknown) => events.push(event) },
 		} as unknown as ToolSession;
 		const service = createFrankHostToolService({

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { Provider } from "@oh-my-pi/pi-ai";
 import { IrcBus, type IrcMessage } from "../irc/bus";
 import { BUILTIN_TOOLS } from "../tools";
@@ -192,17 +193,17 @@ function coordinatorItemsMissingDelegable(args: unknown): string[] {
 		return /^[ \t]*(?:delegable[ \t]*:|single-slice[ \t]*:)[ \t]*\S/im.test(task) ? [] : [String(index + 1)];
 	});
 }
-function parseRefreshKeyRequest(args: unknown, modelId: string | undefined): { stale_key_sha256: string } | undefined {
+function parseRefreshKeyRequest(args: unknown): { model: string; stale_key_sha256: string } | undefined {
 	if (typeof args !== "object" || args === null || Array.isArray(args)) return undefined;
 	if (!("op" in args) || args.op !== "refresh_key") return undefined;
-	if (!("model" in args) || args.model !== modelId) return undefined;
+	if (!("model" in args) || typeof args.model !== "string") return undefined;
 	if (
 		!("stale_key_sha256" in args) ||
 		typeof args.stale_key_sha256 !== "string" ||
 		!/^[a-f0-9]{64}$/.test(args.stale_key_sha256)
 	)
 		return undefined;
-	return { stale_key_sha256: args.stale_key_sha256 };
+	return { model: args.model, stale_key_sha256: args.stale_key_sha256 };
 }
 export function createFrankHostToolService(options: {
 	session: ToolSession;
@@ -352,8 +353,13 @@ export function createFrankHostToolService(options: {
 				return { ok: false, error: "host tool service is closed" };
 			}
 			if (name === "refresh_key") {
-				const request = parseRefreshKeyRequest(args, options.modelId);
-				if (!request || !options.authProvider || !currentWorkerKey) {
+				const request = parseRefreshKeyRequest(args);
+				logger.debug("Frank host key refresh request", {
+					provider: options.authProvider,
+					model: request?.model,
+					staleKeySha256Prefix: request?.stale_key_sha256.slice(0, 12),
+				});
+				if (!request || !options.authProvider || !currentWorkerKey || !options.session.modelRegistry) {
 					return { ok: true, content: JSON.stringify({ ok: false, error: "key refresh is unavailable" }) };
 				}
 				try {
@@ -361,7 +367,7 @@ export function createFrankHostToolService(options: {
 					if (createHash("sha256").update(currentKey).digest("hex") !== request.stale_key_sha256) {
 						return { ok: true, content: JSON.stringify({ ok: true, key: currentKey }) };
 					}
-					const refreshedKey = await options.session.authStorage?.getApiKey(
+					const refreshedKey = await options.session.modelRegistry?.getApiKeyForProvider(
 						options.authProvider,
 						options.sessionId,
 						{ modelId: options.modelId, forceRefresh: true, signal: options.signal },

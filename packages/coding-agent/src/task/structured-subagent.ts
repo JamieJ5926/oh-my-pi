@@ -153,7 +153,7 @@ async function frankWorkerOptions(
 			apiKey,
 			authProvider: model.provider,
 			modelId: model.id,
-			sessionId: session.getSessionId?.(),
+			sessionId: session.getSessionId?.() ?? undefined,
 			workerLane: { prompt: options.task, agent: options.agent.name },
 		}),
 	};
