@@ -696,6 +696,7 @@ export class BrokerTransportServer {
 	readonly #deadLetterPath: string;
 	readonly #journalPath: string;
 	#journalBytes = 0;
+	#removed = new Set<string>();
 	#journalWrite: Promise<void> = Promise.resolve();
 	#redelivery: Promise<void> = Promise.resolve();
 	#retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -728,6 +729,7 @@ export class BrokerTransportServer {
 				if (entry.nextAttemptAt > now) continue;
 				if (entry.attempts >= this.#limits.maxAttempts) {
 					this.#pending.delete(id);
+					this.#removed.add(id);
 					this.#journalBytes -= Buffer.byteLength(journalLine(entry), "utf8");
 					await appendDeadLetter(this.#deadLetterPath, {
 						envelope: entry.envelope,
@@ -756,9 +758,11 @@ export class BrokerTransportServer {
 				changed = true;
 			}
 			if (changed && this.#listening) {
+				const removed = [...this.#removed];
+				this.#removed.clear();
 				this.#journalWrite = this.#journalWrite.then(() =>
 					enqueueJournalOperation(this.#journalPath, () =>
-						compactJournal(this.#journalPath, [...this.#pending.values()]),
+						compactJournal(this.#journalPath, [...this.#pending.values()], removed),
 					),
 				);
 				await this.#journalWrite;
@@ -923,12 +927,15 @@ export class BrokerTransportServer {
 			const entry = this.#pending.get(message.messageId);
 			if (!entry) return;
 			this.#pending.delete(message.messageId);
+			this.#removed.add(message.messageId);
 			this.#journalBytes -= Buffer.byteLength(journalLine(entry), "utf8");
 			this.#origins.get(message.messageId)?.write(encodeWire({ type: "accepted", messageId: message.messageId }));
 			this.#origins.delete(message.messageId);
+			const removed = [...this.#removed];
+			this.#removed.clear();
 			this.#journalWrite = this.#journalWrite.then(() =>
 				enqueueJournalOperation(this.#journalPath, () =>
-					compactJournal(this.#journalPath, [...this.#pending.values()]),
+					compactJournal(this.#journalPath, [...this.#pending.values()], removed),
 				),
 			);
 			await this.#journalWrite;
