@@ -3109,9 +3109,13 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				transport: options.transport ?? "process",
 				...(options.artifactsDir ? { sessionId: id } : {}),
 			};
+			const firstPrompt = options.parentAgentId
+				? `${options.text}\n\nYour OMP parent agent ID is ${options.parentAgentId}. ` +
+						"Use this exact ID as the recipient value when messaging your parent with hub."
+				: options.text;
 			let result: FrankWorkerResult;
 			if (options.transport === "daemon" && !(options.keepAlive && !options.runWorker)) {
-				result = await spawnFrankWorker({ ...workerOptions, text: options.text });
+				result = await spawnFrankWorker({ ...workerOptions, text: firstPrompt });
 			} else if (options.keepAlive && !options.runWorker) {
 				const handle = await startFrankWorker(workerOptions);
 				retainedWorker = {
@@ -3121,9 +3125,9 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 					setOnEvent: callback => { forwardEvent = callback; },
 				};
 				retainedFrankWorkers.set(id, retainedWorker);
-				result = await handle.runTurn(options.text);
+				result = await handle.runTurn(firstPrompt);
 			} else {
-				result = await (options.runWorker ?? spawnFrankWorker)({ ...workerOptions, text: options.text });
+				result = await (options.runWorker ?? spawnFrankWorker)({ ...workerOptions, text: firstPrompt });
 			}
 			rawOutput = result.text;
 			monitor.progress.extractedToolData = monitor.progress.extractedToolData ?? {};

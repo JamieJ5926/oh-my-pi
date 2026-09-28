@@ -8,6 +8,7 @@ import { BUILTIN_TOOLS } from "../tools";
 import type { ToolSession } from "../tools";
 import { createFrankHostToolService } from "./frank-host-tools";
 import { AgentRegistry } from "../registry/agent-registry";
+import { Settings } from "../config/settings";
 import { IrcBus } from "../irc/bus";
 
 describe("Frank host tool service", () => {
@@ -553,32 +554,48 @@ describe("Frank hub send mailbox", () => {
 
 	// 2026-09-26: FFExp02/03/07 could not report to Main: the bridge served the
 	// host's own hub instance, so the lane's send carried the host identity and
-	// tripped "Cannot send a message to yourself."
-	test("a bridged hub send carries the Frank lane identity, so a report to Main is delivered", async () => {
+	test("a bridged hub send carries the Frank lane identity and delivers to its OMP parent", async () => {
 		const registry = AgentRegistry.global();
 		const leaf = "FrankLeafReport";
+		const parent = "FrankParentReport";
 		registry.unregister(leaf);
-		registry.register({ id: leaf, displayName: leaf, kind: "sub", session: null, status: "running" });
-		let seen: string | null | undefined;
-		const original = BUILTIN_TOOLS.hub;
-		BUILTIN_TOOLS.hub = async session => {
-			seen = session.getAgentId?.();
-			return { name: "hub", label: "Hub", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text", text: "queued" }] }) } as never;
-		};
+		registry.unregister(parent);
+		registry.register({
+			id: leaf,
+			displayName: leaf,
+			kind: "sub",
+			parentId: parent,
+			session: null,
+			status: "running",
+		});
+		registry.register({
+			id: parent,
+			displayName: parent,
+			kind: "sub",
+			session: null,
+			status: "running",
+		});
 		try {
-			const hostHub = { execute: async () => ({ content: [{ type: "text" as const, text: "Cannot send a message to yourself." }] }) };
 			const hostSession = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				agentRegistry: registry,
 				getAgentId: () => "Main",
+				getSessionFile: () => null,
 				getToolContext: () => undefined,
-				toolRegistry: new Map([["hub", hostHub]]),
+				toolRegistry: new Map(),
 			} as unknown as ToolSession;
 			const service = createFrankHostToolService({ session: hostSession, agentId: leaf, names: ["hub"] });
-			const result = await service.handle("hub", { op: "send", to: "Main", message: "report" });
-			expect(seen).toBe(leaf);
-			expect(result.content ?? "").not.toContain("Cannot send a message to yourself");
+			const result = await service.handle("hub", { op: "send", to: parent, message: "report from Frank" });
+			expect(result.ok).toBe(true);
+			expect(result.content ?? "").toContain(`- ${parent}: queued`);
+			expect(IrcBus.global().inbox(parent)).toMatchObject([
+				{ from: leaf, to: parent, body: "report from Frank" },
+			]);
 		} finally {
-			BUILTIN_TOOLS.hub = original;
 			registry.unregister(leaf);
+			registry.unregister(parent);
 		}
 	});
 });
