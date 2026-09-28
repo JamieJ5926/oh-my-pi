@@ -43,6 +43,7 @@ import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prom
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import type { IrcMessage } from "../irc/bus";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../registry/persisted-agents";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
@@ -57,7 +58,7 @@ import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLeve
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
-import { LIST_STATUS_ORDER } from "../tools/hub/messaging";
+import { formatIncoming, LIST_STATUS_ORDER } from "../tools/hub/messaging";
 import { DEFAULT_HUB_LIST_LIMIT } from "../tools/hub/types";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
@@ -145,6 +146,7 @@ interface RetainedFrankWorker {
 	hostToolService?: FrankHostToolService;
 	closed: boolean;
 	setOnEvent: (onEvent: (event: FrankEvent) => void | Promise<void>) => void;
+	removeDelivery: () => void;
 }
 
 const retainedFrankWorkers = new Map<string, RetainedFrankWorker>();
@@ -157,6 +159,7 @@ async function closeRetainedFrankWorker(id: string, worker: RetainedFrankWorker)
 	}
 	worker.closed = true;
 	worker.hostToolService?.close();
+	worker.removeDelivery();
 	await worker.handle.close();
 	AgentRegistry.global().setStatus(id, "parked");
 }
@@ -3169,14 +3172,21 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				result = await spawnFrankWorker({ ...workerOptions, text: firstPrompt });
 			} else if (keepAlive && !options.runWorker) {
 				const handle = await startFrankWorker(workerOptions);
+				const removeDelivery = AgentRegistry.global().registerRetainedDelivery(id, async (message: IrcMessage) => {
+					try {
+						const outcome = await handle.steer(formatIncoming(message));
+						return outcome === "delivered" ? { kind: "delivered" } : outcome === "timeout" ? { kind: "failed", error: "Frank steer acknowledgement timed out; delivery status is unknown" } : { kind: "unsupported" };
+					} catch (error) {
+						return { kind: "failed", error: error instanceof Error ? error.message : String(error) };
+					}
+				});
 				retainedWorker = {
 					handle,
 					spawnOptions: workerOptions,
 					hostToolService,
 					closed: false,
-					setOnEvent: callback => {
-						forwardEvent = callback;
-					},
+					setOnEvent: callback => { forwardEvent = callback; },
+					removeDelivery,
 				};
 				retainedFrankWorkers.set(id, retainedWorker);
 				result = await handle.runTurn(firstPrompt);

@@ -1150,6 +1150,56 @@ describe("Frank hub send mailbox", () => {
 		expect(IrcBus.global().unreadCount(id)).toBe(0);
 		AgentRegistry.global().unregister(id);
 	});
+	test("delivers to a retained Frank and queues its unsupported steer for inbox", async () => {
+		const registry = AgentRegistry.global();
+		const id = "SteerRetainedProbe";
+		registry.unregister(id);
+		registry.register({ id, displayName: id, kind: "sub", session: null, status: "running" });
+		const remove = registry.registerRetainedDelivery(id, async message => message.body === "legacy" ? { kind: "unsupported" } : { kind: "delivered" });
+		try {
+			const delivered = await IrcBus.global().send({ from: "Main", to: id, body: "live" });
+			expect(delivered.outcome).toBe("injected");
+			expect(IrcBus.global().unreadCount(id)).toBe(0);
+			const unsupported = await IrcBus.global().send({ from: "Main", to: id, body: "legacy" });
+			expect(unsupported.outcome).toBe("queued");
+			const service = createFrankHostToolService({ session: {} as ToolSession, agentId: id, names: ["hub"] });
+			const inbox = await service.handle("hub", { op: "inbox" });
+			expect(inbox.content ?? "").toContain("[hub from Main] legacy");
+			expect(IrcBus.global().unreadCount(id)).toBe(0);
+		} finally {
+			remove();
+		}
+	});
+	test("does not enqueue a retained message when steer acknowledgement times out", async () => {
+		const registry = AgentRegistry.global();
+		const id = "SteerRetainedTimeoutProbe";
+		registry.unregister(id);
+		registry.register({ id, displayName: id, kind: "sub", session: null, status: "running" });
+		const remove = registry.registerRetainedDelivery(id, async () => ({ kind: "failed", error: "Frank steer acknowledgement timed out; delivery status is unknown" }));
+		try {
+			const receipt = await IrcBus.global().send({ from: "Main", to: id, body: "possibly delivered" });
+			expect(receipt).toEqual({ to: id, outcome: "failed", error: "Frank steer acknowledgement timed out; delivery status is unknown" });
+			expect(IrcBus.global().unreadCount(id)).toBe(0);
+		} finally {
+			remove();
+			registry.unregister(id);
+		}
+	});
+	test("does not enqueue a retained message when its delivery handler fails", async () => {
+		const registry = AgentRegistry.global();
+		const id = "SteerRetainedFailureProbe";
+		registry.unregister(id);
+		registry.register({ id, displayName: id, kind: "sub", session: null, status: "running" });
+		const remove = registry.registerRetainedDelivery(id, async () => ({ kind: "failed", error: "boom" }));
+		try {
+			const receipt = await IrcBus.global().send({ from: "Main", to: id, body: "do not queue" });
+			expect(receipt).toEqual({ to: id, outcome: "failed", error: "boom" });
+			expect(IrcBus.global().unreadCount(id)).toBe(0);
+		} finally {
+			remove();
+			registry.unregister(id);
+		}
+	});
 	test("a bridged hub send reports queued next-turn delivery and drains on the lane's next call", async () => {
 		const id = "SteerMailBridgedProbe";
 		const registry = AgentRegistry.global();

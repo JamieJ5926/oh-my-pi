@@ -236,12 +236,21 @@ export class IrcBus {
 		}
 
 		const session = ref.session;
-		if (!session) {
-			if (ref && (ref.status === "running" || ref.status === "idle")) {
+		if (ref.kind === "sub" && (ref.status === "running" || ref.status === "idle")) {
+			const retained = await this.#registry.deliverRetainedMessage(message);
+			if (retained?.kind === "delivered") {
+				if (!opts?.suppressRelay) this.#relayToMainUi(message);
+				return { to: message.to, outcome: "injected" };
+			}
+			if (retained?.kind === "failed") return { to: message.to, outcome: "failed", error: retained.error };
+			if (retained?.kind === "unsupported") {
 				this.#enqueue(message);
 				return { to: message.to, outcome: "queued" };
 			}
-			return { to: message.to, outcome: "failed", error: `Agent "${message.to}" has no live session.` };
+		}
+		if (!session) {
+			this.#enqueue(message);
+			return { to: message.to, outcome: "queued" };
 		}
 
 		try {
