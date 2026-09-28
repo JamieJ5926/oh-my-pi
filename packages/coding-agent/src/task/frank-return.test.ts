@@ -3,10 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { AgentRegistry } from "../registry/agent-registry";
+import { IrcBus } from "../irc/bus";
 import { EventBus } from "../utils/event-bus";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { runFrankSubagent, runSubagentFollowUpTurn } from "./executor";
-import { TASK_SUBAGENT_EVENT_CHANNEL, TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentEventPayload, type SubagentLifecyclePayload } from "./types";
+import { TASK_SUBAGENT_EVENT_CHANNEL, TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentEventPayload } from "./types";
 
 const artifactDirs: string[] = [];
 
@@ -46,7 +47,6 @@ afterEach(async () => {
 	AgentRegistry.resetGlobalForTests();
 });
 
-
 describe("Frank task return integration", () => {
 	test("maps the terminal result, emits events and lifecycle frames, and records outputPath", async () => {
 		const artifactsDir = await mkdtemp(path.join(os.tmpdir(), "frank-return-"));
@@ -58,12 +58,26 @@ describe("Frank task return integration", () => {
 		const eventFrames: SubagentEventPayload[] = [];
 		const lifecycleStatuses: string[] = [];
 		bus.on(TASK_SUBAGENT_EVENT_CHANNEL, payload => {
-			if (typeof payload === "object" && payload !== null && "id" in payload && payload.id === id && "event" in payload && payload.event === event) {
+			if (
+				typeof payload === "object" &&
+				payload !== null &&
+				"id" in payload &&
+				payload.id === id &&
+				"event" in payload &&
+				payload.event === event
+			) {
 				eventFrames.push({ id, event });
 			}
 		});
 		bus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload => {
-			if (typeof payload === "object" && payload !== null && "id" in payload && payload.id === id && "status" in payload && typeof payload.status === "string") {
+			if (
+				typeof payload === "object" &&
+				payload !== null &&
+				"id" in payload &&
+				payload.id === id &&
+				"status" in payload &&
+				typeof payload.status === "string"
+			) {
 				lifecycleStatuses.push(payload.status);
 			}
 		});
@@ -210,7 +224,11 @@ describe("Frank task return integration", () => {
 		expect(result.error).toContain("Frank worker exited with code 7");
 		expect(result.output).toBe("folded answer text");
 		expect(AgentRegistry.global().get(id)?.status).toBe("parked");
-		expect(AgentRegistry.global().listVisibleTo("Main").find(ref => ref.id === id)).toBeUndefined();
+		expect(
+			AgentRegistry.global()
+				.listVisibleTo("Main")
+				.find(ref => ref.id === id),
+		).toBeUndefined();
 	});
 
 	test("registry visibility hides parked completed and failed statuses", async () => {
@@ -219,31 +237,34 @@ describe("Frank task return integration", () => {
 		const failedId = "FrankReturnFailed";
 		const artifactsDir = await mkdtemp(path.join(os.tmpdir(), "frank-return-status-"));
 		artifactDirs.push(artifactsDir);
-		const run = (id: string, exitCode: number) => runFrankSubagent({
-			id,
-			task: "return an answer",
-			assignment: "answer",
-			index: 0,
-			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
-			cwd: process.cwd(),
-			exe: "unused",
-			artifactsDir,
-			endpoint: "http://127.0.0.1:1",
-			model: "test-model",
-			budgets: { maxToolCalls: 3, wallSecs: 5 },
-			text: "request",
-			runWorker: async () => ({
-				terminal: { kind: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 0 },
-				exitCode,
-				text: "answer",
-			}),
-		});
+		const run = (id: string, exitCode: number) =>
+			runFrankSubagent({
+				id,
+				task: "return an answer",
+				assignment: "answer",
+				index: 0,
+				agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+				cwd: process.cwd(),
+				exe: "unused",
+				artifactsDir,
+				endpoint: "http://127.0.0.1:1",
+				model: "test-model",
+				budgets: { maxToolCalls: 3, wallSecs: 5 },
+				text: "request",
+				runWorker: async () => ({
+					terminal: { kind: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 0 },
+					exitCode,
+					text: "answer",
+				}),
+			});
 		await run(completedId, 0);
 		await run(failedId, 9);
 		const visible = AgentRegistry.global().listVisibleTo("Main");
 		expect(AgentRegistry.global().get(completedId)?.status).toBe("parked");
 		expect(AgentRegistry.global().get(failedId)?.status).toBe("parked");
-		expect(AgentRegistry.global().get(completedId)?.history?.outputPath).toBe(path.join(artifactsDir, `${completedId}.md`));
+		expect(AgentRegistry.global().get(completedId)?.history?.outputPath).toBe(
+			path.join(artifactsDir, `${completedId}.md`),
+		);
 		expect(AgentRegistry.global().get(failedId)?.history?.outputPath).toBe(path.join(artifactsDir, `${failedId}.md`));
 		expect(visible.map(ref => ref.id)).not.toContain(completedId);
 		expect(visible.map(ref => ref.id)).not.toContain(failedId);
@@ -253,22 +274,51 @@ describe("Frank task return integration", () => {
 		const id = "FrankReturnRetained";
 		const artifactsDir = await mkdtemp(path.join(os.tmpdir(), "frank-return-retained-"));
 		artifactDirs.push(artifactsDir);
-		const stub = await makeWorkerStub(`printf '%s\\n' "$$" >> "$FRANK_PID_FILE"; turn=1; while IFS= read -r input; do case "$input" in *shutdown*) exit 0;; esac; printf '%s\\n' "$input" >> "$FRANK_TURNS_FILE"; case "$turn" in 1) ${workerEvents("first answer", 1, 1)};; 2) ${workerEvents("second answer", 2, 2)};; *) exit 7;; esac; turn=$((turn + 1)); done`);
+		const stub = await makeWorkerStub(
+			`printf '%s\\n' "$$" >> "$FRANK_PID_FILE"; turn=1; while IFS= read -r input; do case "$input" in *shutdown*) exit 0;; esac; printf '%s\\n' "$input" >> "$FRANK_TURNS_FILE"; case "$turn" in 1) ${workerEvents("first answer", 1, 1)};; 2) ${workerEvents("second answer", 2, 2)};; *) exit 7;; esac; turn=$((turn + 1)); done`,
+		);
 		const pidFile = path.join(stub.cwd, "pids");
 		const turnsFile = path.join(stub.cwd, "turns");
 		process.env.FRANK_PID_FILE = pidFile;
 		process.env.FRANK_TURNS_FILE = turnsFile;
 		try {
-			const first = await runFrankSubagent({ ...workerOptions(id, stub.exe, stub.cwd, artifactsDir), text: "first turn" });
-			const second = await runSubagentFollowUpTurn({ id, agent: workerOptions(id, stub.exe, stub.cwd, artifactsDir).agent, message: "unused", followUpMessage: "second turn", keepAlive: true, artifactsDir });
+			const firstRun = runFrankSubagent({
+				...workerOptions(id, stub.exe, stub.cwd, artifactsDir),
+				text: "first turn",
+				keepAlive: undefined,
+			});
+			expect(AgentRegistry.global().get(id)?.status).toBe("running");
+			const duringRun = await IrcBus.global().send({ from: "Main", to: id, body: "check running delivery" });
+			expect(duringRun.outcome).toBe("queued");
+			const first = await firstRun;
+			const second = await runSubagentFollowUpTurn({
+				id,
+				agent: workerOptions(id, stub.exe, stub.cwd, artifactsDir).agent,
+				message: "unused",
+				followUpMessage: "second turn",
+				keepAlive: true,
+				artifactsDir,
+			});
 			expect(first.output).toBe("first answer");
 			expect(second.output).toBe("second answer");
 			expect(AgentRegistry.global().get(id)?.status).toBe("idle");
 			expect(await readFile(turnsFile, "utf8")).toContain('"turn_id":2,"text":"second turn"');
 			const controller = new AbortController();
 			controller.abort(new Error("close retained worker"));
-			const aborted = await runSubagentFollowUpTurn({ id, agent: workerOptions(id, stub.exe, stub.cwd, artifactsDir).agent, message: "unused", followUpMessage: "aborted turn", keepAlive: true, signal: controller.signal, artifactsDir });
+			const aborted = await runSubagentFollowUpTurn({
+				id,
+				agent: workerOptions(id, stub.exe, stub.cwd, artifactsDir).agent,
+				message: "unused",
+				followUpMessage: "aborted turn",
+				keepAlive: true,
+				signal: controller.signal,
+				artifactsDir,
+			});
 			expect(aborted.aborted).toBe(true);
+			expect(AgentRegistry.global().get(id)?.status).toBe("parked");
+			const afterClose = await IrcBus.global().send({ from: "Main", to: id, body: "check closed worker" });
+			expect(afterClose.outcome).toBe("failed");
+			expect(afterClose.error).toContain(`Agent "${id}"`);
 			const firstPid = Number((await readFile(pidFile, "utf8")).trim().split(/\r?\n/)[0]);
 			let processIsClosed = false;
 			try {
@@ -288,17 +338,33 @@ describe("Frank task return integration", () => {
 		const id = "FrankReturnAbortFresh";
 		const artifactsDir = await mkdtemp(path.join(os.tmpdir(), "frank-return-abort-"));
 		artifactDirs.push(artifactsDir);
-		const stub = await makeWorkerStub(`printf '%s\\n' "$$" >> "$FRANK_PID_FILE"; IFS= read -r input; case "$input" in *shutdown*) exit 0;; esac; case "$input" in *fresh\\ turn*) ${workerEvents("fresh answer", 1, 1)};; *) ${workerEvents("first answer", 1, 1)};; esac; while IFS= read -r input; do case "$input" in *shutdown*) exit 0;; esac; done`);
+		const stub = await makeWorkerStub(
+			`printf '%s\\n' "$$" >> "$FRANK_PID_FILE"; IFS= read -r input; case "$input" in *shutdown*) exit 0;; esac; case "$input" in *fresh\\ turn*) ${workerEvents("fresh answer", 1, 1)};; *) ${workerEvents("first answer", 1, 1)};; esac; while IFS= read -r input; do case "$input" in *shutdown*) exit 0;; esac; done`,
+		);
 		const pidFile = path.join(stub.cwd, "pids");
 		process.env.FRANK_PID_FILE = pidFile;
 		try {
-			const initial = await runFrankSubagent({ ...workerOptions(id, stub.exe, stub.cwd, artifactsDir), text: "first turn" });
+			const initial = await runFrankSubagent({
+				...workerOptions(id, stub.exe, stub.cwd, artifactsDir),
+				text: "first turn",
+			});
 			expect(initial.output).toBe("first answer");
 			const controller = new AbortController();
 			controller.abort(new Error("cancel follow-up"));
-			const cancelled = await runSubagentFollowUpTurn({ id, agent: workerOptions(id, stub.exe, stub.cwd, artifactsDir).agent, message: "unused", followUpMessage: "cancelled turn", keepAlive: true, signal: controller.signal, artifactsDir });
+			const cancelled = await runSubagentFollowUpTurn({
+				id,
+				agent: workerOptions(id, stub.exe, stub.cwd, artifactsDir).agent,
+				message: "unused",
+				followUpMessage: "cancelled turn",
+				keepAlive: true,
+				signal: controller.signal,
+				artifactsDir,
+			});
 			expect(cancelled.aborted).toBe(true);
-			const fresh = await runFrankSubagent({ ...workerOptions(id, stub.exe, stub.cwd, artifactsDir), text: "fresh turn" });
+			const fresh = await runFrankSubagent({
+				...workerOptions(id, stub.exe, stub.cwd, artifactsDir),
+				text: "fresh turn",
+			});
 			expect(fresh.output).toBe("fresh answer");
 			expect((await readFile(pidFile, "utf8")).trim().split(/\r?\n/)).toHaveLength(2);
 		} finally {
