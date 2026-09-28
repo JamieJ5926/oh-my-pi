@@ -39,7 +39,8 @@ function absoluteToolPath(path: string, workerCwd?: string): string {
 function translateMutatingArgs(name: string, args: unknown, workerCwd?: string): unknown {
 	if (typeof args !== "object" || args === null) return args;
 	if (name === "bash" || name === "run") {
-		if (!("argv" in args) || !Array.isArray(args.argv) || !args.argv.every(part => typeof part === "string")) return args;
+		if (!("argv" in args) || !Array.isArray(args.argv) || !args.argv.every(part => typeof part === "string"))
+			return args;
 		const argv = args.argv;
 		const cwd = "cwd" in args && typeof args.cwd === "string" ? absoluteToolPath(args.cwd, workerCwd) : workerCwd;
 		const timeout = "timeout_ms" in args && typeof args.timeout_ms === "number" ? args.timeout_ms / 1000 : undefined;
@@ -307,7 +308,8 @@ export function createFrankHostToolService(options: {
 			job =>
 				dispatched.has(job.id) &&
 				job.status !== "running" &&
-				(deliveredBodies.has(job.id) || (!manager.isJobResultConsumed(job.id) && (job.resultText !== undefined || job.errorText !== undefined))),
+				(deliveredBodies.has(job.id) ||
+					(!manager.isJobResultConsumed(job.id) && (job.resultText !== undefined || job.errorText !== undefined))),
 		);
 	};
 
@@ -335,7 +337,10 @@ export function createFrankHostToolService(options: {
 			.filter(job => job.status !== "running")
 			.map(job => ({
 				jobId: job.id,
-				result: deliveredBodies.get(job.id)?.job === job ? deliveredBodies.get(job.id)?.text ?? job.resultText ?? job.errorText ?? "" : job.resultText ?? job.errorText ?? "",
+				result:
+					deliveredBodies.get(job.id)?.job === job
+						? (deliveredBodies.get(job.id)?.text ?? job.resultText ?? job.errorText ?? "")
+						: (job.resultText ?? job.errorText ?? ""),
 				job,
 				durationMs: Math.max(0, Date.now() - job.startTime),
 				epoch: 0,
@@ -347,9 +352,9 @@ export function createFrankHostToolService(options: {
 				typeof message.content === "string"
 					? message.content
 					: message.content
-						.filter(part => part.type === "text")
-						.map(part => part.text)
-						.join(""),
+							.filter(part => part.type === "text")
+							.map(part => part.text)
+							.join(""),
 			);
 		}
 		const oversized = entries.filter(entry => entry.result.length > ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS);
@@ -357,7 +362,9 @@ export function createFrankHostToolService(options: {
 			if (deliveredBodies.get(entry.jobId)?.job === entry.job) continue;
 			const artifact = await options.session.allocateOutputArtifact?.("async");
 			if (!artifact?.path || !artifact.id) {
-				parts.push(`Body over the inline budget, left intact on the job row: ${entry.jobId}. Re-read with hub op jobs.`);
+				parts.push(
+					`Body over the inline budget, left intact on the job row: ${entry.jobId}. Re-read with hub op jobs.`,
+				);
 				continue;
 			}
 			await writeArtifact(artifact.path, entry.result);
@@ -500,7 +507,8 @@ export function createFrankHostToolService(options: {
 				// nest a Frank worker's children under the host and send its messages
 				// as the host, so build both for the worker and wrap with the host's hooks.
 				const wrapWithHooks = options.session.wrapWithHooks;
-				const buildForWorker = name === "hub" || ((name === "task" || name === "bash") && wrapWithHooks !== undefined);
+				const buildForWorker =
+					name === "hub" || ((name === "task" || name === "bash") && wrapWithHooks !== undefined);
 				const built = buildForWorker ? await factory(bridgedSession) : undefined;
 				const workerTool = built ? (wrapWithHooks ? wrapWithHooks(built) : built) : undefined;
 				const tool = editReplaceTool ?? workerTool ?? registeredTool ?? (await factory(bridgedSession));

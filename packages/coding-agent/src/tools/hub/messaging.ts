@@ -478,7 +478,7 @@ export async function executeSend(
 		} else {
 			const queued = delivered.filter(receipt => receipt.outcome === "queued").length;
 			if (delivered.length > queued) lines.push(`Delivered to ${delivered.length - queued} peer(s):`);
-			if (queued > 0) lines.push(`Queued for ${queued} remote peer(s), not yet delivered:`);
+			if (queued > 0) lines.push(`Queued for ${queued} remote peer(s), delivered on next turn:`);
 		}
 		for (const receipt of receipts) {
 			lines.push(

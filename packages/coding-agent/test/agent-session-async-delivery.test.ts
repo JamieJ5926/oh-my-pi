@@ -148,7 +148,9 @@ describe("AgentSession owner-routed async delivery", () => {
 
 			expect(manager.getJob("lane-job")?.ownerId).toBe(laneId);
 			expect(ownerMock.calls.some(call => JSON.stringify(call.context.messages).includes("LANE RESULT"))).toBe(true);
-			expect(otherMock.calls.some(call => JSON.stringify(call.context.messages).includes("LANE RESULT"))).toBe(false);
+			expect(otherMock.calls.some(call => JSON.stringify(call.context.messages).includes("LANE RESULT"))).toBe(
+				false,
+			);
 		} finally {
 			await otherSession.dispose();
 		}

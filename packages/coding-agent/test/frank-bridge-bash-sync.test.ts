@@ -25,13 +25,27 @@ describe("Frank bridge synchronous bash", () => {
 					getClientBridge: () => undefined,
 					settings: {
 						get(key: string) {
-							if (key === "async.enabled" || key === "bash.autoBackground.enabled" || key === "bashInterceptor.enabled" || key === "astGrep.enabled" || key === "astEdit.enabled" || key === "grep.enabled" || key === "glob.enabled") return false;
+							if (
+								key === "async.enabled" ||
+								key === "bash.autoBackground.enabled" ||
+								key === "bashInterceptor.enabled" ||
+								key === "astGrep.enabled" ||
+								key === "astEdit.enabled" ||
+								key === "grep.enabled" ||
+								key === "glob.enabled"
+							)
+								return false;
 							if (key === "bash.autoBackground.thresholdMs") return 60_000;
 							return undefined;
 						},
 						getBashInterceptorRules: () => [],
 					},
-					toolRegistry: new Map([["bash", { execute: async () => ({ content: [{ type: "text" as const, text: "unused host bash" }] }) }]]),
+					toolRegistry: new Map([
+						[
+							"bash",
+							{ execute: async () => ({ content: [{ type: "text" as const, text: "unused host bash" }] }) },
+						],
+					]),
 					wrapWithHooks: (tool: { name: string; execute: unknown }) => tool,
 				} as unknown as ToolSession,
 				agentId: "FrankWorker",
@@ -41,7 +55,6 @@ describe("Frank bridge synchronous bash", () => {
 			const command = `printf 'FRANK_SYNC_OUTPUT\\n' > ${JSON.stringify(outputPath)}; cat ${JSON.stringify(outputPath)}`;
 
 			const result = await service.handle("bash", { argv: ["bash", "-c", command] });
-
 
 			if (!result.ok) throw new Error(result.error);
 			expect(result.ok).toBe(true);

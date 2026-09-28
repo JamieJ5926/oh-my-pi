@@ -13,25 +13,32 @@ describe("Frank bridge async bash ownership", () => {
 			parentResults.push(text);
 		});
 		const originalBash = BUILTIN_TOOLS.bash;
-		BUILTIN_TOOLS.bash = async workerSession => ({
-			name: "bash",
-			label: "Bash",
-			description: "",
-			parameters: {},
-			execute: async () => {
-				const ownerId = workerSession.getAgentId?.() ?? undefined;
-				manager.register("bash", "Frank worker", () => gate.promise, { id: "bridge-owner-job", agentId: ownerId, ownerId });
-				return { content: [{ type: "text" as const, text: "started" }], details: { async: { state: "running", jobId: "bridge-owner-job" } } };
-			},
-		} as never);
+		BUILTIN_TOOLS.bash = async workerSession =>
+			({
+				name: "bash",
+				label: "Bash",
+				description: "",
+				parameters: {},
+				execute: async () => {
+					const ownerId = workerSession.getAgentId?.() ?? undefined;
+					manager.register("bash", "Frank worker", () => gate.promise, {
+						id: "bridge-owner-job",
+						agentId: ownerId,
+						ownerId,
+					});
+					return {
+						content: [{ type: "text" as const, text: "started" }],
+						details: { async: { state: "running", jobId: "bridge-owner-job" } },
+					};
+				},
+			}) as never;
 		try {
 			const hostSession = {
 				asyncJobManager: manager,
 				getAgentId: () => "ParentSession",
-				toolRegistry: new Map([[
-					"bash",
-					{ execute: async () => ({ content: [{ type: "text" as const, text: "parent tool" }] }) },
-				]]),
+				toolRegistry: new Map([
+					["bash", { execute: async () => ({ content: [{ type: "text" as const, text: "parent tool" }] }) }],
+				]),
 				wrapWithHooks: (tool: { name: string; execute: unknown }) => tool,
 			} as unknown as ToolSession;
 			const service = createFrankHostToolService({

@@ -123,6 +123,20 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("2-Sub")?.status).toBe("parked");
 		expect(stub.disposeCalls()).toBe(1);
 	});
+	it("does not park a running bridged worker when a stale TTL callback races", async () => {
+		vi.useFakeTimers();
+		const stub = makeSessionStub();
+		registerIdleSub("FrankLaneRace", stub.session);
+		lifecycle.adopt("FrankLaneRace", { idleTtlMs: TTL });
+
+		const parking = lifecycle.park("FrankLaneRace");
+		registry.setStatus("FrankLaneRace", "running");
+		await parking;
+
+		expect(registry.get("FrankLaneRace")?.status).toBe("running");
+		expect(registry.get("FrankLaneRace")?.session).toBe(stub.session);
+		expect(stub.disposeCalls()).toBe(0);
+	});
 
 	it("ensureLive revives a parked agent through its reviver and flips it back to idle", async () => {
 		const revived = makeSessionStub();
