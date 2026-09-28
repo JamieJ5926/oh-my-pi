@@ -328,19 +328,40 @@ test("edit bridge without a replace-tool accessor still applies through the regi
 	expect(executed).toEqual([{ path: "/tmp/frank-worker/notes.txt", old_string: "before", new_string: "after" }]);
 });
 
-	test("bash background job body is available through hub inbox", async () => {
+	test("bash bridge registers a background job to the Frank worker owner and drains its delivery", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
-		manager.register("bash", "Host", async () => "BASH_JOB_BODY", { id: "bash-job", agentId: "Host", ownerId: "Host" });
-		await manager.getJob("bash-job")?.promise;
-		const sessionWithRegistry = {
-			asyncJobManager: manager,
-			getAgentId: () => "Host",
-			toolRegistry: new Map([["bash", { execute: async () => ({ content: [{ type: "text" as const, text: "started" }], details: { async: { state: "running", jobId: "bash-job" } } }) }], ["hub", { execute: async () => ({ content: [{ type: "text" as const, text: "inbox" }] }) }]]),
-		} as unknown as ToolSession;
-		const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "frank-test", names: ["bash", "hub"] });
-		await service.handle("bash", { argv: ["sleep", "1"] });
-		const result = await service.handle("hub", { op: "inbox" });
-		expect(result.content).toContain("BASH_JOB_BODY");
+		const gate = Promise.withResolvers<string>();
+		const hostRegistry = { execute: async () => ({ content: [{ type: "text" as const, text: "parent" }], details: { async: { state: "running", jobId: "bridge-bash" } } }) };
+		const originalBash = BUILTIN_TOOLS.bash;
+		BUILTIN_TOOLS.bash = async workerSession => ({
+			name: "bash",
+			label: "Bash",
+			description: "",
+			parameters: {},
+			execute: async () => {
+				const ownerId = workerSession.getAgentId?.() ?? undefined;
+				manager.register("bash", "Frank worker", () => gate.promise, { id: "bridge-bash", agentId: ownerId, ownerId });
+				return { content: [{ type: "text" as const, text: "started" }], details: { async: { state: "running", jobId: "bridge-bash" } } };
+			},
+		} as never);
+		try {
+			const sessionWithRegistry = {
+				asyncJobManager: manager,
+				getAgentId: () => "Parent",
+				toolRegistry: new Map([["bash", hostRegistry]]),
+				wrapWithHooks: (tool: { name: string; execute: unknown }) => tool,
+			} as unknown as ToolSession;
+			const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "FrankWorker", names: ["bash", "hub"] });
+			await service.handle("bash", { argv: ["echo", "worker"] });
+			expect(manager.getJob("bridge-bash")?.ownerId).toBe("FrankWorker");
+			gate.resolve("FRANK_DELIVERY");
+			await manager.waitForOwnerJobs("FrankWorker");
+			const inbox = await service.handle("hub", { op: "inbox" });
+			expect(inbox.content).toContain("FRANK_DELIVERY");
+			expect(manager.getJob("bridge-bash")?.ownerId).not.toBe("Parent");
+		} finally {
+			BUILTIN_TOOLS.bash = originalBash;
+		}
 	});
 	test("bash bridge appends a drain note only for a running background result", async () => {
 		const registeredTool = {

@@ -195,6 +195,10 @@ export function createFrankHostToolService(options: {
 	};
 	const manager = options.session.asyncJobManager;
 	const hostOwnerId = options.session.getAgentId?.() ?? undefined;
+	const deliveredBodies = new Map<string, string>();
+	const unregisterDeliverySink = manager?.registerDeliverySink(options.agentId, (jobId, text) => {
+		deliveredBodies.set(jobId, text);
+	});
 	const isMatchingOwner = (job: AsyncJob): boolean =>
 		job.ownerId === options.agentId || (hostOwnerId !== undefined && job.ownerId === hostOwnerId);
 	/** Child ids this bridge dispatched, so an `inbox` drain cannot read a sibling's child. */
@@ -209,6 +213,8 @@ export function createFrankHostToolService(options: {
 		"abort",
 		() => {
 			closed = true;
+			unregisterDeliverySink?.();
+			deliveredBodies.clear();
 		},
 		{ once: true },
 	);
@@ -246,8 +252,7 @@ export function createFrankHostToolService(options: {
 			job =>
 				dispatched.has(job.id) &&
 				job.status !== "running" &&
-				!manager.isJobResultConsumed(job.id) &&
-				(job.resultText !== undefined || job.errorText !== undefined),
+				(deliveredBodies.has(job.id) || (!manager.isJobResultConsumed(job.id) && (job.resultText !== undefined || job.errorText !== undefined))),
 		);
 	};
 
@@ -275,7 +280,7 @@ export function createFrankHostToolService(options: {
 			.filter(job => job.status !== "running")
 			.map(job => ({
 				jobId: job.id,
-				result: job.resultText ?? job.errorText ?? "",
+				result: deliveredBodies.get(job.id) ?? job.resultText ?? job.errorText ?? "",
 				job,
 				durationMs: Math.max(0, Date.now() - job.startTime),
 				epoch: 0,
@@ -305,6 +310,7 @@ export function createFrankHostToolService(options: {
 		manager?.consumeJobResults(
 			entries.filter(entry => entry.result.length <= ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS).map(entry => entry.jobId),
 		);
+		for (const entry of entries) deliveredBodies.delete(entry.jobId);
 		return parts.join("\n\n");
 	};
 
@@ -366,7 +372,7 @@ export function createFrankHostToolService(options: {
 				// nest a Frank worker's children under the host and send its messages
 				// as the host, so build both for the worker and wrap with the host's hooks.
 				const wrapWithHooks = options.session.wrapWithHooks;
-				const buildForWorker = name === "hub" || (name === "task" && wrapWithHooks !== undefined);
+				const buildForWorker = name === "hub" || name === "bash" || name === "run" || (name === "task" && wrapWithHooks !== undefined);
 				const built = buildForWorker ? await factory(bridgedSession) : undefined;
 				const workerTool = built ? (wrapWithHooks ? wrapWithHooks(built) : built) : undefined;
 				const tool = editReplaceTool ?? workerTool ?? registeredTool ?? (await factory(bridgedSession));
