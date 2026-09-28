@@ -35,49 +35,111 @@ describe("Frank host tool service", () => {
 		expect(result.error).toBe("host tool is not enabled: hub");
 	});
 
-	test.each(["write", "edit", "bash"] as const)("unregistered %s is refused without reaching the factory", async name => {
-		const service = createFrankHostToolService({
-			session: { toolRegistry: new Map() } as unknown as ToolSession,
-			agentId: "frank-test",
-			names: ["write", "edit", "bash"],
-		});
-		const result = await service.handle(name, { path: "x" });
+	test.each(["write", "edit", "bash"] as const)(
+		"unregistered %s is refused without reaching the factory",
+		async name => {
+			const service = createFrankHostToolService({
+				session: { toolRegistry: new Map() } as unknown as ToolSession,
+				agentId: "frank-test",
+				names: ["write", "edit", "bash"],
+			});
+			const result = await service.handle(name, { path: "x" });
 
-		expect(result).toEqual({ ok: false, error: `host tool is not registered in the host session: ${name}` });
-	});
+			expect(result).toEqual({ ok: false, error: `host tool is not registered in the host session: ${name}` });
+		},
+	);
 
 	test("coordinator work is blocked until dispatch unless the brief declares single-slice", async () => {
 		let invoked = 0;
 		const sessionWithRegistry = {
-			toolRegistry: new Map([["read", { execute: async () => { invoked++; return { content: [{ type: "text", text: "read" }] }; } }]]),
+			toolRegistry: new Map([
+				[
+					"read",
+					{
+						execute: async () => {
+							invoked++;
+							return { content: [{ type: "text", text: "read" }] };
+						},
+					},
+				],
+			]),
 		} as unknown as ToolSession;
-		const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "pot", names: ["read"], workerLane: { agent: "frank-poteto-agent", prompt: "Coordinate this work" } });
-		expect(await service.handle("read", {})).toEqual({ ok: false, error: "Delegation required: dispatch a task before calling `read`, or declare `single-slice: <reason>` in the worker brief." });
+		const service = createFrankHostToolService({
+			session: sessionWithRegistry,
+			agentId: "pot",
+			names: ["read"],
+			workerLane: { agent: "frank-poteto-agent", prompt: "Coordinate this work" },
+		});
+		expect(await service.handle("read", {})).toEqual({
+			ok: false,
+			error: "Delegation required: dispatch a task before calling `read`, or declare `single-slice: <reason>` in the worker brief.",
+		});
 		expect(invoked).toBe(0);
-		const singleSlice = createFrankHostToolService({ session: sessionWithRegistry, agentId: "solo", names: ["read"], workerLane: { agent: "frank-poteto-agent", prompt: "single-slice: this is indivisible" } });
+		const singleSlice = createFrankHostToolService({
+			session: sessionWithRegistry,
+			agentId: "solo",
+			names: ["read"],
+			workerLane: { agent: "frank-poteto-agent", prompt: "single-slice: this is indivisible" },
+		});
 		expect(await singleSlice.handle("read", {})).toEqual({ ok: true, content: "read" });
 	});
 	test("coordinator first bash, write, and edit are blocked before dispatch", async () => {
-		const registry = new Map(["bash", "write", "edit"].map(name => [name, { execute: async () => ({ content: [{ type: "text" as const, text: "unexpected" }] }) }]));
-		const service = createFrankHostToolService({ session: { toolRegistry: registry } as unknown as ToolSession, agentId: "pot", names: ["bash", "write", "edit"], workerLane: { agent: "frank-poteto-agent", prompt: "Coordinate work" } });
+		const registry = new Map(
+			["bash", "write", "edit"].map(name => [
+				name,
+				{ execute: async () => ({ content: [{ type: "text" as const, text: "unexpected" }] }) },
+			]),
+		);
+		const service = createFrankHostToolService({
+			session: { toolRegistry: registry } as unknown as ToolSession,
+			agentId: "pot",
+			names: ["bash", "write", "edit"],
+			workerLane: { agent: "frank-poteto-agent", prompt: "Coordinate work" },
+		});
 		for (const name of ["bash", "write", "edit"]) {
-			expect(await service.handle(name, {})).toEqual({ ok: false, error: `Delegation required: dispatch a task before calling \`${name}\`, or declare \`single-slice: <reason>\` in the worker brief.` });
+			expect(await service.handle(name, {})).toEqual({
+				ok: false,
+				error: `Delegation required: dispatch a task before calling \`${name}\`, or declare \`single-slice: <reason>\` in the worker brief.`,
+			});
 		}
 	});
 
 	test("coordinator child task without delegable declaration is blocked", async () => {
 		const original = BUILTIN_TOOLS.task;
-		BUILTIN_TOOLS.task = async () => ({ name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text" as const, text: "unexpected" }] }) } as never);
+		BUILTIN_TOOLS.task = async () =>
+			({
+				name: "task",
+				label: "Task",
+				description: "",
+				parameters: {},
+				execute: async () => ({ content: [{ type: "text" as const, text: "unexpected" }] }),
+			}) as never;
 		try {
-			const service = createFrankHostToolService({ session: {} as ToolSession, agentId: "pot", workerLane: { agent: "frank-poteto-agent-deep", prompt: "Coordinate" } });
-			expect(await service.handle("task", { tasks: [{ agent: "frank-poteto-agent", task: "Implement without delegation metadata" }] })).toEqual({ ok: false, error: "Delegation required: coordinator task item 1 must each declare their own `delegable: <scope>` or `single-slice: <reason>` in its task text." });
+			const service = createFrankHostToolService({
+				session: {} as ToolSession,
+				agentId: "pot",
+				workerLane: { agent: "frank-poteto-agent-deep", prompt: "Coordinate" },
+			});
+			expect(
+				await service.handle("task", {
+					tasks: [{ agent: "frank-poteto-agent", task: "Implement without delegation metadata" }],
+				}),
+			).toEqual({
+				ok: false,
+				error: "Delegation required: coordinator task item 1 must each declare their own `delegable: <scope>` or `single-slice: <reason>` in its task text.",
+			});
 		} finally {
 			BUILTIN_TOOLS.task = original;
 		}
 	});
 
 	test("Frank explorer is not subject to coordinator dispatch guard", async () => {
-		const service = createFrankHostToolService({ session: {} as ToolSession, agentId: "explorer", names: ["read"], workerLane: { agent: "frank-explorer", prompt: "Inspect" } });
+		const service = createFrankHostToolService({
+			session: {} as ToolSession,
+			agentId: "explorer",
+			names: ["read"],
+			workerLane: { agent: "frank-explorer", prompt: "Inspect" },
+		});
 		const result = await service.handle("read", {});
 		expect(result.ok).toBe(false);
 		expect(result.error).not.toContain("Delegation required");
@@ -85,10 +147,28 @@ describe("Frank host tool service", () => {
 
 	test("structured-only delegable scope is rejected until carried in child task text", async () => {
 		const original = BUILTIN_TOOLS.task;
-		BUILTIN_TOOLS.task = async () => ({ name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text" as const, text: "spawned" }] }) } as never);
+		BUILTIN_TOOLS.task = async () =>
+			({
+				name: "task",
+				label: "Task",
+				description: "",
+				parameters: {},
+				execute: async () => ({ content: [{ type: "text" as const, text: "spawned" }] }),
+			}) as never;
 		try {
-			const service = createFrankHostToolService({ session: {} as ToolSession, agentId: "pot", workerLane: { agent: "frank-poteto-agent", prompt: "Coordinate" } });
-			expect(await service.handle("task", { tasks: [{ agent: "frank-poteto-agent", task: "Inspect files", delegable: "inspect source only" }] })).toEqual({ ok: false, error: "Delegation required: coordinator task item 1 must each declare their own `delegable: <scope>` or `single-slice: <reason>` in its task text." });
+			const service = createFrankHostToolService({
+				session: {} as ToolSession,
+				agentId: "pot",
+				workerLane: { agent: "frank-poteto-agent", prompt: "Coordinate" },
+			});
+			expect(
+				await service.handle("task", {
+					tasks: [{ agent: "frank-poteto-agent", task: "Inspect files", delegable: "inspect source only" }],
+				}),
+			).toEqual({
+				ok: false,
+				error: "Delegation required: coordinator task item 1 must each declare their own `delegable: <scope>` or `single-slice: <reason>` in its task text.",
+			});
 		} finally {
 			BUILTIN_TOOLS.task = original;
 		}
@@ -110,22 +190,69 @@ describe("Frank host tool service", () => {
 	test("coordinator batch requires each coordinator item to declare its own delegable scope", async () => {
 		let invocations = 0;
 		const original = BUILTIN_TOOLS.task;
-		BUILTIN_TOOLS.task = async () => ({ name: "task", label: "Task", description: "", parameters: {}, execute: async () => { invocations++; return { content: [{ type: "text", text: "spawned" }] }; } } as never);
+		BUILTIN_TOOLS.task = async () =>
+			({
+				name: "task",
+				label: "Task",
+				description: "",
+				parameters: {},
+				execute: async () => {
+					invocations++;
+					return { content: [{ type: "text", text: "spawned" }] };
+				},
+			}) as never;
 		try {
-			const service = createFrankHostToolService({ session: {} as ToolSession, agentId: "pot", workerLane: { agent: "frank-poteto-agent-deep", prompt: "Coordinate" } });
-			const rejected = await service.handle("task", { context: "delegable: shared scope", tasks: [{ agent: "frank-poteto-agent", task: "Implement A\ndelegable: source inspection" }, { agent: "frank-poteto-agent-deep", task: "Implement B" }] });
-			expect(rejected).toEqual({ ok: false, error: "Delegation required: coordinator task item 2 must each declare their own `delegable: <scope>` or `single-slice: <reason>` in its task text." });
+			const service = createFrankHostToolService({
+				session: {} as ToolSession,
+				agentId: "pot",
+				workerLane: { agent: "frank-poteto-agent-deep", prompt: "Coordinate" },
+			});
+			const rejected = await service.handle("task", {
+				context: "delegable: shared scope",
+				tasks: [
+					{ agent: "frank-poteto-agent", task: "Implement A\ndelegable: source inspection" },
+					{ agent: "frank-poteto-agent-deep", task: "Implement B" },
+				],
+			});
+			expect(rejected).toEqual({
+				ok: false,
+				error: "Delegation required: coordinator task item 2 must each declare their own `delegable: <scope>` or `single-slice: <reason>` in its task text.",
+			});
 			expect(invocations).toBe(0);
-			expect(await service.handle("task", { context: "Shared scope", tasks: [{ agent: "frank-poteto-agent", task: "single-slice: indivisible task" }] })).toEqual({ ok: true, content: "spawned" });
+			expect(
+				await service.handle("task", {
+					context: "Shared scope",
+					tasks: [{ agent: "frank-poteto-agent", task: "single-slice: indivisible task" }],
+				}),
+			).toEqual({ ok: true, content: "spawned" });
 			expect(invocations).toBe(1);
-			const accepted = await service.handle("task", { context: "Shared scope", tasks: [{ agent: "frank-poteto-agent", task: "Implement A\ndelegable: source inspection" }, { agent: "frank-poteto-agent-deep", task: "Implement B\ndelegable: test review" }] });
+			const accepted = await service.handle("task", {
+				context: "Shared scope",
+				tasks: [
+					{ agent: "frank-poteto-agent", task: "Implement A\ndelegable: source inspection" },
+					{ agent: "frank-poteto-agent-deep", task: "Implement B\ndelegable: test review" },
+				],
+			});
 			expect(accepted).toEqual({ ok: true, content: "spawned" });
 			expect(invocations).toBe(2);
 			const malformed = await service.handle("task", { task: "missing a batch" });
-			expect(malformed).toEqual({ ok: false, error: "Delegation required: coordinator task call must contain a non-empty tasks batch." });
+			expect(malformed).toEqual({
+				ok: false,
+				error: "Delegation required: coordinator task call must contain a non-empty tasks batch.",
+			});
 			const registeredRead = { execute: async () => ({ content: [{ type: "text", text: "read" }] }) };
-			const unlockedService = createFrankHostToolService({ session: { toolRegistry: new Map([["read", registeredRead]]) } as unknown as ToolSession, agentId: "pot", names: ["task", "read"], workerLane: { agent: "frank-poteto-agent-deep", prompt: "Coordinate" } });
-			expect(await unlockedService.handle("task", { context: "Shared", tasks: [{ agent: "implementer", task: "child" }] })).toEqual({ ok: true, content: "spawned" });
+			const unlockedService = createFrankHostToolService({
+				session: { toolRegistry: new Map([["read", registeredRead]]) } as unknown as ToolSession,
+				agentId: "pot",
+				names: ["task", "read"],
+				workerLane: { agent: "frank-poteto-agent-deep", prompt: "Coordinate" },
+			});
+			expect(
+				await unlockedService.handle("task", {
+					context: "Shared",
+					tasks: [{ agent: "implementer", task: "child" }],
+				}),
+			).toEqual({ ok: true, content: "spawned" });
 			expect(await unlockedService.handle("read", {})).toEqual({ ok: true, content: "read" });
 		} finally {
 			BUILTIN_TOOLS.task = original;
@@ -136,17 +263,18 @@ describe("Frank host tool service", () => {
 		let capturedArgs: unknown;
 		let invocations = 0;
 		const original = BUILTIN_TOOLS.task;
-		BUILTIN_TOOLS.task = async () => ({
-			name: "task",
-			label: "Task",
-			description: "",
-			parameters: {},
-			execute: async (_toolCallId: string, args: unknown) => {
-				invocations++;
-				capturedArgs = args;
-				return { content: [{ type: "text", text: "spawned" }] };
-			},
-		} as never);
+		BUILTIN_TOOLS.task = async () =>
+			({
+				name: "task",
+				label: "Task",
+				description: "",
+				parameters: {},
+				execute: async (_toolCallId: string, args: unknown) => {
+					invocations++;
+					capturedArgs = args;
+					return { content: [{ type: "text", text: "spawned" }] };
+				},
+			}) as never;
 		const args = {
 			context: "delegable: implementer slices",
 			tasks: Array.from({ length: 10 }, (_, index) => ({
@@ -198,11 +326,26 @@ describe("Frank host tool service", () => {
 		let built = false;
 		BUILTIN_TOOLS.task = async () => {
 			built = true;
-			return { name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text", text: "spawned" }] }) } as never;
+			return {
+				name: "task",
+				label: "Task",
+				description: "",
+				parameters: {},
+				execute: async () => ({ content: [{ type: "text", text: "spawned" }] }),
+			} as never;
 		};
 		try {
-			const hostSession = { getAgentId: () => "Host", getToolContext: () => undefined, getSessionSpawns: () => "*" } as unknown as ToolSession;
-			const service = createFrankHostToolService({ session: hostSession, agentId: "Leaf", names: ["hub", "write", "edit", "bash"], spawns: "" });
+			const hostSession = {
+				getAgentId: () => "Host",
+				getToolContext: () => undefined,
+				getSessionSpawns: () => "*",
+			} as unknown as ToolSession;
+			const service = createFrankHostToolService({
+				session: hostSession,
+				agentId: "Leaf",
+				names: ["hub", "write", "edit", "bash"],
+				spawns: "",
+			});
 			const result = await service.handle("task", { task: "child" });
 			expect(result.ok).toBe(false);
 			expect(built).toBe(false);
@@ -216,11 +359,26 @@ describe("Frank host tool service", () => {
 		let seen: string | null | undefined;
 		BUILTIN_TOOLS.task = async session => {
 			seen = session.getSessionSpawns?.();
-			return { name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text", text: "spawned" }] }) } as never;
+			return {
+				name: "task",
+				label: "Task",
+				description: "",
+				parameters: {},
+				execute: async () => ({ content: [{ type: "text", text: "spawned" }] }),
+			} as never;
 		};
 		try {
-			const hostSession = { getAgentId: () => "Host", getToolContext: () => undefined, getSessionSpawns: () => "*" } as unknown as ToolSession;
-			const service = createFrankHostToolService({ session: hostSession, agentId: "Pot", names: ["task"], spawns: "frank-explorer,frank-implementer" });
+			const hostSession = {
+				getAgentId: () => "Host",
+				getToolContext: () => undefined,
+				getSessionSpawns: () => "*",
+			} as unknown as ToolSession;
+			const service = createFrankHostToolService({
+				session: hostSession,
+				agentId: "Pot",
+				names: ["task"],
+				spawns: "frank-explorer,frank-implementer",
+			});
 			await service.handle("task", { task: "child" });
 			expect(seen).toBe("frank-explorer,frank-implementer");
 		} finally {
@@ -234,7 +392,9 @@ describe("Frank host tool service", () => {
 		const hostSession = {
 			getAgentId: () => "Host",
 			getToolContext: () => undefined,
-			toolRegistry: new Map([["task", { execute: async () => ({ content: [{ type: "text", text: "host-registry" }] }) }]]),
+			toolRegistry: new Map([
+				["task", { execute: async () => ({ content: [{ type: "text", text: "host-registry" }] }) }],
+			]),
 			wrapWithHooks: (tool: { name: string; execute: unknown }) => {
 				wrapped.push(tool.name);
 				return tool;
@@ -243,10 +403,18 @@ describe("Frank host tool service", () => {
 		const original = BUILTIN_TOOLS.task;
 		BUILTIN_TOOLS.task = async session => {
 			factorySession = session;
-			return { name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text", text: "spawned" }] }) } as never;
+			return {
+				name: "task",
+				label: "Task",
+				description: "",
+				parameters: {},
+				execute: async () => ({ content: [{ type: "text", text: "spawned" }] }),
+			} as never;
 		};
 		try {
-			const result = await createFrankHostToolService({ session: hostSession, agentId: "FrankPot" }).handle("task", { task: "child" });
+			const result = await createFrankHostToolService({ session: hostSession, agentId: "FrankPot" }).handle("task", {
+				task: "child",
+			});
 			expect(result).toEqual({ ok: true, content: "spawned" });
 			expect(factorySession?.getAgentId?.()).toBe("FrankPot");
 			expect(wrapped).toEqual(["task"]);
@@ -261,77 +429,93 @@ describe("Frank host tool service", () => {
 			toolRegistry: {
 				get: () => ({
 					execute: async (_id: string, args: unknown) => {
-						if (args && typeof args === "object" && "path" in args && typeof args.path === "string") paths.push(args.path);
+						if (args && typeof args === "object" && "path" in args && typeof args.path === "string")
+							paths.push(args.path);
 						return { content: [{ type: "text" as const, text: "written" }] };
 					},
 				}),
 			},
 		} as unknown as ToolSession;
-		const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "frank-test", workerCwd: "/tmp/frank-worker", names: ["write"] });
+		const service = createFrankHostToolService({
+			session: sessionWithRegistry,
+			agentId: "frank-test",
+			workerCwd: "/tmp/frank-worker",
+			names: ["write"],
+		});
 		for (const path of ["src/file.ts", "~/notes.md", "local://notes.md", "vault://notes.md"]) {
 			await service.handle("write", { path, content: "body" });
 		}
 		expect(paths).toEqual(["/tmp/frank-worker/src/file.ts", "~/notes.md", "local://notes.md", "vault://notes.md"]);
 	});
 
-test("edit bridge applies old_string/new_string with replace semantics", async () => {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-edit-"));
-	try {
-		await Bun.write(path.join(dir, "file.txt"), "before");
-		const replaceTool = new EditTool(
-			{
+	test("edit bridge applies old_string/new_string with replace semantics", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-edit-"));
+		try {
+			await Bun.write(path.join(dir, "file.txt"), "before");
+			const replaceTool = new EditTool(
+				{
+					settings: { get: () => false },
+					getToolContext: () => undefined,
+					getAgentId: () => "Host",
+					getSessionId: () => "test-session",
+					getSessionFile: () => null,
+					sessionManager: {
+						getSessionId: () => "test-session",
+						getSessionFile: () => null,
+						getCwd: () => dir,
+					},
+					cwd: dir,
+					enableLsp: false,
+				} as unknown as ToolSession,
+				"replace",
+			);
+			const sessionWithRegistry = {
 				settings: { get: () => false },
+				toolRegistry: new Map([["edit", { name: "edit" }]]),
+				getEditReplaceTool: () => replaceTool,
 				getToolContext: () => undefined,
 				getAgentId: () => "Host",
 				getSessionId: () => "test-session",
 				getSessionFile: () => null,
-				sessionManager: {
-					getSessionId: () => "test-session",
-					getSessionFile: () => null,
-					getCwd: () => dir,
-				},
 				cwd: dir,
 				enableLsp: false,
-			} as unknown as ToolSession,
-			"replace",
-		);
-		const sessionWithRegistry = {
-			settings: { get: () => false },
-			toolRegistry: new Map([["edit", { name: "edit" }]]),
-			getEditReplaceTool: () => replaceTool,
-			getToolContext: () => undefined,
-			getAgentId: () => "Host",
-			getSessionId: () => "test-session",
-			getSessionFile: () => null,
-			cwd: dir,
-			enableLsp: false,
-		} as unknown as ToolSession;
-		const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "frank-test", workerCwd: dir, names: ["edit"] });
-		const result = await service.handle("edit", { path: "file.txt", old: "before", new: "after" });
-		expect(result.ok).toBe(true);
-		expect(await Bun.file(path.join(dir, "file.txt")).text()).toBe("after");
-	} finally {
-		await fs.rm(dir, { recursive: true, force: true });
-	}
-});
+			} as unknown as ToolSession;
+			const service = createFrankHostToolService({
+				session: sessionWithRegistry,
+				agentId: "frank-test",
+				workerCwd: dir,
+				names: ["edit"],
+			});
+			const result = await service.handle("edit", { path: "file.txt", old: "before", new: "after" });
+			expect(result.ok).toBe(true);
+			expect(await Bun.file(path.join(dir, "file.txt")).text()).toBe("after");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 
-test("edit bridge without a replace-tool accessor still applies through the registry tool", async () => {
-	const executed: unknown[] = [];
-	const sessionWithRegistry = {
-		toolRegistry: {
-			get: () => ({
-				execute: async (_id: string, args: unknown) => {
-					executed.push(args);
-					return { content: [{ type: "text" as const, text: "edited" }] };
-				},
-			}),
-		},
-	} as unknown as ToolSession;
-	const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "frank-test", workerCwd: "/tmp/frank-worker", names: ["edit"] });
-	const result = await service.handle("edit", { path: "notes.txt", old: "before", new: "after" });
-	expect(result.ok).toBe(true);
-	expect(executed).toEqual([{ path: "/tmp/frank-worker/notes.txt", old_string: "before", new_string: "after" }]);
-});
+	test("edit bridge without a replace-tool accessor still applies through the registry tool", async () => {
+		const executed: unknown[] = [];
+		const sessionWithRegistry = {
+			toolRegistry: {
+				get: () => ({
+					execute: async (_id: string, args: unknown) => {
+						executed.push(args);
+						return { content: [{ type: "text" as const, text: "edited" }] };
+					},
+				}),
+			},
+		} as unknown as ToolSession;
+		const service = createFrankHostToolService({
+			session: sessionWithRegistry,
+			agentId: "frank-test",
+			workerCwd: "/tmp/frank-worker",
+			names: ["edit"],
+		});
+		const result = await service.handle("edit", { path: "notes.txt", old: "before", new: "after" });
+		expect(result.ok).toBe(true);
+		expect(executed).toEqual([{ path: "/tmp/frank-worker/notes.txt", old_string: "before", new_string: "after" }]);
+	});
 
 	test("bash bridge registers a background job to the Frank worker owner and drains its delivery", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
@@ -367,6 +551,36 @@ test("edit bridge without a replace-tool accessor still applies through the regi
 		} finally {
 			BUILTIN_TOOLS.bash = originalBash;
 		}
+		manager.register("bash", "Host", async () => "BASH_JOB_BODY", {
+			id: "bash-job",
+			agentId: "Host",
+			ownerId: "Host",
+		});
+		await manager.getJob("bash-job")?.promise;
+		const hostSession = {
+			asyncJobManager: manager,
+			getAgentId: () => "Host",
+			toolRegistry: new Map([
+				[
+					"bash",
+					{
+						execute: async () => ({
+							content: [{ type: "text" as const, text: "started" }],
+							details: { async: { state: "running", jobId: "bash-job" } },
+						}),
+					},
+				],
+				["hub", { execute: async () => ({ content: [{ type: "text" as const, text: "inbox" }] }) }],
+			]),
+		} as unknown as ToolSession;
+		const hostService = createFrankHostToolService({
+			session: hostSession,
+			agentId: "Host",
+			names: ["bash", "hub"],
+		});
+		await hostService.handle("bash", { argv: ["sleep", "1"] });
+		const hostResult = await hostService.handle("hub", { op: "inbox" });
+		expect(hostResult.content).toContain("BASH_JOB_BODY");
 	});
 	test("bash bridge appends a drain note only for a running background result", async () => {
 		const registeredTool = {
@@ -478,6 +692,121 @@ describe("Frank host tool service: child drain", () => {
 		release();
 	});
 
+	test("wait with ids returns on the first newly settled child", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		let finishFast: () => void = () => {};
+		let finishSlow: () => void = () => {};
+		let fastStarted!: () => void;
+		let slowStarted!: () => void;
+		const fastReady = new Promise<void>(resolve => {
+			fastStarted = resolve;
+		});
+		const slowReady = new Promise<void>(resolve => {
+			slowStarted = resolve;
+		});
+		manager.register(
+			"task",
+			"Fast",
+			async () => {
+				fastStarted();
+				await new Promise<void>(resolve => {
+					finishFast = resolve;
+				});
+				return "FAST_BODY";
+			},
+			{ id: "Fast", agentId: "Fast", ownerId: "Host" },
+		);
+		manager.register(
+			"task",
+			"Slow",
+			async () => {
+				slowStarted();
+				await new Promise<void>(resolve => {
+					finishSlow = resolve;
+				});
+				return "SLOW_BODY";
+			},
+			{ id: "Slow", agentId: "Slow", ownerId: "Host" },
+		);
+		await Promise.all([fastReady, slowReady]);
+		const resultPromise = bridge(manager).handle("hub", { op: "wait", ids: ["Fast", "Slow"], timeoutMs: 5_000 });
+		let returned = false;
+		void resultPromise.then(() => {
+			returned = true;
+		});
+		finishFast();
+		await manager.getJob("Fast")?.promise;
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		const returnedAfterFirst = returned;
+		finishSlow();
+		const result = await resultPromise;
+		expect(returnedAfterFirst).toBe(true);
+		expect(result.content).toContain("FAST_BODY");
+		expect(result.content).toContain("Still running: Slow");
+		await manager.getJob("Slow")?.promise;
+	});
+
+	test("cancel bridge cancels only requested Frank-owned jobs", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		let signal: AbortSignal | undefined;
+		let started!: () => void;
+		const ready = new Promise<void>(resolve => {
+			started = resolve;
+		});
+		manager.register(
+			"task",
+			"CancelMe",
+			async ctx => {
+				signal = ctx.signal;
+				started();
+				await new Promise<void>(resolve => ctx.signal.addEventListener("abort", () => resolve(), { once: true }));
+				return "cancelled";
+			},
+			{ id: "CancelMe", agentId: "CancelMe", ownerId: "frank-test" },
+		);
+		await ready;
+		const session = { asyncJobManager: manager, getAgentId: () => "Host" } as unknown as ToolSession;
+		const result = await createFrankHostToolService({ session, agentId: "frank-test" }).handle("hub", {
+			op: "cancel",
+			ids: ["CancelMe"],
+		});
+		expect(result.ok).toBe(true);
+		expect(signal?.aborted).toBe(true);
+		expect(result.content).toContain("CancelMe");
+		await manager.getJob("CancelMe")?.promise;
+	});
+	test("zero timeout waits up to the native hub maximum when a child is pending", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		let finish: () => void = () => {};
+		let started!: () => void;
+		const ready = new Promise<void>(resolve => {
+			started = resolve;
+		});
+		manager.register(
+			"task",
+			"WaitForever",
+			async () => {
+				started();
+				await new Promise<void>(resolve => {
+					finish = resolve;
+				});
+				return "DONE";
+			},
+			{ id: "WaitForever", agentId: "WaitForever", ownerId: "Host" },
+		);
+		await ready;
+		const wait = bridge(manager).handle("hub", { op: "wait", ids: ["WaitForever"], timeoutMs: 0 });
+		let returned = false;
+		void wait.then(() => {
+			returned = true;
+		});
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		expect(returned).toBe(false);
+		finish();
+		const result = await wait;
+		expect(result.content).toContain("DONE");
+		await manager.getJob("WaitForever")?.promise;
+	});
 	test("oversized child output is spilled to a session artifact before delivery", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-async-artifact-"));
@@ -567,7 +896,11 @@ describe("Frank hub send mailbox", () => {
 		AgentRegistry.global().register({ id, displayName: id, kind: "sub", session: null, status: "running" });
 		await IrcBus.global().send({ from: "Main", to: id, body: "steer before run" });
 		const service = createFrankHostToolService({
-			session: { toolRegistry: new Map([["read", { execute: async () => ({ content: [{ type: "text" as const, text: "file contents" }] }) }]]) } as unknown as ToolSession,
+			session: {
+				toolRegistry: new Map([
+					["read", { execute: async () => ({ content: [{ type: "text" as const, text: "file contents" }] }) }],
+				]),
+			} as unknown as ToolSession,
 			agentId: id,
 			names: ["read"],
 		});
@@ -633,10 +966,18 @@ describe("Frank hub send mailbox", () => {
 		const original = BUILTIN_TOOLS.hub;
 		BUILTIN_TOOLS.hub = async session => {
 			seen = session.getAgentId?.();
-			return { name: "hub", label: "Hub", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text", text: "queued" }] }) } as never;
+			return {
+				name: "hub",
+				label: "Hub",
+				description: "",
+				parameters: {},
+				execute: async () => ({ content: [{ type: "text", text: "queued" }] }),
+			} as never;
 		};
 		try {
-			const hostHub = { execute: async () => ({ content: [{ type: "text" as const, text: "Cannot send a message to yourself." }] }) };
+			const hostHub = {
+				execute: async () => ({ content: [{ type: "text" as const, text: "Cannot send a message to yourself." }] }),
+			};
 			const hostSession = {
 				getAgentId: () => "Main",
 				getToolContext: () => undefined,
