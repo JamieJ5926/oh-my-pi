@@ -1,3 +1,4 @@
+import { executeCancel } from "../tools/hub/jobs";
 import { IrcBus, type IrcMessage } from "../irc/bus";
 import { BUILTIN_TOOLS } from "../tools";
 import type { ToolSession } from "../tools";
@@ -33,7 +34,8 @@ function absoluteToolPath(path: string, workerCwd?: string): string {
 function translateMutatingArgs(name: string, args: unknown, workerCwd?: string): unknown {
 	if (typeof args !== "object" || args === null) return args;
 	if (name === "bash" || name === "run") {
-		if (!("argv" in args) || !Array.isArray(args.argv) || !args.argv.every(part => typeof part === "string")) return args;
+		if (!("argv" in args) || !Array.isArray(args.argv) || !args.argv.every(part => typeof part === "string"))
+			return args;
 		const argv = args.argv;
 		const cwd = "cwd" in args && typeof args.cwd === "string" ? absoluteToolPath(args.cwd, workerCwd) : workerCwd;
 		const timeout = "timeout_ms" in args && typeof args.timeout_ms === "number" ? args.timeout_ms / 1000 : undefined;
@@ -44,7 +46,15 @@ function translateMutatingArgs(name: string, args: unknown, workerCwd?: string):
 		};
 	}
 	if (name === "edit") {
-		if (!("path" in args) || typeof args.path !== "string" || !("old" in args) || typeof args.old !== "string" || !("new" in args) || typeof args.new !== "string") return args;
+		if (
+			!("path" in args) ||
+			typeof args.path !== "string" ||
+			!("old" in args) ||
+			typeof args.old !== "string" ||
+			!("new" in args) ||
+			typeof args.new !== "string"
+		)
+			return args;
 		return { path: absoluteToolPath(args.path, workerCwd), old_string: args.old, new_string: args.new };
 	}
 	if (name === "write") {
@@ -77,7 +87,10 @@ function hostMailFor(agentId: string): string {
 	return `Host messages:\n${pending.map(message => `[hub from ${message.from}] ${message.body}`).join("\n")}\n\n`;
 }
 
-function prependHostMail(pending: string[], result: { ok: boolean; content?: string; error?: string }): { ok: boolean; content?: string; error?: string } {
+function prependHostMail(
+	pending: string[],
+	result: { ok: boolean; content?: string; error?: string },
+): { ok: boolean; content?: string; error?: string } {
 	if (pending.length === 0) return result;
 	const note = `Host messages:\n${pending.join("\n")}`;
 	if (!result.ok) return { ok: false, error: `${note}\n\n${result.error ?? "hub failed"}` };
@@ -117,7 +130,10 @@ interface ChildDrainCall {
  * session starts, so seat- and lane-keyed guards classify the worker, not the
  * host. Without the seat, profile policy reads an anonymous lane and confines it.
  */
-function laneSessionView(host: ReadonlySessionManager, lane: { prompt: string; agent: string }): ReadonlySessionManager {
+function laneSessionView(
+	host: ReadonlySessionManager,
+	lane: { prompt: string; agent: string },
+): ReadonlySessionManager {
 	const timestamp = new Date().toISOString();
 	const init = {
 		type: "session_init",
@@ -176,7 +192,6 @@ function coordinatorItemsMissingDelegable(args: unknown): string[] {
 	});
 }
 
-
 export function createFrankHostToolService(options: {
 	session: ToolSession;
 	agentId: string;
@@ -204,7 +219,9 @@ export function createFrankHostToolService(options: {
 	);
 	let closed = false;
 	const coordinator = options.workerLane !== undefined && COORDINATOR_SEATS[options.workerLane.agent] === true;
-	let dispatchedTask = !coordinator || (options.workerLane !== undefined && /^[ \t]*single-slice[ \t]*:[ \t]*\S/im.test(options.workerLane.prompt));
+	let dispatchedTask =
+		!coordinator ||
+		(options.workerLane !== undefined && /^[ \t]*single-slice[ \t]*:[ \t]*\S/im.test(options.workerLane.prompt));
 	options.signal?.addEventListener(
 		"abort",
 		() => {
@@ -252,15 +269,17 @@ export function createFrankHostToolService(options: {
 	};
 
 	/** Wait for children to settle, bounded by the caller's budget and the worker's own abort signal. */
-	const settle = async (jobs: AsyncJob[], budgetMs: number): Promise<void> => {
+	const settle = async (jobs: AsyncJob[], budgetMs: number, firstSettled: boolean): Promise<void> => {
 		const deadline = Date.now() + budgetMs;
 		for (;;) {
+			if (firstSettled && jobs.some(job => job.status !== "running")) return;
 			const running = jobs.filter(job => job.status === "running");
 			if (running.length === 0 || closed || options.signal?.aborted || Date.now() >= deadline) return;
 			await Promise.race([
-				Promise.all(running.map(job => job.promise)),
+				...(firstSettled ? running.map(job => job.promise) : [Promise.all(running.map(job => job.promise))]),
 				Bun.sleep(Math.max(1, Math.min(deadline - Date.now(), 1_000))),
 			]);
+			if (firstSettled && jobs.some(job => job.status !== "running")) return;
 		}
 	};
 
@@ -319,7 +338,10 @@ export function createFrankHostToolService(options: {
 			}
 			if (!enabled[name]) return { ok: false, error: `host tool is not enabled: ${name}` };
 			if (coordinator && !dispatchedTask && FIRST_WORK_TOOLS[name]) {
-				return { ok: false, error: `Delegation required: dispatch a task before calling \`${name}\`, or declare \`single-slice: <reason>\` in the worker brief.` };
+				return {
+					ok: false,
+					error: `Delegation required: dispatch a task before calling \`${name}\`, or declare \`single-slice: <reason>\` in the worker brief.`,
+				};
 			}
 			if (name === "task" && coordinator) {
 				const missing = coordinatorItemsMissingDelegable(args);
@@ -339,16 +361,42 @@ export function createFrankHostToolService(options: {
 						typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs)
 							? params.timeoutMs
 							: CHILD_WAIT_DEFAULT_MS;
-					await settle(children, Math.max(0, Math.min(requested, CHILD_WAIT_MAX_MS)));
+					const budget = requested === 0 ? CHILD_WAIT_MAX_MS : Math.max(0, Math.min(requested, CHILD_WAIT_MAX_MS));
+					await settle(children, budget, Array.isArray(params.ids) && params.ids.length > 0);
 					return { ok: true, content: `${hostMail}${drainBodies(children)}` };
 				}
 			}
+			if (name === "hub" && params.op === "cancel") {
+				if (!manager) return { ok: false, error: "Async execution is disabled; no background jobs are available." };
+				if (
+					!Array.isArray(params.ids) ||
+					!params.ids.every(id => typeof id === "string") ||
+					params.ids.length === 0
+				) {
+					return { ok: false, error: '`ids` is required for op="cancel".' };
+				}
+				const result = await executeCancel(bridgedSession, manager, options.agentId, params.ids);
+				const text = result.content
+					.filter((part): part is { type: "text"; text: string } => part.type === "text")
+					.map(part => part.text)
+					.join("");
+				return { ok: true, content: `${hostMail}${text}` };
+			}
 			const factory = Object.entries(BUILTIN_TOOLS).find(([toolName]) => toolName === name)?.[1];
-			if (!factory) return { ok: false, error: hostMail ? `${hostMail}${`unknown host tool: ${name}`}` : `unknown host tool: ${name}` };
+			if (!factory)
+				return {
+					ok: false,
+					error: hostMail ? `${hostMail}${`unknown host tool: ${name}`}` : `unknown host tool: ${name}`,
+				};
 			const requireRegistry = name === "write" || name === "edit" || name === "bash" || name === "run";
 			const registeredTool = options.session.toolRegistry?.get(name);
 			if (requireRegistry && !registeredTool) {
-				return { ok: false, error: hostMail ? `${hostMail}host tool is not registered in the host session: ${name}` : `host tool is not registered in the host session: ${name}` };
+				return {
+					ok: false,
+					error: hostMail
+						? `${hostMail}host tool is not registered in the host session: ${name}`
+						: `host tool is not registered in the host session: ${name}`,
+				};
 			}
 			try {
 				const beforeDispatch = name === "task" && manager ? new Set(ownedJobs().map(job => job.id)) : undefined;
@@ -360,7 +408,8 @@ export function createFrankHostToolService(options: {
 				// getEditReplaceTool (undefined when edit was never granted, so the
 				// refusal above already fired). Hooks fire: the instance is an
 				// ExtensionToolWrapper around the session's own runner.
-				const editReplaceTool = name === "edit" ? (options.session.getEditReplaceTool?.() ?? registeredTool) : undefined;
+				const editReplaceTool =
+					name === "edit" ? (options.session.getEditReplaceTool?.() ?? registeredTool) : undefined;
 				// task files its children under the building session's agent id, and
 				// hub sends carry that id as the sender; the host registry instance would
 				// nest a Frank worker's children under the host and send its messages
@@ -370,7 +419,13 @@ export function createFrankHostToolService(options: {
 				const built = buildForWorker ? await factory(bridgedSession) : undefined;
 				const workerTool = built ? (wrapWithHooks ? wrapWithHooks(built) : built) : undefined;
 				const tool = editReplaceTool ?? workerTool ?? registeredTool ?? (await factory(bridgedSession));
-				if (!tool) return { ok: false, error: hostMail ? `${hostMail}host tool is unavailable: ${name}` : `host tool is unavailable: ${name}` };
+				if (!tool)
+					return {
+						ok: false,
+						error: hostMail
+							? `${hostMail}host tool is unavailable: ${name}`
+							: `host tool is unavailable: ${name}`,
+					};
 				const hostContext = bridgedSession.getToolContext?.();
 				const context =
 					hostContext && options.workerLane !== undefined
