@@ -42,10 +42,13 @@ function translateMutatingArgs(name: string, args: unknown, workerCwd?: string):
 		if (!("argv" in args) || !Array.isArray(args.argv) || !args.argv.every(part => typeof part === "string"))
 			return args;
 		const argv = args.argv;
+		const shellCommand = "command" in args && typeof args.command === "string" ? args.command.trim() : "";
+		const command = argv.length > 0 ? argv.map(shellQuote).join(" ") : shellCommand;
+		if (command === "") throw new Error(`${name} requires a non-empty argv or a command string`);
 		const cwd = "cwd" in args && typeof args.cwd === "string" ? absoluteToolPath(args.cwd, workerCwd) : workerCwd;
 		const timeout = "timeout_ms" in args && typeof args.timeout_ms === "number" ? args.timeout_ms / 1000 : undefined;
 		return {
-			command: argv.map(shellQuote).join(" "),
+			command,
 			...(cwd !== undefined ? { cwd } : {}),
 			...(timeout !== undefined ? { timeout } : {}),
 		};
