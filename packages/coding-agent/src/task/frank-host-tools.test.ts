@@ -1,3 +1,4 @@
+import { describe, expect, test } from "bun:test";
 import { registerLogSink } from "@oh-my-pi/pi-utils/logger";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
