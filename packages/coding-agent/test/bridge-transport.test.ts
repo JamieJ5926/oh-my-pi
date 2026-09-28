@@ -1,9 +1,9 @@
-import { mkdtemp, rm } from "node:fs/promises";
+	import { describe, expect, it } from "bun:test";
+	import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { once } from "node:events";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, it } from "bun:test";
 import {
 	BrokerBackedTransportAdapter,
 	BrokerTransportServer,
@@ -192,6 +192,61 @@ function envelope(sequence: number) {
 			expect(second.kind).not.toBe("rejected");
 			await Promise.race([secondDelivered.promise, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("second delivery timeout")), 500))]);
 		} finally {
+			await sender.close();
+			await receiver.close();
+			await server.close();
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+	it("preserves journal capacity when dead-letter append fails", async () => {
+		const directory = await mkdtemp(path.join(os.tmpdir(), "omp-bridge-dead-letter-failure-"));
+		const socketPath = path.join(directory, "broker.sock");
+		const journalPath = path.join(directory, "broker.jsonl");
+		const deadLetterPath = `${journalPath}.dead-letter.jsonl`;
+		const first = envelope(10);
+		const entryBytes = Buffer.byteLength(`${JSON.stringify({ envelope: first, attempts: 0, nextAttemptAt: Date.now() })}\n`, "utf8");
+		const server = new BrokerTransportServer({ socketPath, journalPath, limits: { maxJournalBytes: entryBytes, maxAttempts: 1, retryBaseMs: 5, retryMaxMs: 5 } });
+		const receiver = new BrokerBackedTransportAdapter({ socketPath, journalPath: path.join(directory, "receiver.jsonl") });
+		const sender = new BrokerBackedTransportAdapter({ socketPath, journalPath: path.join(directory, "sender.jsonl") });
+		let unhandledRejection: unknown;
+		const onUnhandledRejection = (reason: unknown): void => {
+			unhandledRejection = reason;
+		};
+		let rawClient: net.Socket | undefined;
+		try {
+			await mkdir(deadLetterPath);
+			process.on("unhandledRejection", onUnhandledRejection);
+			await server.listen();
+			await receiver.register(addresses().destination, message => {
+				if (message.id === first.id) return Promise.reject(new Error("permanent"));
+			});
+			await sender.send(first);
+			await Promise.race([
+				(async (): Promise<void> => {
+					while (!(await Bun.file(journalPath).text()).includes(first.id)) await new Promise<void>(resolve => setImmediate(resolve));
+				})(),
+				new Promise<never>((_, reject) => setTimeout(() => reject(new Error("journal persistence timeout")), 500)),
+			]);
+			rawClient = net.createConnection(socketPath);
+			rawClient.setEncoding("utf8");
+			await once(rawClient, "connect");
+			const response = new Promise<string>(resolve => rawClient?.once("data", data => resolve(String(data))));
+			rawClient.write(`${JSON.stringify({ type: "send", envelope: envelope(11) })}\n`);
+			const rejection = await Promise.race([response, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("capacity response timeout")), 500))]);
+			expect(JSON.parse(rejection)).toMatchObject({ type: "reject", reason: "journal exceeds limit" });
+			await rm(deadLetterPath, { recursive: true });
+			await Promise.race([
+				(async (): Promise<void> => {
+					while ((await Bun.file(deadLetterPath).text().catch(() => "")).trim() === "" || await Bun.file(journalPath).exists())
+						await new Promise<void>(resolve => setImmediate(resolve));
+				})(),
+				new Promise<never>((_, reject) => setTimeout(() => reject(new Error("dead-letter retry timeout")), 500)),
+			]);
+			expect(unhandledRejection).toBeUndefined();
+			expect(await Bun.file(deadLetterPath).text()).toContain(first.id);
+		} finally {
+			process.removeListener("unhandledRejection", onUnhandledRejection);
+			rawClient?.destroy();
 			await sender.close();
 			await receiver.close();
 			await server.close();

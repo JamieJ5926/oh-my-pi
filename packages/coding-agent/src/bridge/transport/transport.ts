@@ -701,7 +701,6 @@ export class BrokerTransportServer {
 	#redelivery: Promise<void> = Promise.resolve();
 	#retryTimer: ReturnType<typeof setTimeout> | undefined;
 	#listening = false;
-
 	#scheduleRetry(): void {
 		if (this.#retryTimer || !this.#listening) return;
 		let nextAt = Number.POSITIVE_INFINITY;
@@ -728,15 +727,19 @@ export class BrokerTransportServer {
 			for (const [id, entry] of this.#pending) {
 				if (entry.nextAttemptAt > now) continue;
 				if (entry.attempts >= this.#limits.maxAttempts) {
+					try {
+						await appendDeadLetter(this.#deadLetterPath, {
+							envelope: entry.envelope,
+							attempts: entry.attempts,
+							reason: "maximum delivery attempts exceeded",
+							deadLetteredAt: Date.now(),
+						});
+					} catch {
+						continue;
+					}
 					this.#pending.delete(id);
 					this.#removed.add(id);
 					this.#journalBytes -= Buffer.byteLength(journalLine(entry), "utf8");
-					await appendDeadLetter(this.#deadLetterPath, {
-						envelope: entry.envelope,
-						attempts: entry.attempts,
-						reason: "maximum delivery attempts exceeded",
-						deadLetteredAt: Date.now(),
-					});
 					changed = true;
 					continue;
 				}
