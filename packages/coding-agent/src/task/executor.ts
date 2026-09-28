@@ -3165,7 +3165,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				: options.text;
 			let result: FrankWorkerResult;
 			const keepAlive = options.keepAlive !== false;
-			if (options.transport === "daemon" && !(keepAlive && !options.runWorker)) {
+			if (options.transport === "daemon" && !(options.keepAlive === true && !options.runWorker)) {
 				result = await spawnFrankWorker({ ...workerOptions, text: firstPrompt });
 			} else if (keepAlive && !options.runWorker) {
 				const handle = await startFrankWorker(workerOptions);
