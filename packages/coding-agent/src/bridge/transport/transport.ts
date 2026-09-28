@@ -737,6 +737,7 @@ export class BrokerTransportServer {
 					} catch {
 						continue;
 					}
+					if (this.#pending.get(id) !== entry) continue;
 					this.#pending.delete(id);
 					this.#removed.add(id);
 					this.#journalBytes -= Buffer.byteLength(journalLine(entry), "utf8");
