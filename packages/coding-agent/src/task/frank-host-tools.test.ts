@@ -890,6 +890,28 @@ describe("Frank hub send mailbox", () => {
 			expect(IrcBus.global().unreadCount(id)).toBe(0);
 		} finally {
 			remove();
+	test("a bridged hub send reports queued next-turn delivery and drains on the lane's next call", async () => {
+		const id = "SteerMailBridgedProbe";
+		const registry = AgentRegistry.global();
+		registry.unregister(id);
+		registry.register({ id, displayName: id, kind: "sub", session: null, status: "running" });
+		const hostSession = {
+			agentRegistry: registry,
+			settings: { get: () => undefined },
+			getAgentId: () => "Main",
+		} as unknown as ToolSession;
+		try {
+			const sender = createFrankHostToolService({ session: hostSession, agentId: "Main", names: ["hub"] });
+			const receipt = await sender.handle("hub", { op: "send", to: id, message: "bridged steering" });
+			expect(receipt.ok).toBe(true);
+			expect(receipt.content).toContain("Queued for 1 remote peer(s), delivered on next turn:");
+			expect(receipt.content).toContain(`- ${id}: queued`);
+
+			const lane = createFrankHostToolService({ session: hostSession, agentId: id, names: ["hub"] });
+			const nextTurn = await lane.handle("hub", { op: "inbox" });
+			expect(nextTurn.content).toContain("[hub from Main] bridged steering");
+			expect(IrcBus.global().unreadCount(id)).toBe(0);
+		} finally {
 			registry.unregister(id);
 		}
 	});
