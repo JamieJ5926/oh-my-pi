@@ -3202,7 +3202,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 		result.exitCode = workerExitError.exitCode;
 	}
 	registry.setHistory(id, { outputPath: result.outputPath });
-	registry.setStatus(id, "parked");
+	registry.setStatus(id, retainedWorker && options.keepAlive && exitCode === 0 && !aborted ? "idle" : "parked");
 	return result;
 }
 

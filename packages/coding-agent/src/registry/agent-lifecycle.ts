@@ -281,7 +281,7 @@ export class AgentLifecycleManager {
 
 				// Re-check liveness: release/unregister/replace may have raced us.
 				const live = this.#registry.get(id);
-				if (live !== ref || !live.session || live.session !== session) return;
+				if (live !== ref || !live.session || live.session !== session || live.status === "running") return;
 				if (this.#adopted.get(id)?.ref !== ref) return;
 
 				// Commit: detach + parked *before* dispose so callers never see a
@@ -289,7 +289,6 @@ export class AgentLifecycleManager {
 				park.detached = true;
 				this.#registry.detachSession(id, ref);
 				this.#registry.setStatus(id, "parked", ref);
-
 				try {
 					await session.dispose();
 				} catch (error) {

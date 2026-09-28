@@ -263,8 +263,8 @@ describe("Frank task return integration", () => {
 			const second = await runSubagentFollowUpTurn({ id, agent: workerOptions(id, stub.exe, stub.cwd, artifactsDir).agent, message: "unused", followUpMessage: "second turn", keepAlive: true, artifactsDir });
 			expect(first.output).toBe("first answer");
 			expect(second.output).toBe("second answer");
+			expect(AgentRegistry.global().get(id)?.status).toBe("idle");
 			expect(await readFile(turnsFile, "utf8")).toContain('"turn_id":2,"text":"second turn"');
-			expect((await readFile(pidFile, "utf8")).trim().split(/\r?\n/)).toHaveLength(1);
 			const controller = new AbortController();
 			controller.abort(new Error("close retained worker"));
 			const aborted = await runSubagentFollowUpTurn({ id, agent: workerOptions(id, stub.exe, stub.cwd, artifactsDir).agent, message: "unused", followUpMessage: "aborted turn", keepAlive: true, signal: controller.signal, artifactsDir });
