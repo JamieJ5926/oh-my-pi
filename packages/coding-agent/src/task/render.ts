@@ -1411,13 +1411,6 @@ function renderAgentResult(
 	return lines;
 }
 
-/**
- * Order live progress entries so finished agents render first — sorted by
- * runtime ascending, matching {@link orderResultsForDisplay} — while
- * unfinished (pending/running) ones stay pinned at the bottom in dispatch
- * order. Because a finished agent's runtime is fixed, finalization renders
- * the same order and rows never reshuffle.
- */
 type OrderedProgressCache = {
 	items: AgentProgress[];
 	status: AgentProgress["status"][];
@@ -1428,6 +1421,12 @@ type OrderedProgressCache = {
 
 const orderedProgressCache = new WeakMap<readonly AgentProgress[], OrderedProgressCache>();
 
+/**
+ * Order live progress entries so finished agents render first, sorted by
+ * runtime ascending, matching {@link orderResultsForDisplay}. Unfinished
+ * agents stay pinned at the bottom in dispatch order. A finished agent's
+ * runtime is fixed, so finalization keeps the same order.
+ */
 function orderProgressForDisplay(progress: readonly AgentProgress[]): AgentProgress[] {
 	let cache = orderedProgressCache.get(progress);
 	if (cache && cache.items.length === progress.length) {
@@ -1653,8 +1652,8 @@ export function renderResult(
 			// beside the finalized inline results, live while running and
 			// settled once their jobs finish.
 			const supplementalProgress = details.progress
-				? orderProgressForDisplay(
-						details.progress.filter(progress => !details.results.some(res => res.id === progress.id)),
+				? orderProgressForDisplay(details.progress).filter(
+						progress => !details.results.some(res => res.id === progress.id),
 					)
 				: [];
 			for (const progress of supplementalProgress) {
