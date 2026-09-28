@@ -371,18 +371,22 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 					return;
 				}
 				case "error": {
-					if (control.turn_id !== undefined || pendingSteers.length === 0) {
+					if (control.turn_id !== undefined) {
 						failTurn(new FrankProtocolError(control.message));
 						return;
 					}
-					const pending = pendingSteers.shift()!;
-					clearTimeout(pending.timeout);
-					if (pending.timedOut) return;
-					if (/unknown op/i.test(control.message) && /steer/i.test(control.message)) {
-						pending.resolve("unsupported");
+					const pending = pendingSteers[0];
+					if (!pending) {
+						failTurn(new FrankProtocolError(control.message));
 						return;
 					}
-					pending.reject(new FrankProtocolError(control.message));
+					if (/unknown op/i.test(control.message) && /steer/i.test(control.message)) {
+						pendingSteers.shift();
+						clearTimeout(pending.timeout);
+						if (!pending.timedOut) pending.resolve("unsupported");
+						return;
+					}
+					failTurn(new FrankProtocolError(control.message));
 					return;
 				}
 				case "tool_request": {
