@@ -144,9 +144,16 @@ async function frankWorkerOptions(
 			session,
 			agentId: options.id,
 			signal,
-			names: frankSpawns(options.agent) === "" ? ["hub", "write", "edit", "bash"] : ["task", "hub", "write", "edit", "bash"],
+			names:
+				frankSpawns(options.agent) === ""
+					? ["hub", "write", "edit", "bash"]
+					: ["task", "hub", "write", "edit", "bash"],
 			spawns: frankSpawns(options.agent),
 			workerCwd: options.cwd,
+			apiKey,
+			authProvider: model.provider,
+			modelId: model.id,
+			sessionId: session.getSessionId?.(),
 			workerLane: { prompt: options.task, agent: options.agent.name },
 		}),
 	};
