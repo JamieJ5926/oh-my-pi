@@ -142,6 +142,8 @@ export interface FrankExecutorOptions extends Pick<
 
 interface RetainedFrankWorker {
 	handle: FrankWorkerHandle;
+	spawnOptions: StartFrankWorkerOptions;
+	hostToolService?: FrankHostToolService;
 	closed: boolean;
 	setOnEvent: (onEvent: (event: FrankEvent) => void | Promise<void>) => void;
 	removeDelivery: () => void;
@@ -156,6 +158,7 @@ async function closeRetainedFrankWorker(id: string, worker: RetainedFrankWorker)
 		return;
 	}
 	worker.closed = true;
+	worker.hostToolService?.close();
 	worker.removeDelivery();
 	await worker.handle.close();
 	AgentRegistry.global().setStatus(id, "parked");
@@ -3159,10 +3162,14 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				transport: options.transport ?? "process",
 				...(options.artifactsDir ? { sessionId: id } : {}),
 			};
+			const firstPrompt = options.parentAgentId
+				? `${options.text}\n\nYour OMP parent agent ID is ${options.parentAgentId}. ` +
+					"Use this exact ID as the recipient value when messaging your parent with hub."
+				: options.text;
 			let result: FrankWorkerResult;
 			const keepAlive = options.keepAlive !== false;
-			if (options.transport === "daemon" && !(keepAlive && !options.runWorker)) {
-				result = await spawnFrankWorker({ ...workerOptions, text: options.text });
+			if (options.transport === "daemon" && !(options.keepAlive === true && !options.runWorker)) {
+				result = await spawnFrankWorker({ ...workerOptions, text: firstPrompt });
 			} else if (keepAlive && !options.runWorker) {
 				const handle = await startFrankWorker(workerOptions);
 				const removeDelivery = AgentRegistry.global().registerRetainedDelivery(id, async (message: IrcMessage) => {
@@ -3175,14 +3182,16 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				});
 				retainedWorker = {
 					handle,
+					spawnOptions: workerOptions,
+					hostToolService,
 					closed: false,
 					setOnEvent: callback => { forwardEvent = callback; },
 					removeDelivery,
 				};
 				retainedFrankWorkers.set(id, retainedWorker);
-				result = await handle.runTurn(options.text);
+				result = await handle.runTurn(firstPrompt);
 			} else {
-				result = await (options.runWorker ?? spawnFrankWorker)({ ...workerOptions, text: options.text });
+				result = await (options.runWorker ?? spawnFrankWorker)({ ...workerOptions, text: firstPrompt });
 			}
 			rawOutput = result.text;
 			monitor.progress.extractedToolData = monitor.progress.extractedToolData ?? {};
@@ -3229,8 +3238,10 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 	}
 	if (retainedWorker) {
 		if (options.keepAlive !== false && exitCode === 0 && !aborted) retainedFrankWorkers.set(id, retainedWorker);
-		else await closeRetainedFrankWorker(id, retainedWorker);
-	}
+		else {
+			await closeRetainedFrankWorker(id, retainedWorker);
+		}
+	} else hostToolService?.close();
 	monitor.scheduleProgress(true);
 	monitor.finish();
 	const finalMonitor: SubagentRunMonitor = { ...monitor, rawOutput: () => rawOutput };

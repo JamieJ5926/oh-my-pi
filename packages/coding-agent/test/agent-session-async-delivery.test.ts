@@ -95,6 +95,67 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(sawResult).toBe(true);
 	});
 
+	it("routes a lane-owned async job only to that lane", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const ownerMock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const ownerAgent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: ownerMock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const sessionManager = SessionManager.inMemory();
+		const laneId = "FrankLane";
+
+		session = new AgentSession({
+			agent: ownerAgent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: laneId,
+			asyncJobManager: manager,
+		});
+
+		const otherMock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const otherAgent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: otherMock.stream,
+		});
+		const otherSession = new AgentSession({
+			agent: otherAgent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "OtherLane",
+			asyncJobManager: manager,
+		});
+
+		try {
+			const gate = Promise.withResolvers<string>();
+			manager.register("bash", "gated lane job", () => gate.promise, { id: "lane-job", ownerId: laneId });
+			gate.resolve("job finished: LANE RESULT");
+			await manager.waitForOwnerJobs(laneId);
+
+			await session.settleAsyncWork();
+			await otherSession.settleAsyncWork();
+
+			expect(manager.getJob("lane-job")?.ownerId).toBe(laneId);
+			expect(ownerMock.calls.some(call => JSON.stringify(call.context.messages).includes("LANE RESULT"))).toBe(true);
+			expect(otherMock.calls.some(call => JSON.stringify(call.context.messages).includes("LANE RESULT"))).toBe(
+				false,
+			);
+		} finally {
+			await otherSession.dispose();
+		}
+	});
+
 	it("routes an advisor-owned launch completion through the session", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });

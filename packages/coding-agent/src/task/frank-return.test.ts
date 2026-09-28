@@ -1,7 +1,8 @@
 import { mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { IrcBus } from "../irc/bus";
 import { EventBus } from "../utils/event-bus";
@@ -42,9 +43,17 @@ function workerOptions(id: string, exe: string, cwd: string, artifactsDir: strin
 	};
 }
 
+beforeEach(() => {
+	AgentRegistry.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
+});
+
 afterEach(async () => {
 	await Promise.all(artifactDirs.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
 	AgentRegistry.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
 });
 
 describe("Frank task return integration", () => {
@@ -369,6 +378,39 @@ describe("Frank task return integration", () => {
 			expect((await readFile(pidFile, "utf8")).trim().split(/\r?\n/)).toHaveLength(2);
 		} finally {
 			delete process.env.FRANK_PID_FILE;
+		}
+	});
+
+	test("uses daemon transport and closes host tools when keepAlive is omitted", async () => {
+		const id = "FrankReturnDaemonDefault";
+		const artifactsDir = await mkdtemp(path.join(os.tmpdir(), "frank-return-daemon-"));
+		artifactDirs.push(artifactsDir);
+		const stub = await makeWorkerStub(
+			`#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\nif [ "$1" = "daemon" ]; then exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9`,
+		);
+		const previousStateDir = process.env.FRANK_DAEMON_STATE_DIR;
+		process.env.FRANK_DAEMON_STATE_DIR = path.join(stub.cwd, "daemon-state");
+		let serviceClosed = false;
+		const { keepAlive: _keepAlive, ...options } = workerOptions(id, stub.exe, stub.cwd, artifactsDir);
+		try {
+			const result = await runFrankSubagent({
+				...options,
+				transport: "daemon",
+				frankBin: stub.exe,
+				hostToolService: {
+					handle: async () => ({ ok: true }),
+					toolNames: () => [],
+					close: () => {
+						serviceClosed = true;
+					},
+					closed: false,
+				},
+			});
+			expect(result.output).toBe("daemon answer");
+			expect(serviceClosed).toBe(true);
+		} finally {
+			if (previousStateDir === undefined) delete process.env.FRANK_DAEMON_STATE_DIR;
+			else process.env.FRANK_DAEMON_STATE_DIR = previousStateDir;
 		}
 	});
 });
