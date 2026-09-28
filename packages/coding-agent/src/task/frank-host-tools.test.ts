@@ -339,13 +339,18 @@ describe("Frank host tool service", () => {
 		}
 	});
 
-	test("aborting the bridge closes its tool service", async () => {
-		const controller = new AbortController();
-		const service = createFrankHostToolService({ session, agentId: "frank-test", signal: controller.signal });
-		controller.abort();
+	test("closing the bridge unregisters its sink and rejects later tool calls", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		const service = createFrankHostToolService({ session: { asyncJobManager: manager } as unknown as ToolSession, agentId: "frank-test" });
+		service.close();
 		expect(service.closed).toBe(true);
 		expect(await service.handle("hub", {})).toEqual({ ok: false, error: "host tool service is closed" });
+		manager.register("bash", "after close", async () => "NOT_CAPTURED", { id: "after-close", ownerId: "frank-test" });
+		await manager.getJob("after-close")?.promise;
+		expect(manager.isJobResultConsumed("after-close")).toBe(false);
+		await manager.dispose();
 	});
+
 
 	test("coordinator batch requires each coordinator item to declare its own delegable scope", async () => {
 		let invocations = 0;
@@ -677,15 +682,47 @@ describe("Frank host tool service", () => {
 		expect(executed).toEqual([{ path: "/tmp/frank-worker/notes.txt", old_string: "before", new_string: "after" }]);
 	});
 
-	test("bash background job body is available through hub inbox", async () => {
+	test("bash bridge registers a background job to the Frank worker owner and drains its delivery", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		const gate = Promise.withResolvers<string>();
+		const hostRegistry = { execute: async () => ({ content: [{ type: "text" as const, text: "parent" }], details: { async: { state: "running", jobId: "bridge-bash" } } }) };
+		const originalBash = BUILTIN_TOOLS.bash;
+		BUILTIN_TOOLS.bash = async workerSession => ({
+			name: "bash",
+			label: "Bash",
+			description: "",
+			parameters: {},
+			execute: async () => {
+				const ownerId = workerSession.getAgentId?.() ?? undefined;
+				manager.register("bash", "Frank worker", () => gate.promise, { id: "bridge-bash", agentId: ownerId, ownerId });
+				return { content: [{ type: "text" as const, text: "started" }], details: { async: { state: "running", jobId: "bridge-bash" } } };
+			},
+		} as never);
+		try {
+			const sessionWithRegistry = {
+				asyncJobManager: manager,
+				getAgentId: () => "Parent",
+				toolRegistry: new Map([["bash", hostRegistry]]),
+				wrapWithHooks: (tool: { name: string; execute: unknown }) => tool,
+			} as unknown as ToolSession;
+			const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "FrankWorker", names: ["bash", "hub"] });
+			await service.handle("bash", { argv: ["echo", "worker"] });
+			expect(manager.getJob("bridge-bash")?.ownerId).toBe("FrankWorker");
+			gate.resolve("FRANK_DELIVERY");
+			await manager.waitForOwnerJobs("FrankWorker");
+			const inbox = await service.handle("hub", { op: "inbox" });
+			expect(inbox.content).toContain("FRANK_DELIVERY");
+			expect(manager.getJob("bridge-bash")?.ownerId).not.toBe("Parent");
+		} finally {
+			BUILTIN_TOOLS.bash = originalBash;
+		}
 		manager.register("bash", "Host", async () => "BASH_JOB_BODY", {
 			id: "bash-job",
 			agentId: "Host",
 			ownerId: "Host",
 		});
 		await manager.getJob("bash-job")?.promise;
-		const sessionWithRegistry = {
+		const hostSession = {
 			asyncJobManager: manager,
 			getAgentId: () => "Host",
 			toolRegistry: new Map([
@@ -701,14 +738,14 @@ describe("Frank host tool service", () => {
 				["hub", { execute: async () => ({ content: [{ type: "text" as const, text: "inbox" }] }) }],
 			]),
 		} as unknown as ToolSession;
-		const service = createFrankHostToolService({
-			session: sessionWithRegistry,
-			agentId: "frank-test",
+		const hostService = createFrankHostToolService({
+			session: hostSession,
+			agentId: "Host",
 			names: ["bash", "hub"],
 		});
-		await service.handle("bash", { argv: ["sleep", "1"] });
-		const result = await service.handle("hub", { op: "inbox" });
-		expect(result.content).toContain("BASH_JOB_BODY");
+		await hostService.handle("bash", { argv: ["sleep", "1"] });
+		const hostResult = await hostService.handle("hub", { op: "inbox" });
+		expect(hostResult.content).toContain("BASH_JOB_BODY");
 	});
 	test("bash bridge appends a drain note only for a running background result", async () => {
 		const registeredTool = {
@@ -717,16 +754,22 @@ describe("Frank host tool service", () => {
 				details: { async: { state: "running", jobId: "job-1", type: "bash" } },
 			}),
 		};
-		const service = createFrankHostToolService({
-			session: { toolRegistry: { get: () => registeredTool } } as unknown as ToolSession,
-			agentId: "frank-test",
-			names: ["bash"],
-		});
+		const originalBash = BUILTIN_TOOLS.bash;
+		BUILTIN_TOOLS.bash = async () => ({ name: "bash", label: "Bash", description: "", parameters: {}, ...registeredTool }) as never;
+		try {
+			const service = createFrankHostToolService({
+				session: { toolRegistry: { get: () => registeredTool } } as unknown as ToolSession,
+				agentId: "frank-test",
+				names: ["bash"],
+			});
 
-		const result = await service.handle("bash", { argv: ["sleep", "1"] });
+			const result = await service.handle("bash", { argv: ["sleep", "1"] });
 
-		expect(result.content).toContain("started");
-		expect(result.content).toContain("Bridge note:");
+			expect(result.content).toContain("started");
+			expect(result.content).toContain("Bridge note:");
+		} finally {
+			BUILTIN_TOOLS.bash = originalBash;
+		}
 	});
 
 	test("bash bridge omits the drain note for a settled result", async () => {
@@ -736,16 +779,22 @@ describe("Frank host tool service", () => {
 				details: { async: { state: "completed", jobId: "job-2", type: "bash" } },
 			}),
 		};
-		const service = createFrankHostToolService({
-			session: { toolRegistry: { get: () => settledTool } } as unknown as ToolSession,
-			agentId: "frank-test",
-			names: ["bash"],
-		});
+		const originalBash = BUILTIN_TOOLS.bash;
+		BUILTIN_TOOLS.bash = async () => ({ name: "bash", label: "Bash", description: "", parameters: {}, ...settledTool }) as never;
+		try {
+			const service = createFrankHostToolService({
+				session: { toolRegistry: { get: () => settledTool } } as unknown as ToolSession,
+				agentId: "frank-test",
+				names: ["bash"],
+			});
 
-		const result = await service.handle("bash", { argv: ["echo", "hi"] });
+			const result = await service.handle("bash", { argv: ["echo", "hi"] });
 
-		expect(result.content).toContain("done");
-		expect(result.content).not.toContain("Bridge note:");
+			expect(result.content).toContain("done");
+			expect(result.content).not.toContain("Bridge note:");
+		} finally {
+			BUILTIN_TOOLS.bash = originalBash;
+		}
 	});
 });
 
@@ -923,20 +972,52 @@ describe("Frank host tool service: child drain", () => {
 		expect(result.content).toContain("DONE");
 		await manager.getJob("WaitForever")?.promise;
 	});
-	test("a body over the inline budget stays on the job row instead of being consumed", async () => {
+	test("oversized child output is spilled to a session artifact before delivery", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
-		manager.register("task", "ChildBig", async () => "x".repeat(13_000), {
-			id: "ChildBig",
-			agentId: "ChildBig",
-			ownerId: "Host",
-		});
-		await manager.getJob("ChildBig")?.promise;
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-async-artifact-"));
+		let artifactPath = "";
+		try {
+			const service = createFrankHostToolService({
+				session: {
+					asyncJobManager: manager,
+					getAgentId: () => "Host",
+					allocateOutputArtifact: async () => ({ id: "77", path: (artifactPath = path.join(dir, "77.async.log")) }),
+				} as unknown as ToolSession,
+				agentId: "frank-test",
+			});
+			const body = "x".repeat(13_000);
+			manager.register("task", "ChildBig", async () => body, { id: "ChildBig", agentId: "ChildBig", ownerId: "Host" });
+			await manager.getJob("ChildBig")?.promise;
 
-		const result = await bridge(manager).handle("hub", { op: "wait", to: "ChildBig", timeoutMs: 5_000 });
+			const result = await service.handle("hub", { op: "wait", to: "ChildBig", timeoutMs: 5_000 });
 
-		expect(result.content).toContain("left intact on the job row: ChildBig");
-		expect(manager.isJobResultConsumed("ChildBig")).toBe(false);
-		expect(manager.getJob("ChildBig")?.resultText?.length).toBe(13_000);
+			expect(result.content).toContain("artifact://77");
+			expect(await fs.readFile(artifactPath, "utf8")).toBe(body);
+			expect(manager.isJobResultConsumed("ChildBig")).toBe(true);
+		} finally {
+			manager.dispose();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+	test("oversized async delivery without artifact storage stays readable without retrying", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		try {
+			const service = createFrankHostToolService({
+				session: { asyncJobManager: manager, getAgentId: () => "Host" } as unknown as ToolSession,
+				agentId: "frank-test",
+			});
+			const body = "x".repeat(13_000);
+			manager.register("task", "ChildBig", async () => body, { id: "ChildBig", agentId: "ChildBig", ownerId: "frank-test" });
+			await manager.getJob("ChildBig")?.promise;
+			await manager.waitForOwnerJobs("frank-test", { timeoutMs: 5_000 });
+			const result = await service.handle("hub", { op: "wait", to: "ChildBig", timeoutMs: 5_000 });
+
+			expect(result.content).toContain("Output truncated");
+			expect(result.content).toContain("Full output unavailable: session artifact storage is not configured.");
+			expect(manager.isJobResultConsumed("ChildBig")).toBe(true);
+		} finally {
+			await manager.dispose();
+		}
 	});
 
 	test("a child owned by another session is never answered from this bridge", async () => {

@@ -112,6 +112,7 @@ export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "t
 interface RetainedFrankWorker {
 	handle: FrankWorkerHandle;
 	spawnOptions: StartFrankWorkerOptions;
+	hostToolService?: FrankHostToolService;
 	closed: boolean;
 	setOnEvent: (onEvent: (event: FrankEvent) => void | Promise<void>) => void;
 }
@@ -122,6 +123,7 @@ async function closeRetainedFrankWorker(id: string, worker: RetainedFrankWorker)
 	if (retainedFrankWorkers.get(id) === worker) retainedFrankWorkers.delete(id);
 	if (worker.closed) return;
 	worker.closed = true;
+	worker.hostToolService?.close();
 	await worker.handle.close();
 }
 
@@ -3121,6 +3123,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				retainedWorker = {
 					handle,
 					spawnOptions: workerOptions,
+					hostToolService,
 					closed: false,
 					setOnEvent: callback => { forwardEvent = callback; },
 				};
@@ -3174,8 +3177,11 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 	}
 	if (retainedWorker) {
 		if (options.keepAlive && exitCode === 0 && !aborted) retainedFrankWorkers.set(id, retainedWorker);
-		else await closeRetainedFrankWorker(id, retainedWorker);
+		else {
+			await closeRetainedFrankWorker(id, retainedWorker);
+		}
 	}
+	else hostToolService?.close();
 	monitor.scheduleProgress(true);
 	monitor.finish();
 	const finalMonitor: SubagentRunMonitor = { ...monitor, rawOutput: () => rawOutput };
