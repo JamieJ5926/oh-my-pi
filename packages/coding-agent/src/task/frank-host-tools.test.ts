@@ -370,16 +370,22 @@ test("edit bridge without a replace-tool accessor still applies through the regi
 				details: { async: { state: "running", jobId: "job-1", type: "bash" } },
 			}),
 		};
-		const service = createFrankHostToolService({
-			session: { toolRegistry: { get: () => registeredTool } } as unknown as ToolSession,
-			agentId: "frank-test",
-			names: ["bash"],
-		});
+		const originalBash = BUILTIN_TOOLS.bash;
+		BUILTIN_TOOLS.bash = async () => ({ name: "bash", label: "Bash", description: "", parameters: {}, ...registeredTool }) as never;
+		try {
+			const service = createFrankHostToolService({
+				session: { toolRegistry: { get: () => registeredTool } } as unknown as ToolSession,
+				agentId: "frank-test",
+				names: ["bash"],
+			});
 
-		const result = await service.handle("bash", { argv: ["sleep", "1"] });
+			const result = await service.handle("bash", { argv: ["sleep", "1"] });
 
-		expect(result.content).toContain("started");
-		expect(result.content).toContain("Bridge note:");
+			expect(result.content).toContain("started");
+			expect(result.content).toContain("Bridge note:");
+		} finally {
+			BUILTIN_TOOLS.bash = originalBash;
+		}
 	});
 
 	test("bash bridge omits the drain note for a settled result", async () => {
@@ -389,16 +395,22 @@ test("edit bridge without a replace-tool accessor still applies through the regi
 				details: { async: { state: "completed", jobId: "job-2", type: "bash" } },
 			}),
 		};
-		const service = createFrankHostToolService({
-			session: { toolRegistry: { get: () => settledTool } } as unknown as ToolSession,
-			agentId: "frank-test",
-			names: ["bash"],
-		});
+		const originalBash = BUILTIN_TOOLS.bash;
+		BUILTIN_TOOLS.bash = async () => ({ name: "bash", label: "Bash", description: "", parameters: {}, ...settledTool }) as never;
+		try {
+			const service = createFrankHostToolService({
+				session: { toolRegistry: { get: () => settledTool } } as unknown as ToolSession,
+				agentId: "frank-test",
+				names: ["bash"],
+			});
 
-		const result = await service.handle("bash", { argv: ["echo", "hi"] });
+			const result = await service.handle("bash", { argv: ["echo", "hi"] });
 
-		expect(result.content).toContain("done");
-		expect(result.content).not.toContain("Bridge note:");
+			expect(result.content).toContain("done");
+			expect(result.content).not.toContain("Bridge note:");
+		} finally {
+			BUILTIN_TOOLS.bash = originalBash;
+		}
 	});
 });
 
