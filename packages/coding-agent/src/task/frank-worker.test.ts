@@ -1,9 +1,4 @@
-import {
-	attachFrankDaemonLane,
-	daemonStateDir,
-	readFrankLaneResult,
-	spawnFrankDaemonWorker,
-} from "./frank-daemon-worker";
+import { attachFrankDaemonLane, daemonStateDir, readFrankLaneResult, spawnFrankDaemonWorker } from "./frank-daemon-worker";
 import { AgentRegistry } from "../registry/agent-registry";
 import { runFrankSubagent } from "./executor";
 import { watch } from "node:fs";
@@ -12,16 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { parseAgent } from "./agents";
-import {
-	DEFAULT_FRANK_WORKER_BUDGETS,
-	FrankProtocolError,
-	frankWorkerEndpoint,
-	parseFrankControl,
-	resolveFrankWorkerBudgets,
-	spawnFrankWorker,
-	startFrankWorker,
-	type FrankEvent,
-} from "./frank-worker";
+import { DEFAULT_FRANK_WORKER_BUDGETS, FrankProtocolError, frankWorkerEndpoint, parseFrankControl, resolveFrankWorkerBudgets, spawnFrankWorker, startFrankWorker, type FrankEvent } from "./frank-worker";
 import { SETTINGS_SCHEMA } from "../config/settings-schema";
 
 let received: number[] = [];
@@ -29,9 +15,7 @@ let received: number[] = [];
 async function makeStub(body: string): Promise<{ cwd: string; exe: string }> {
 	const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-worker-"));
 	const exe = path.join(cwd, "frank-stub");
-	await writeFile(exe, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\n${body}\n`, {
-		mode: 0o700,
-	});
+	await writeFile(exe, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\n${body}\n`, { mode: 0o700 });
 	await chmod(exe, 0o700);
 	return { cwd, exe };
 }
@@ -43,38 +27,20 @@ async function readPid(file: string): Promise<number> {
 }
 
 function workerOptions(exe: string, cwd: string, onEvent: (event: FrankEvent) => void | Promise<void>) {
-	return {
-		exe,
-		endpoint: "http://127.0.0.1:1",
-		model: "test-model",
-		cwd,
-		budgets: { maxToolCalls: 12, wallSecs: 9 },
-		text: "do the work",
-		onEvent,
-	};
+	return { exe, endpoint: "http://127.0.0.1:1", model: "test-model", cwd, budgets: { maxToolCalls: 12, wallSecs: 9 }, text: "do the work", onEvent };
 }
 
 describe("Frank worker transport", () => {
 	test("uses a full OpenAI chat completions endpoint and forwards the API key to the child", async () => {
 		expect(frankWorkerEndpoint("http://127.0.0.1:8317/v1")).toBe("http://127.0.0.1:8317/v1/chat/completions");
-		expect(frankWorkerEndpoint("http://127.0.0.1:8317/v1/chat/completions")).toBe(
-			"http://127.0.0.1:8317/v1/chat/completions",
-		);
-		expect(frankWorkerEndpoint("https://api.anthropic.com/v1/messages")).toBe(
-			"https://api.anthropic.com/v1/messages",
-		);
-		const stub = await makeStub(
-			`printf '%s\\n' "$PI_TRACK_API_KEY" > "$FRANK_KEY_FILE"; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		expect(frankWorkerEndpoint("http://127.0.0.1:8317/v1/chat/completions")).toBe("http://127.0.0.1:8317/v1/chat/completions");
+		expect(frankWorkerEndpoint("https://api.anthropic.com/v1/messages")).toBe("https://api.anthropic.com/v1/messages");
+		const stub = await makeStub(`printf '%s\\n' "$PI_TRACK_API_KEY" > "$FRANK_KEY_FILE"; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		const keyFile = path.join(stub.cwd, "key");
 		process.env.FRANK_KEY_FILE = keyFile;
 		try {
 			const key = ["worker", "test", "key"].join("-");
-			const result = await spawnFrankWorker({
-				...workerOptions(stub.exe, stub.cwd, () => {}),
-				endpoint: frankWorkerEndpoint("http://127.0.0.1:8317/v1"),
-				apiKey: key,
-			});
+			const result = await spawnFrankWorker({ ...workerOptions(stub.exe, stub.cwd, () => {}), endpoint: frankWorkerEndpoint("http://127.0.0.1:8317/v1"), apiKey: key });
 			expect(result.exitCode).toBe(0);
 			expect(await Bun.file(keyFile).text()).toBe(`${key}\n`);
 		} finally {
@@ -83,9 +49,7 @@ describe("Frank worker transport", () => {
 		}
 	});
 	test("passes the absolute read root to the Frank child", async () => {
-		const stub = await makeStub(
-			`printf '%s\\n' "$@" > "$FRANK_ARGV_FILE"; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const stub = await makeStub(`printf '%s\\n' "$@" > "$FRANK_ARGV_FILE"; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		const argvFile = path.join(stub.cwd, "argv");
 		process.env.FRANK_ARGV_FILE = argvFile;
 		try {
@@ -101,47 +65,17 @@ describe("Frank worker transport", () => {
 		}
 	});
 
+
 	test("validates all controls, separates pipes, and awaits events through final_seq", async () => {
-		expect(parseFrankControl({ type: "ack", version: 1, turn_id: 1, accepted: true, pending_id: 4 })).toEqual({
-			kind: "ack",
-			version: 1,
-			turn_id: 1,
-			accepted: true,
-			pending_id: 4,
-		});
-		expect(parseFrankControl({ type: "heartbeat", version: 1, at_ms: 20 })).toEqual({
-			kind: "heartbeat",
-			version: 1,
-			at_ms: 20,
-		});
-		expect(parseFrankControl({ type: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 1 })).toEqual(
-			{ kind: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 1 },
-		);
-		expect(parseFrankControl({ type: "saved", version: 1, path: "/tmp/session.jsonl" })).toEqual({
-			kind: "saved",
-			version: 1,
-			path: "/tmp/session.jsonl",
-		});
-		expect(parseFrankControl({ type: "cancelled", version: 1, turn_id: 1 })).toEqual({
-			kind: "cancelled",
-			version: 1,
-			turn_id: 1,
-		});
-		expect(parseFrankControl({ type: "error", version: 1, message: "problem" })).toEqual({
-			kind: "error",
-			version: 1,
-			message: "problem",
-		});
-		const stub = await makeStub(
-			`IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"do the work"}' ] || exit 4; printf '%s\\n' '{"type":"heartbeat","version":1,"at_ms":20}' '{"type":"saved","version":1,"path":"/tmp/session.jsonl"}' '{"type":"cancelled","version":1,"turn_id":1}' >&2; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' >&2; printf '%s\\n' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		expect(parseFrankControl({ type: "ack", version: 1, turn_id: 1, accepted: true, pending_id: 4 })).toEqual({ kind: "ack", version: 1, turn_id: 1, accepted: true, pending_id: 4 });
+		expect(parseFrankControl({ type: "heartbeat", version: 1, at_ms: 20 })).toEqual({ kind: "heartbeat", version: 1, at_ms: 20 });
+		expect(parseFrankControl({ type: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 1 })).toEqual({ kind: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 1 });
+		expect(parseFrankControl({ type: "saved", version: 1, path: "/tmp/session.jsonl" })).toEqual({ kind: "saved", version: 1, path: "/tmp/session.jsonl" });
+		expect(parseFrankControl({ type: "cancelled", version: 1, turn_id: 1 })).toEqual({ kind: "cancelled", version: 1, turn_id: 1 });
+		expect(parseFrankControl({ type: "error", version: 1, message: "problem" })).toEqual({ kind: "error", version: 1, message: "problem" });
+		const stub = await makeStub(`IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"do the work"}' ] || exit 4; printf '%s\\n' '{"type":"heartbeat","version":1,"at_ms":20}' '{"type":"saved","version":1,"path":"/tmp/session.jsonl"}' '{"type":"cancelled","version":1,"turn_id":1}' >&2; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' >&2; printf '%s\\n' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		received = [];
-		const result = await spawnFrankWorker(
-			workerOptions(stub.exe, stub.cwd, async event => {
-				await Promise.resolve();
-				received.push(event.seq);
-			}),
-		);
+		const result = await spawnFrankWorker(workerOptions(stub.exe, stub.cwd, async event => { await Promise.resolve(); received.push(event.seq); }));
 		expect(result.terminal.final_seq).toBe(1);
 		expect(result.exitCode).toBe(0);
 		expect(received).toEqual([1]);
@@ -150,62 +84,41 @@ describe("Frank worker transport", () => {
 	test("services host tool requests over stdin and rejects malformed requests", async () => {
 		const args = { agent: "frank-explorer", task: "inspect this" };
 		const request = JSON.stringify({ type: "tool_request", version: 1, call_id: 7, turn_id: 1, name: "task", args });
-		const successStub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"tool_request","version":1,"call_id":7,"turn_id":1,"name":"task","args":{"agent":"frank-explorer","task":"inspect this"}}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; printf '%s\\n' "$input" > "$FRANK_TOOL_RESULT_FILE"; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const successStub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"tool_request","version":1,"call_id":7,"turn_id":1,"name":"task","args":{"agent":"frank-explorer","task":"inspect this"}}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; printf '%s\\n' "$input" > "$FRANK_TOOL_RESULT_FILE"; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		const resultFile = path.join(successStub.cwd, "tool-result");
 		process.env.FRANK_TOOL_RESULT_FILE = resultFile;
 		try {
 			const calls: unknown[] = [];
-			const result = await spawnFrankWorker({
-				...workerOptions(successStub.exe, successStub.cwd, () => {}),
-				hostTools: ["task", "hub"],
-				onToolRequest: async req => {
-					calls.push(req.args);
-					return { ok: true, content: "task accepted" };
-				},
-			});
+			const result = await spawnFrankWorker({ ...workerOptions(successStub.exe, successStub.cwd, () => {}), hostTools: ["task", "hub"], onToolRequest: async req => { calls.push(req.args); return { ok: true, content: "task accepted" }; } });
 			expect(calls).toEqual([args]);
-			expect(await Bun.file(resultFile).text()).toBe(
-				'{"op":"tool_result","call_id":7,"ok":true,"content":"task accepted"}\n',
-			);
+			expect(await Bun.file(resultFile).text()).toBe('{"op":"tool_result","call_id":7,"ok":true,"content":"task accepted"}\n');
 			expect(result.exitCode).toBe(0);
 		} finally {
 			delete process.env.FRANK_TOOL_RESULT_FILE;
 			await rm(successStub.cwd, { recursive: true, force: true });
 		}
 
-		const disabledStub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"tool_request","version":1,"call_id":8,"turn_id":1,"name":"hub","args":{}}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; printf '%s\\n' "$input" > "$FRANK_TOOL_RESULT_FILE"; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const disabledStub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"tool_request","version":1,"call_id":8,"turn_id":1,"name":"hub","args":{}}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; printf '%s\\n' "$input" > "$FRANK_TOOL_RESULT_FILE"; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		const disabledFile = path.join(disabledStub.cwd, "tool-result");
 		process.env.FRANK_TOOL_RESULT_FILE = disabledFile;
 		try {
 			await spawnFrankWorker(workerOptions(disabledStub.exe, disabledStub.cwd, () => {}));
-			expect(await Bun.file(disabledFile).text()).toBe(
-				'{"op":"tool_result","call_id":8,"ok":false,"error":"host tools are not enabled for this worker"}\n',
-			);
+			expect(await Bun.file(disabledFile).text()).toBe('{"op":"tool_result","call_id":8,"ok":false,"error":"host tools are not enabled for this worker"}\n');
 		} finally {
 			delete process.env.FRANK_TOOL_RESULT_FILE;
 			await rm(disabledStub.cwd, { recursive: true, force: true });
 		}
 
-		const malformedStub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"tool_request","version":1,"turn_id":1,"name":"task","args":{}}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const malformedStub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"tool_request","version":1,"turn_id":1,"name":"task","args":{}}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		try {
-			await expect(spawnFrankWorker(workerOptions(malformedStub.exe, malformedStub.cwd, () => {}))).rejects.toThrow(
-				"Invalid Frank tool_request control",
-			);
+			await expect(spawnFrankWorker(workerOptions(malformedStub.exe, malformedStub.cwd, () => {}))).rejects.toThrow("Invalid Frank tool_request control");
 		} finally {
 			await rm(malformedStub.cwd, { recursive: true, force: true });
 		}
 	});
 
 	test("abort after terminal completion cancels before signaling and reaps the direct child", async () => {
-		const stub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' "$input" >> "$FRANK_EVENTS_FILE"; printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'IFS= read -r input; printf "%s\\n" "$input" >> "$FRANK_EVENTS_FILE"; printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"; printf "%s\\n" term >> "$FRANK_EVENTS_FILE"; exit 0' TERM; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; printf '%s\\n' ready > "$FRANK_READY_FILE"; while IFS= read -r input; do :; done`,
-		);
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' "$input" >> "$FRANK_EVENTS_FILE"; printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'IFS= read -r input; printf "%s\\n" "$input" >> "$FRANK_EVENTS_FILE"; printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"; printf "%s\\n" term >> "$FRANK_EVENTS_FILE"; exit 0' TERM; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; printf '%s\\n' ready > "$FRANK_READY_FILE"; while IFS= read -r input; do :; done`);
 		const pidFile = path.join(stub.cwd, "pid");
 		const sigFile = path.join(stub.cwd, "sigterm");
 		const eventsFile = path.join(stub.cwd, "events");
@@ -223,15 +136,12 @@ describe("Frank worker transport", () => {
 					resolve();
 				}
 			});
-			void Bun.file(readyFile)
-				.exists()
-				.then(exists => {
-					if (exists) {
-						watcher.close();
-						resolve();
-					}
-				})
-				.catch(reject);
+			void Bun.file(readyFile).exists().then(exists => {
+				if (exists) {
+					watcher.close();
+					resolve();
+				}
+			}).catch(reject);
 		});
 		const pid = await readPid(pidFile);
 		controller.abort(new Error("terminal shutdown cancellation"));
@@ -246,22 +156,14 @@ describe("Frank worker transport", () => {
 	});
 
 	test("bounds ignored shutdown and reaps the child without abort", async () => {
-		const stub = await makeStub(
-			`printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"; sleep 0.25; printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE.alive"; term_hold_n=0; while [ $term_hold_n -lt 60 ]; do sleep 0.05; term_hold_n=$((term_hold_n + 1)); done' TERM; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ] || exit 4; printf '%s\\n' '{"type":"shutdown-seen"}' >&2; IFS= read -r ignored`,
-		);
+		const stub = await makeStub(`printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"; sleep 0.25; printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE.alive"; term_hold_n=0; while [ $term_hold_n -lt 60 ]; do sleep 0.05; term_hold_n=$((term_hold_n + 1)); done' TERM; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ] || exit 4; printf '%s\\n' '{"type":"shutdown-seen"}' >&2; IFS= read -r ignored`);
 		const pidFile = path.join(stub.cwd, "pid");
 		const sigFile = path.join(stub.cwd, "sigterm");
 		process.env.FRANK_PID_FILE = pidFile;
 		process.env.FRANK_SIGTERM_FILE = sigFile;
 		let resolveEvent: (() => void) | undefined;
-		const eventReceived = new Promise<void>(resolve => {
-			resolveEvent = resolve;
-		});
-		const worker = spawnFrankWorker(
-			workerOptions(stub.exe, stub.cwd, () => {
-				resolveEvent?.();
-			}),
-		);
+		const eventReceived = new Promise<void>(resolve => { resolveEvent = resolve; });
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, () => { resolveEvent?.(); }));
 		await eventReceived;
 		const pid = await readPid(pidFile);
 		const started = Date.now();
@@ -278,46 +180,22 @@ describe("Frank worker transport", () => {
 	});
 
 	test("settles completion when the child exits while the final callback is pending", async () => {
-		const stub = await makeStub(
-			`printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"' TERM; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"final"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; exit 0`,
-		);
+		const stub = await makeStub(`printf '%s\\n' "$$" > "$FRANK_PID_FILE"; trap 'printf "%s\\n" "$$" > "$FRANK_SIGTERM_FILE"' TERM; IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"final"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; exit 0`);
 		const pidFile = path.join(stub.cwd, "pid");
 		process.env.FRANK_PID_FILE = pidFile;
 		let releaseCallback: (() => void) | undefined;
 		let callbackStarted: (() => void) | undefined;
 		let callbackCompleted = false;
-		const started = new Promise<void>(resolve => {
-			callbackStarted = resolve;
-		});
-		const callbackReleased = new Promise<void>(resolve => {
-			releaseCallback = resolve;
-		});
-		const worker = spawnFrankWorker(
-			workerOptions(stub.exe, stub.cwd, async () => {
-				callbackStarted?.();
-				await callbackReleased;
-				callbackCompleted = true;
-			}),
-		);
+		const started = new Promise<void>(resolve => { callbackStarted = resolve; });
+		const callbackReleased = new Promise<void>(resolve => { releaseCallback = resolve; });
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, async () => { callbackStarted?.(); await callbackReleased; callbackCompleted = true; }));
 		await started;
 		const pid = await readPid(pidFile);
 		let settled = false;
-		void worker.then(
-			() => {
-				settled = true;
-			},
-			() => {
-				settled = true;
-			},
-		);
+		void worker.then(() => { settled = true; }, () => { settled = true; });
 		const reapDeadline = Date.now() + 1000;
 		while (Date.now() < reapDeadline) {
-			try {
-				process.kill(pid, 0);
-			} catch (error) {
-				if (error instanceof Error && "code" in error && error.code === "ESRCH") break;
-				throw error;
-			}
+			try { process.kill(pid, 0); } catch (error) { if (error instanceof Error && "code" in error && error.code === "ESRCH") break; throw error; }
 			await Bun.sleep(10);
 		}
 		expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
@@ -332,23 +210,12 @@ describe("Frank worker transport", () => {
 	});
 
 	test("closes successfully after a pending final callback completes", async () => {
-		const stub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"final"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"final"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		let releaseCallback: (() => void) | undefined;
 		let callbackStarted: (() => void) | undefined;
-		const started = new Promise<void>(resolve => {
-			callbackStarted = resolve;
-		});
-		const callbackReleased = new Promise<void>(resolve => {
-			releaseCallback = resolve;
-		});
-		const worker = spawnFrankWorker(
-			workerOptions(stub.exe, stub.cwd, async () => {
-				callbackStarted?.();
-				await callbackReleased;
-			}),
-		);
+		const started = new Promise<void>(resolve => { callbackStarted = resolve; });
+		const callbackReleased = new Promise<void>(resolve => { releaseCallback = resolve; });
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, async () => { callbackStarted?.(); await callbackReleased; }));
 		await started;
 		releaseCallback?.();
 		const result = await worker;
@@ -358,53 +225,29 @@ describe("Frank worker transport", () => {
 	});
 
 	test("awaits trailing stdout callback and propagates its rejection", async () => {
-		const stub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"trailing"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"trailing"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		let callbackStarted = false;
-		const worker = spawnFrankWorker(
-			workerOptions(stub.exe, stub.cwd, async () => {
-				callbackStarted = true;
-				await Promise.resolve();
-				throw new Error("trailing callback failed");
-			}),
-		);
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, async () => { callbackStarted = true; await Promise.resolve(); throw new Error("trailing callback failed"); }));
 		await expect(worker).rejects.toThrow("trailing callback failed");
 		expect(callbackStarted).toBe(true);
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
 
 	test("rejects a gapped event sequence before delivery", async () => {
-		const stub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":2,"event":{"name":"gap"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":2}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":2,"event":{"name":"gap"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":2}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		received = [];
-		const worker = spawnFrankWorker(
-			workerOptions(stub.exe, stub.cwd, event => {
-				received.push(event.seq);
-			}),
-		);
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, event => { received.push(event.seq); }));
 		let rejection: unknown;
-		try {
-			await worker;
-		} catch (error) {
-			rejection = error;
-		}
+		try { await worker; } catch (error) { rejection = error; }
 		expect(rejection).toBeInstanceOf(FrankProtocolError);
 		expect(rejection instanceof Error ? rejection.message : undefined).toBe("Frank worker event out of contract");
 		expect(received).toEqual([]);
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
 	test("skips Meter bookkeeping while admitting terminal contract events", async () => {
-		const stub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"kind":{"AssistantDelta":"answer"}}}' '{"type":"event","seq":2,"event":{"kind":{"Meter":{}}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":2}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"kind":{"AssistantDelta":"answer"}}}' '{"type":"event","seq":2,"event":{"kind":{"Meter":{}}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":2}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		received = [];
-		const result = await spawnFrankWorker(
-			workerOptions(stub.exe, stub.cwd, event => {
-				received.push(event.seq);
-			}),
-		);
+		const result = await spawnFrankWorker(workerOptions(stub.exe, stub.cwd, event => { received.push(event.seq); }));
 		expect(received).toEqual([1]);
 		expect(result.terminal.final_seq).toBe(2);
 		expect(result.text).toBe("answer");
@@ -412,15 +255,9 @@ describe("Frank worker transport", () => {
 	});
 
 	test("ignores events beyond terminal barrier", async () => {
-		const stub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"a"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; sleep 0.3; printf '%s\\n' '{"type":"event","seq":2,"event":{"name":"late"}}'; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"a"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; sleep 0.3; printf '%s\\n' '{"type":"event","seq":2,"event":{"name":"late"}}'; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		received = [];
-		const result = await spawnFrankWorker(
-			workerOptions(stub.exe, stub.cwd, event => {
-				received.push(event.seq);
-			}),
-		);
+		const result = await spawnFrankWorker(workerOptions(stub.exe, stub.cwd, event => { received.push(event.seq); }));
 		expect(received).toEqual([1]);
 		expect(result.terminal.final_seq).toBe(1);
 		expect(result.exitCode).toBe(0);
@@ -428,19 +265,10 @@ describe("Frank worker transport", () => {
 	});
 
 	test("clean run remains unsettled until stdout closes", async () => {
-		const stub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"a"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]; sleep 0.3`,
-		);
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"a"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]; sleep 0.3`);
 		let settled = false;
 		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, () => {}));
-		void worker.then(
-			() => {
-				settled = true;
-			},
-			() => {
-				settled = true;
-			},
-		);
+		void worker.then(() => { settled = true; }, () => { settled = true; });
 		await Bun.sleep(150);
 		expect(settled).toBe(false);
 		const result = await worker;
@@ -450,9 +278,7 @@ describe("Frank worker transport", () => {
 	});
 
 	test("folds assistant text in exact event sequence order through final_seq", async () => {
-		const stub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"Hello "}]},"assistantMessageEvent":{"type":"text_delta","delta":"Hello "}}}' '{"type":"event","seq":2,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"Hello from "}]},"assistantMessageEvent":{"type":"text_delta","delta":"from "}}}' '{"type":"event","seq":3,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"Hello from Frank"}]},"assistantMessageEvent":{"type":"text_delta","delta":"Frank"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":3}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"Hello "}]},"assistantMessageEvent":{"type":"text_delta","delta":"Hello "}}}' '{"type":"event","seq":2,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"Hello from "}]},"assistantMessageEvent":{"type":"text_delta","delta":"from "}}}' '{"type":"event","seq":3,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"Hello from Frank"}]},"assistantMessageEvent":{"type":"text_delta","delta":"Frank"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":3}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		const result = await spawnFrankWorker(workerOptions(stub.exe, stub.cwd, () => {}));
 		expect(result.text).toBe("Hello from Frank");
 		expect(result.terminal.final_seq).toBe(3);
@@ -460,38 +286,24 @@ describe("Frank worker transport", () => {
 	});
 
 	test("rejects stdout closing before terminal final_seq is delivered", async () => {
-		const stub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":"partial"}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":2}' >&2; exit 0`,
-		);
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":"partial"}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":2}' >&2; exit 0`);
 		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, () => {}));
 		await expect(worker).rejects.toThrow("Frank exited before completing the turn");
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
 
 	test("rejects a gapped event sequence instead of completing its terminal barrier", async () => {
-		const stub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":"first"}' '{"type":"event","seq":3,"event":"third"}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":3}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":"first"}' '{"type":"event","seq":3,"event":"third"}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":3}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, () => {}));
 		await expect(worker).rejects.toBeInstanceOf(FrankProtocolError);
 	});
 
 	test("rejects duplicate sequence with typed error and specific message", async () => {
-		const stub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"a"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; sleep 0.3; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"dup"}}'; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"a"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; sleep 0.3; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"dup"}}'; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		received = [];
-		const worker = spawnFrankWorker(
-			workerOptions(stub.exe, stub.cwd, event => {
-				received.push(event.seq);
-			}),
-		);
+		const worker = spawnFrankWorker(workerOptions(stub.exe, stub.cwd, event => { received.push(event.seq); }));
 		let rejection: unknown;
-		try {
-			await worker;
-		} catch (error) {
-			rejection = error;
-		}
+		try { await worker; } catch (error) { rejection = error; }
 		expect(received).toEqual([1]);
 		expect(rejection).toBeInstanceOf(FrankProtocolError);
 		expect((rejection as Error).message).toBe("Frank worker duplicate event sequence");
@@ -499,41 +311,18 @@ describe("Frank worker transport", () => {
 		await rm(stub.cwd, { recursive: true, force: true });
 	});
 	test("keeps one worker process alive for two sequential turns", async () => {
-		const stub = await makeStub(
-			`printf '%s\\n' "$$" >> "$FRANK_PID_FILE"; IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"first"}' ] || exit 4; printf '%s\\n' '{"type":"event","seq":1,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"first answer"}]},"assistantMessageEvent":{"type":"text_delta","delta":"first answer"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":2,"text":"second"}' ] || exit 5; printf '%s\\n' '{"type":"event","seq":2,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"second answer"}]},"assistantMessageEvent":{"type":"text_delta","delta":"second answer"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":2,"accepted":true}' '{"type":"terminal","version":1,"turn_id":2,"terminal":"Answer","final_seq":2}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ] || exit 6`,
-		);
+		const stub = await makeStub(`printf '%s\\n' "$$" >> "$FRANK_PID_FILE"; IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"first"}' ] || exit 4; printf '%s\\n' '{"type":"event","seq":1,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"first answer"}]},"assistantMessageEvent":{"type":"text_delta","delta":"first answer"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":2,"text":"second"}' ] || exit 5; printf '%s\\n' '{"type":"event","seq":2,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"second answer"}]},"assistantMessageEvent":{"type":"text_delta","delta":"second answer"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":2,"accepted":true}' '{"type":"terminal","version":1,"turn_id":2,"terminal":"Answer","final_seq":2}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ] || exit 6`);
 		const pidFile = path.join(stub.cwd, "pids");
 		process.env.FRANK_PID_FILE = pidFile;
 		try {
 			received = [];
-			const worker = await startFrankWorker({
-				exe: stub.exe,
-				endpoint: "http://127.0.0.1:1",
-				model: "test-model",
-				cwd: stub.cwd,
-				budgets: { maxToolCalls: 12, wallSecs: 9 },
-				onEvent: event => {
-					received.push(event.seq);
-				},
-			});
+			const worker = await startFrankWorker({ exe: stub.exe, endpoint: "http://127.0.0.1:1", model: "test-model", cwd: stub.cwd, budgets: { maxToolCalls: 12, wallSecs: 9 }, onEvent: event => { received.push(event.seq); } });
 			try {
 				const first = await worker.runTurn("first");
 				const second = await worker.runTurn("second");
-				expect(first.terminal).toEqual({
-					kind: "terminal",
-					version: 1,
-					turn_id: 1,
-					terminal: "Answer",
-					final_seq: 1,
-				});
+				expect(first.terminal).toEqual({ kind: "terminal", version: 1, turn_id: 1, terminal: "Answer", final_seq: 1 });
 				expect(first.text).toBe("first answer");
-				expect(second.terminal).toEqual({
-					kind: "terminal",
-					version: 1,
-					turn_id: 2,
-					terminal: "Answer",
-					final_seq: 2,
-				});
+				expect(second.terminal).toEqual({ kind: "terminal", version: 1, turn_id: 2, terminal: "Answer", final_seq: 2 });
 				expect(second.text).toBe("second answer");
 				expect(received).toEqual([1, 2]);
 				expect((await Bun.file(pidFile).text()).trim().split(/\r?\n/)).toHaveLength(1);
@@ -551,19 +340,12 @@ describe("Frank worker seat budgets", () => {
 	const seat = (frontmatter: string) =>
 		parseAgent("memory:frank-budget-seat.md", `---\n${frontmatter}---\nWork.\n`, "project");
 	test("a seat's declared budgets reach the worker", () => {
-		const agent = seat(
-			'name: frank-coordinator\ndescription: "test seat"\nruntime: frank\nmodel: cli-proxy/test\nmaxToolCalls: 256\nwallSecs: 1800\n',
-		);
+		const agent = seat('name: frank-coordinator\ndescription: "test seat"\nruntime: frank\nmodel: cli-proxy/test\nmaxToolCalls: 256\nwallSecs: 1800\n');
 		expect(resolveFrankWorkerBudgets(agent)).toEqual({ maxToolCalls: 256, wallSecs: 1800 });
 	});
 	test("missing budget fields fall back to host defaults", () => {
-		const partial = seat(
-			'name: frank-plain\ndescription: "test seat"\nruntime: frank\nmodel: cli-proxy/test\nmaxToolCalls: 256\n',
-		);
-		expect(resolveFrankWorkerBudgets(partial)).toEqual({
-			maxToolCalls: 256,
-			wallSecs: DEFAULT_FRANK_WORKER_BUDGETS.wallSecs,
-		});
+		const partial = seat('name: frank-plain\ndescription: "test seat"\nruntime: frank\nmodel: cli-proxy/test\nmaxToolCalls: 256\n');
+		expect(resolveFrankWorkerBudgets(partial)).toEqual({ maxToolCalls: 256, wallSecs: DEFAULT_FRANK_WORKER_BUDGETS.wallSecs });
 		const bare = seat('name: frank-bare\ndescription: "test seat"\nruntime: frank\nmodel: cli-proxy/test\n');
 		expect(resolveFrankWorkerBudgets(bare)).toEqual({ maxToolCalls: 64, wallSecs: 600 });
 	});
@@ -573,17 +355,12 @@ describe("Frank daemon lane reader", () => {
 	test("reads a finished lane answer from the mirrored attach stream", async () => {
 		const directory = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-reader-"));
 		const event = { seq: 2, kind: { TerminalDone: { seq: 2, outcome: "Answer" } } };
-		await writeFile(
-			path.join(directory, "FrankSurvivalProof.frank.jsonl"),
-			`${JSON.stringify(event)}\n${JSON.stringify({ details: "Recovered answer" })}\nattach=done session=FrankSurvivalProof from_seq=0 events=1\n`,
-		);
+		await writeFile(path.join(directory, "FrankSurvivalProof.frank.jsonl"), `${JSON.stringify(event)}\n${JSON.stringify({ details: "Recovered answer" })}\nattach=done session=FrankSurvivalProof from_seq=0 events=1\n`);
 		try {
 			const result = await readFrankLaneResult(directory, "FrankSurvivalProof");
 			expect(result.text).toBe("Recovered answer");
 			expect(result.exitCode).toBe(0);
-		} finally {
-			await rm(directory, { recursive: true, force: true });
-		}
+		} finally { await rm(directory, { recursive: true, force: true }); }
 	});
 });
 
@@ -608,29 +385,12 @@ describe("Frank daemon transport", () => {
 		const cwd = await mkdtemp(path.join(os.tmpdir(), "frank-daemon-cli-"));
 		const bin = path.join(cwd, "frank");
 		const artifactsDir = path.join(cwd, "artifacts");
-		await writeFile(
-			bin,
-			`#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$FRANK_DAEMON_TOOL_CHOICE" "$FRANK_DAEMON_READ_ROOT" "$FRANK_DAEMON_MODEL" > "$FRANK_PARITY_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`,
-			{ mode: 0o700 },
-		);
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$FRANK_DAEMON_TOOL_CHOICE" "$FRANK_DAEMON_READ_ROOT" "$FRANK_DAEMON_MODEL" > "$FRANK_PARITY_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
 		const parityFile = path.join(cwd, "daemon-env");
 		process.env.FRANK_PARITY_FILE = parityFile;
 		const delivered: FrankEvent[] = [];
 		try {
-			const result = await spawnFrankDaemonWorker({
-				exe: bin,
-				frankBin: bin,
-				endpoint: "http://127.0.0.1:1",
-				model: "test-model:high",
-				cwd,
-				budgets: { maxToolCalls: 4, wallSecs: 9 },
-				text: "inspect",
-				id: "lane-1",
-				artifactsDir,
-				onEvent: event => {
-					delivered.push(event);
-				},
-			});
+			const result = await spawnFrankDaemonWorker({ exe: bin, frankBin: bin, endpoint: "http://127.0.0.1:1", model: "test-model:high", cwd, budgets: { maxToolCalls: 4, wallSecs: 9 }, text: "inspect", id: "lane-1", artifactsDir, onEvent: event => { delivered.push(event); } });
 			expect(result.text).toBe("daemon answer");
 			expect(result.exitCode).toBe(0);
 			expect(delivered.map(event => event.seq)).toEqual([1, 2]);
@@ -647,34 +407,17 @@ describe("Frank daemon transport", () => {
 		const bin = path.join(cwd, "frank");
 		const artifactsDir = path.join(cwd, "artifacts");
 		const argvFile = path.join(cwd, "frank-argv.txt");
-		await writeFile(
-			bin,
-			`#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`,
-			{ mode: 0o700 },
-		);
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\nif [ "$1" = "daemon" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; exit 0; fi\nif [ "$1" = "__daemon-run" ]; then exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' "$*" >> "$FRANK_ARGV_FILE"; printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-1 from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
 		process.env.FRANK_ARGV_FILE = argvFile;
 		try {
 			for (const id of ["lane-1", "lane-2"]) {
-				await spawnFrankDaemonWorker({
-					exe: bin,
-					frankBin: bin,
-					endpoint: "http://127.0.0.1:1",
-					model: "test-model:high",
-					cwd,
-					budgets: { maxToolCalls: 4, wallSecs: 9 },
-					text: "inspect",
-					id,
-					artifactsDir,
-					onEvent: () => {},
-				});
+				await spawnFrankDaemonWorker({ exe: bin, frankBin: bin, endpoint: "http://127.0.0.1:1", model: "test-model:high", cwd, budgets: { maxToolCalls: 4, wallSecs: 9 }, text: "inspect", id, artifactsDir, onEvent: () => {} });
 			}
 			const argv = await Bun.file(argvFile).text();
 			expect(argv).not.toMatch(/--session (?:lane-1|lane-2)(?:\s|$)/);
 			const keys: string[] = [];
 			for (const id of ["lane-1", "lane-2"]) {
-				expect((await Bun.file(path.join(artifactsDir, `${id}.frank-daemon`, "state-dir")).text()).trim()).toBe(
-					isolatedStateDir,
-				);
+				expect((await Bun.file(path.join(artifactsDir, `${id}.frank-daemon`, "state-dir")).text()).trim()).toBe(isolatedStateDir);
 				const key = (await Bun.file(path.join(artifactsDir, `${id}.frank-daemon`, "session-key")).text()).trim();
 				expect(key).toMatch(/^[0-9a-f]{16}$/);
 				expect(key).not.toBe(id);
@@ -684,10 +427,7 @@ describe("Frank daemon transport", () => {
 			for (const key of keys) {
 				expect(argv).toContain(`attach --session ${key} --json`);
 			}
-		} finally {
-			delete process.env.FRANK_ARGV_FILE;
-			await rm(cwd, { recursive: true, force: true });
-		}
+		} finally { delete process.env.FRANK_ARGV_FILE; await rm(cwd, { recursive: true, force: true }); }
 	});
 	test("defaults Frank transport to the shared daemon", () => {
 		expect(SETTINGS_SCHEMA["task.frankTransport"].default).toBe("daemon");
@@ -697,24 +437,13 @@ describe("Frank daemon transport", () => {
 		const bin = path.join(cwd, "frank");
 		const artifactsDir = path.join(cwd, "artifacts");
 		await mkdir(artifactsDir, { recursive: true });
-		await Bun.write(
-			path.join(artifactsDir, "lane-recover.frank.jsonl"),
-			'{"seq":1,"kind":{"AssistantDelta":"incomplete"}}\n',
-		);
-		await writeFile(
-			bin,
-			`#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-recover from_seq=0 events=2'; exit 0; fi\nexit 9\n`,
-			{ mode: 0o700 },
-		);
+		await Bun.write(path.join(artifactsDir, "lane-recover.frank.jsonl"), "{\"seq\":1,\"kind\":{\"AssistantDelta\":\"incomplete\"}}\n");
+		await writeFile(bin, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "frank test-stub"; exit 0; fi\nif [ "$1" = "attach" ]; then printf '%s\\n' '{"seq":1,"kind":{"AssistantDelta":"daemon answer"}}' '{"seq":2,"kind":{"TerminalDone":{"seq":2,"outcome":"Answer"}}}' '{"details":"daemon answer"}' 'attach=done session=lane-recover from_seq=0 events=2'; exit 0; fi\nexit 9\n`, { mode: 0o700 });
 		try {
 			const result = await attachFrankDaemonLane({ artifactsDir, id: "lane-recover", cwd, frankBin: bin });
 			expect(result.text).toBe("daemon answer");
-			expect((await readFrankLaneResult(artifactsDir, "lane-recover", { cwd, frankBin: bin })).text).toBe(
-				"daemon answer",
-			);
-		} finally {
-			await rm(cwd, { recursive: true, force: true });
-		}
+			expect((await readFrankLaneResult(artifactsDir, "lane-recover", { cwd, frankBin: bin })).text).toBe("daemon answer");
+		} finally { await rm(cwd, { recursive: true, force: true }); }
 	});
 });
 
@@ -726,15 +455,9 @@ describe("Frank TUI row progress and nesting", () => {
 		const taskText = "test frank task description";
 		const resolvedModel = "cli-proxy/test-model:high";
 
-		const agent = parseAgent(
-			"test.md",
-			"---\nname: frank-test-agent\ndescription: test agent\nruntime: frank\nmodel: cli-proxy/test-model\n---\nTask\n",
-			"project",
-		);
+		const agent = parseAgent("test.md", "---\nname: frank-test-agent\ndescription: test agent\nruntime: frank\nmodel: cli-proxy/test-model\n---\nTask\n", "project");
 
-		const stub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"kind":{"Meter":{"input_tokens":150,"output_tokens":50}}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"kind":{"Meter":{"input_tokens":150,"output_tokens":50}}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		try {
 			let capturedProgressTokens = 0;
 			let capturedResolvedModel: string | undefined;
@@ -807,8 +530,9 @@ describe("Frank TUI row progress and nesting", () => {
 					};
 				},
 			});
+			expect(promptText).toContain(`Your OMP parent agent ID is ${parentAgentId}.`);
 			expect(promptText).toContain(
-				`Your OMP parent agent ID is ${parentAgentId}. Use this exact ID as the recipient value when messaging your parent with hub.`,
+				"Use this exact ID as the recipient value when messaging your parent with hub.",
 			);
 			expect(promptText).toStartWith("Complete assignment thoroughly");
 		} finally {
@@ -816,20 +540,15 @@ describe("Frank TUI row progress and nesting", () => {
 		}
 	});
 
+
 	// 2026-09-26 native-vs-Frank trial: Frank pots started with no skills loaded and
 	// spent 20-40 s reading them one call at a time. Native pots get autoloadSkills
 	// before the first prompt; a Frank lane must get the same bodies in its role file.
 	test("autoload skills ride in the Frank lane's role instructions", async () => {
 		const registry = AgentRegistry.global();
 		const laneId = `frank-autoload-${Date.now()}`;
-		const agent = parseAgent(
-			"test.md",
-			"---\nname: frank-autoload-agent\ndescription: test agent\nruntime: frank\nmodel: cli-proxy/test-model\n---\nRole body\n",
-			"project",
-		);
-		const stub = await makeStub(
-			`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"kind":{"Meter":{"input_tokens":1,"output_tokens":1}}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`,
-		);
+		const agent = parseAgent("test.md", "---\nname: frank-autoload-agent\ndescription: test agent\nruntime: frank\nmodel: cli-proxy/test-model\n---\nRole body\n", "project");
+		const stub = await makeStub(`IFS= read -r input; printf '%s\\n' '{"type":"event","seq":1,"event":{"kind":{"Meter":{"input_tokens":1,"output_tokens":1}}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		const skillFile = path.join(stub.cwd, "SKILL.md");
 		await writeFile(skillFile, "---\nname: probe-skill\ndescription: probe\n---\nSKILL BODY MARKER\n");
 		const artifactsDir = path.join(stub.cwd, "artifacts");
@@ -850,16 +569,7 @@ describe("Frank TUI row progress and nesting", () => {
 				artifactsDir,
 				autoloadSkills: [{ name: "probe-skill", filePath: skillFile, baseDir: stub.cwd } as never],
 			});
-			const instructions = await Bun.file(
-				path.join(
-					artifactsDir,
-					`${laneId}.frank-profiles`,
-					"roles",
-					"frank-autoload-agent",
-					"instructions",
-					"frank-autoload-agent.md",
-				),
-			).text();
+			const instructions = await Bun.file(path.join(artifactsDir, `${laneId}.frank-profiles`, "roles", "frank-autoload-agent", "instructions", "frank-autoload-agent.md")).text();
 			expect(instructions).toContain("Role body");
 			expect(instructions).toContain("SKILL BODY MARKER");
 		} finally {
