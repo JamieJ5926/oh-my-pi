@@ -6,14 +6,8 @@ import { BUILTIN_TOOLS } from "../src/tools";
 import type { ToolSession } from "../src/tools";
 import { createFrankHostToolService } from "../src/task/frank-host-tools";
 
-describe("Frank bridge synchronous bash", () => {
-	test("returns completed bash output and leaves redirected files on disk", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-bash-sync-"));
-		const outputPath = path.join(dir, "gate.log");
-		const originalBash = BUILTIN_TOOLS.bash;
-
-		try {
-			const service = createFrankHostToolService({
+function makeService(dir: string) {
+	return createFrankHostToolService({
 				session: {
 					cwd: dir,
 					hasUI: false,
@@ -52,6 +46,48 @@ describe("Frank bridge synchronous bash", () => {
 				workerCwd: dir,
 				names: ["bash"],
 			});
+}
+
+describe("Frank bridge synchronous bash", () => {
+	test("runs a shell-string command sent with an empty argv", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-bash-cmd-"));
+		const originalBash = BUILTIN_TOOLS.bash;
+		try {
+			const result = await makeService(dir).handle("bash", {
+				argv: [],
+				command: "echo hi | tr a-z A-Z",
+				cwd: "/",
+				timeout_ms: 20_000,
+			});
+			if (!result.ok) throw new Error(result.error);
+			expect(result.content).toContain("HI");
+			expect(result.content).not.toContain("(no output)");
+		} finally {
+			BUILTIN_TOOLS.bash = originalBash;
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("refuses a bash call with neither argv nor command", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-bash-empty-"));
+		const originalBash = BUILTIN_TOOLS.bash;
+		try {
+			const result = await makeService(dir).handle("bash", { argv: [] });
+			expect(result.ok).toBe(false);
+			expect(result.error).toBe("bash requires a non-empty argv or a command string");
+		} finally {
+			BUILTIN_TOOLS.bash = originalBash;
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("returns completed bash output and leaves redirected files on disk", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-bash-sync-"));
+		const outputPath = path.join(dir, "gate.log");
+		const originalBash = BUILTIN_TOOLS.bash;
+
+		try {
+			const service = makeService(dir);
 			const command = `printf 'FRANK_SYNC_OUTPUT\\n' > ${JSON.stringify(outputPath)}; cat ${JSON.stringify(outputPath)}`;
 
 			const result = await service.handle("bash", { argv: ["bash", "-c", command] });
