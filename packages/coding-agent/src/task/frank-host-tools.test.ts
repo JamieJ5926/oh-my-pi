@@ -1062,6 +1062,7 @@ describe("Frank hub send mailbox", () => {
 			status: "running",
 		});
 		try {
+			const toolRegistry = new Map();
 			const hostSession = {
 				cwd: process.cwd(),
 				hasUI: false,
@@ -1070,9 +1071,9 @@ describe("Frank hub send mailbox", () => {
 				getAgentId: () => "Main",
 				getSessionFile: () => null,
 				getToolContext: () => undefined,
-				toolRegistry: new Map(),
+				toolRegistry,
 			} as unknown as ToolSession;
-			hostSession.toolRegistry.set("hub", (await BUILTIN_TOOLS.hub(hostSession))!);
+			toolRegistry.set("hub", (await BUILTIN_TOOLS.hub(hostSession))!);
 			const service = createFrankHostToolService({ session: hostSession, agentId: leaf, names: ["hub"] });
 			const result = await service.handle("hub", { op: "send", to: parent, message: "report from Frank" });
 			expect(result.ok).toBe(true);
