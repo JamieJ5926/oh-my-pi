@@ -3167,7 +3167,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				const handle = await startFrankWorker(workerOptions);
 				const removeDelivery = AgentRegistry.global().registerRetainedDelivery(id, async (message: IrcMessage) => {
 					try {
-						const outcome = await handle.steer(message.body);
+						const outcome = await handle.steer(`[${message.id}] ${message.from}${message.replyTo ? ` (reply to ${message.replyTo})` : ""}: ${message.body}`);
 						return outcome === "delivered" ? { kind: "delivered" } : { kind: "unsupported" };
 					} catch (error) {
 						return { kind: "failed", error: error instanceof Error ? error.message : String(error) };

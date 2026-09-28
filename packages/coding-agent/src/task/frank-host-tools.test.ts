@@ -890,6 +890,23 @@ describe("Frank hub send mailbox", () => {
 			expect(IrcBus.global().unreadCount(id)).toBe(0);
 		} finally {
 			remove();
+		}
+	});
+	test("does not enqueue a retained message when its delivery handler fails", async () => {
+		const registry = AgentRegistry.global();
+		const id = "SteerRetainedFailureProbe";
+		registry.unregister(id);
+		registry.register({ id, displayName: id, kind: "sub", session: null, status: "running" });
+		const remove = registry.registerRetainedDelivery(id, async () => ({ kind: "failed", error: "boom" }));
+		try {
+			const receipt = await IrcBus.global().send({ from: "Main", to: id, body: "do not queue" });
+			expect(receipt).toEqual({ to: id, outcome: "failed", error: "boom" });
+			expect(IrcBus.global().unreadCount(id)).toBe(0);
+		} finally {
+			remove();
+			registry.unregister(id);
+		}
+	});
 	test("a bridged hub send reports queued next-turn delivery and drains on the lane's next call", async () => {
 		const id = "SteerMailBridgedProbe";
 		const registry = AgentRegistry.global();

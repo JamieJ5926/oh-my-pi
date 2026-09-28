@@ -239,7 +239,7 @@ export class IrcBus {
 		if (ref.kind === "sub" && (ref.status === "running" || ref.status === "idle")) {
 			const retained = await this.#registry.deliverRetainedMessage(message);
 			if (retained?.kind === "delivered") {
-				this.#relayToMainUi(message);
+				if (!opts?.suppressRelay) this.#relayToMainUi(message);
 				return { to: message.to, outcome: "injected" };
 			}
 			if (retained?.kind === "failed") return { to: message.to, outcome: "failed", error: retained.error };

@@ -321,6 +321,21 @@ describe("Frank worker transport", () => {
 			await rm(stub.cwd, { recursive: true, force: true });
 		}
 	});
+	test("waits for a delayed steer acknowledgement before resolving", async () => {
+		const stub = await makeStub(`IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"do the work"}' ] || exit 4; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"steer","version":1,"message":"hello"}' ] || exit 5; sleep 0.3; printf '%s\\n' '{"type":"ack","version":1,"accepted":true,"op":"steer"}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		const worker = await startFrankWorker({ ...workerOptions(stub.exe, stub.cwd, () => {}), steerTimeoutMs: 1_000 });
+		try {
+			let settled = false;
+			await worker.runTurn("do the work");
+			const steering = worker.steer("hello").finally(() => { settled = true; });
+			await new Promise(resolve => setTimeout(resolve, 150));
+			expect(settled).toBe(false);
+			await expect(steering).resolves.toBe("delivered");
+		} finally {
+			await worker.close();
+			await rm(stub.cwd, { recursive: true, force: true });
+		}
+	});
 	test("keeps one worker process alive for two sequential turns", async () => {
 		const stub = await makeStub(`printf '%s\\n' "$$" >> "$FRANK_PID_FILE"; IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"first"}' ] || exit 4; printf '%s\\n' '{"type":"event","seq":1,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"first answer"}]},"assistantMessageEvent":{"type":"text_delta","delta":"first answer"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":2,"text":"second"}' ] || exit 5; printf '%s\\n' '{"type":"event","seq":2,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"second answer"}]},"assistantMessageEvent":{"type":"text_delta","delta":"second answer"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":2,"accepted":true}' '{"type":"terminal","version":1,"turn_id":2,"terminal":"Answer","final_seq":2}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ] || exit 6`);
 		const pidFile = path.join(stub.cwd, "pids");
@@ -346,7 +361,7 @@ describe("Frank worker transport", () => {
 		}
 	});
 	test("queues only the legacy unknown-op response and keeps the worker alive", async () => {
-		const stub = await makeStub(`IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"do the work"}' ] || exit 4; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"steer","version":1,"message":"first"}' ] || exit 5; printf '%s\\n' '{"type":"error","version":1,"message":"unknown op Some(\\"steer\\")"}' >&2; IFS= read -r input; [ "$input" = '{"op":"steer","version":1,"message":"second"}' ] || exit 6; printf '%s\\n' '{"type":"ack","version":1,"accepted":true,"op":"steer"}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		const stub = await makeStub(`IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"do the work"}' ] || exit 4; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"steer","version":1,"message":"first"}' ] || exit 5; printf '%s\\n' '{"type":"error","version":1,"message":"unknown op \\"steer\\""}' >&2; IFS= read -r input; [ "$input" = '{"op":"steer","version":1,"message":"second"}' ] || exit 6; printf '%s\\n' '{"type":"ack","version":1,"accepted":true,"op":"steer"}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
 		const worker = await startFrankWorker({ ...workerOptions(stub.exe, stub.cwd, () => {}) });
 		try {
 			await worker.runTurn("do the work");
@@ -358,12 +373,13 @@ describe("Frank worker transport", () => {
 		}
 	});
 	test("reports a clear lane-exited failure when steer targets an exited worker", async () => {
-		const stub = await makeStub(`IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"do the work"}' ] || exit 4; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; exit 0`);
+		const stub = await makeStub(`IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"do the work"}' ] || exit 4; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":0}' >&2; exit 0`);
 		const worker = await startFrankWorker({ ...workerOptions(stub.exe, stub.cwd, () => {}) });
 		try {
 			await worker.runTurn("do the work");
 			await expect(worker.steer("too late")).rejects.toThrow("Frank lane exited before steer delivery");
 		} finally {
+			await worker.close().catch(() => {});
 			await rm(stub.cwd, { recursive: true, force: true });
 		}
 	});

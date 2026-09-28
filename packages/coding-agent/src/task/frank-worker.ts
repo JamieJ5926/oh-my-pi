@@ -77,6 +77,7 @@ export interface SpawnFrankWorkerOptions {
 	apiKeyEnv?: string;
 	signal?: AbortSignal;
 	timeoutMs?: number;
+	steerTimeoutMs?: number;
 	/** Frank writes its full event stream here (tool calls, results, faults, token meters). */
 	eventsPath?: string;
 	/** Role instructions: Frank loads <root>/roles/<name>/instructions/<name>.md as its role layer. */
@@ -92,7 +93,7 @@ export interface SpawnFrankWorkerOptions {
 export type StartFrankWorkerOptions = Omit<SpawnFrankWorkerOptions, "text">;
 
 export interface FrankWorkerHandle {
-	steer(message: string): Promise<"delivered" | "unsupported">;
+	steer(message: string): Promise<"delivered" | "unsupported" | "timeout">;
 	runTurn(text: string): Promise<FrankWorkerResult>;
 	close(): Promise<void>;
 }
@@ -240,8 +241,10 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 	let timer: NodeJS.Timeout | undefined;
 	let abortReason: Error | undefined;
 	let failure: Error | undefined;
+	let workerExited = false;
  	let shuttingDown = false;
-	const pendingSteers: { promise: Promise<"delivered" | "unsupported">; resolve: (result: "delivered" | "unsupported") => void; reject: (error: Error) => void }[] = [];
+	const pendingSteers: { promise: Promise<"delivered" | "unsupported" | "timeout">; resolve: (result: "delivered" | "unsupported" | "timeout") => void; reject: (error: Error) => void; timeout?: NodeJS.Timeout; timedOut?: boolean }[] = [];
+	const steerTimeoutMs = options.steerTimeoutMs ?? 10_000;
 	const closeTimeoutMs = 500;
 	const failTurn = (error: Error) => {
 		if (failure) return;
@@ -340,7 +343,8 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 				case "steer_ack": {
 					const pending = pendingSteers.shift();
 					if (!pending) throw new FrankProtocolError("Unexpected Frank steer ack");
-					pending.resolve("delivered");
+					clearTimeout(pending.timeout);
+					if (!pending.timedOut) pending.resolve("delivered");
 					return;
 				}
 				case "ack": {
@@ -364,12 +368,15 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 				}
 				case "error": {
 					const pending = pendingSteers.shift();
-					if (pending && control.message === 'unknown op Some("steer")') {
+					if (!pending) throw new FrankProtocolError("Unexpected Frank error control");
+					clearTimeout(pending.timeout);
+					if (pending.timedOut) return;
+					if (control.turn_id === undefined && /unknown op/i.test(control.message) && /steer/i.test(control.message)) {
 						pending.resolve("unsupported");
 						return;
 					}
-					if (pending) pending.reject(new FrankProtocolError(control.message));
-					throw new FrankProtocolError(control.message);
+					pending.reject(new FrankProtocolError(control.message));
+					return;
 				}
 				case "tool_request": {
 					const request: FrankToolRequest = { call_id: control.call_id, turn_id: control.turn_id, name: control.name, args: control.args };
@@ -396,14 +403,18 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 	child.on("error", failTurn);
 	child.on("close", (code, signal) => {
 		markClosed([code, signal]);
-		for (const pending of pendingSteers.splice(0)) pending.reject(new Error("Frank lane exited before steer delivery"));
+		workerExited = true;
+		for (const pending of pendingSteers.splice(0)) {
+			clearTimeout(pending.timeout);
+			if (!pending.timedOut) pending.reject(new Error("Frank lane exited before steer delivery"));
+		}
 		const turn = activeTurn;
 		if (!turn) return;
  		if (!turn.terminal) {
  			failTurn(new Error(`Frank exited before completing the turn (code ${code}, signal ${signal})`));
  			return;
  		}
- 		if (turn.terminal.final_seq >= nextExpectedSeq) {
+		if (turn.terminal.final_seq >= nextExpectedSeq) {
 			failTurn(new Error(`Frank exited before completing the turn (code ${code}, signal ${signal})`));
 			return;
 		}
@@ -421,15 +432,25 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
  	options.signal?.addEventListener("abort", abort, { once: true });
 	return {
 		steer: async message => {
-			if (failure || child.exitCode !== null || child.signalCode !== null) throw new Error("Frank lane exited before steer delivery");
-			const pending = Promise.withResolvers<"delivered" | "unsupported">();
-			pendingSteers.push(pending);
+			if (failure || workerExited || child.exitCode !== null || child.signalCode !== null || child.stdin.destroyed) throw new Error("Frank lane exited before steer delivery");
+			const pending = Promise.withResolvers<"delivered" | "unsupported" | "timeout">();
+			const state = { ...pending, timedOut: false as boolean, timeout: undefined as NodeJS.Timeout | undefined };
+			state.timeout = setTimeout(() => {
+				state.timedOut = true;
+				state.resolve("timeout");
+			}, steerTimeoutMs);
+			state.timeout.unref();
+			pendingSteers.push(state);
 			try {
-				await writeLine(child.stdin, { op: "steer", version: 1, message });
+				await Promise.race([
+					writeLine(child.stdin, { op: "steer", version: 1, message }),
+					closed.then(() => { throw new Error("Frank lane exited before steer delivery"); }),
+				]);
 			} catch (error) {
-				const index = pendingSteers.indexOf(pending);
+				const index = pendingSteers.indexOf(state);
 				if (index >= 0) pendingSteers.splice(index, 1);
-				pending.reject(error instanceof Error ? error : new Error(String(error)));
+				clearTimeout(state.timeout);
+				state.reject(error instanceof Error ? error : new Error(String(error)));
 			}
 			return pending.promise;
 		},
