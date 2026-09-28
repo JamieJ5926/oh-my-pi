@@ -1,7 +1,8 @@
 import { mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { IrcBus } from "../irc/bus";
 import { EventBus } from "../utils/event-bus";
@@ -42,9 +43,17 @@ function workerOptions(id: string, exe: string, cwd: string, artifactsDir: strin
 	};
 }
 
+beforeEach(() => {
+	AgentRegistry.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
+});
+
 afterEach(async () => {
 	await Promise.all(artifactDirs.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
 	AgentRegistry.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
 });
 
 describe("Frank task return integration", () => {
