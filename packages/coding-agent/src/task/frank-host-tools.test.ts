@@ -94,13 +94,18 @@ describe("Frank host tool service", () => {
 		}
 	});
 
-	test("aborting the bridge closes its tool service", async () => {
-		const controller = new AbortController();
-		const service = createFrankHostToolService({ session, agentId: "frank-test", signal: controller.signal });
-		controller.abort();
+	test("closing the bridge unregisters its sink and rejects later tool calls", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		const service = createFrankHostToolService({ session: { asyncJobManager: manager } as unknown as ToolSession, agentId: "frank-test" });
+		service.close();
 		expect(service.closed).toBe(true);
 		expect(await service.handle("hub", {})).toEqual({ ok: false, error: "host tool service is closed" });
+		manager.register("bash", "after close", async () => "NOT_CAPTURED", { id: "after-close", ownerId: "frank-test" });
+		await manager.getJob("after-close")?.promise;
+		expect(manager.isJobResultConsumed("after-close")).toBe(false);
+		await manager.dispose();
 	});
+
 
 	test("coordinator batch requires each coordinator item to declare its own delegable scope", async () => {
 		let invocations = 0;
@@ -473,20 +478,32 @@ describe("Frank host tool service: child drain", () => {
 		release();
 	});
 
-	test("a body over the inline budget stays on the job row instead of being consumed", async () => {
+	test("oversized child output is spilled to a session artifact before delivery", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
-		manager.register("task", "ChildBig", async () => "x".repeat(13_000), {
-			id: "ChildBig",
-			agentId: "ChildBig",
-			ownerId: "Host",
-		});
-		await manager.getJob("ChildBig")?.promise;
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-async-artifact-"));
+		let artifactPath = "";
+		try {
+			const service = createFrankHostToolService({
+				session: {
+					asyncJobManager: manager,
+					getAgentId: () => "Host",
+					allocateOutputArtifact: async () => ({ id: "77", path: (artifactPath = path.join(dir, "77.async.log")) }),
+				} as unknown as ToolSession,
+				agentId: "frank-test",
+			});
+			const body = "x".repeat(13_000);
+			manager.register("task", "ChildBig", async () => body, { id: "ChildBig", agentId: "ChildBig", ownerId: "Host" });
+			await manager.getJob("ChildBig")?.promise;
 
-		const result = await bridge(manager).handle("hub", { op: "wait", to: "ChildBig", timeoutMs: 5_000 });
+			const result = await service.handle("hub", { op: "wait", to: "ChildBig", timeoutMs: 5_000 });
 
-		expect(result.content).toContain("left intact on the job row: ChildBig");
-		expect(manager.isJobResultConsumed("ChildBig")).toBe(false);
-		expect(manager.getJob("ChildBig")?.resultText?.length).toBe(13_000);
+			expect(result.content).toContain("artifact://77");
+			expect(await fs.readFile(artifactPath, "utf8")).toBe(body);
+			expect(manager.isJobResultConsumed("ChildBig")).toBe(true);
+		} finally {
+			manager.dispose();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("a child owned by another session is never answered from this bridge", async () => {

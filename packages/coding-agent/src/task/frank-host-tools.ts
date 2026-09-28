@@ -3,7 +3,9 @@ import { BUILTIN_TOOLS } from "../tools";
 import type { ToolSession } from "../tools";
 import type { AsyncJob } from "../async";
 import type { TaskToolDetails } from "./types";
+import { ASYNC_PREVIEW_MAX_CHARS } from "../session/async-job-delivery";
 import { ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS } from "../async/job-manager";
+import { writeArtifact } from "../session/artifacts";
 import { buildAsyncResultBatchMessage } from "../session/async-job-delivery";
 import type { ReadonlySessionManager } from "../session/session-manager";
 import type { SessionInitEntry, SessionMessageEntry } from "../session/session-entries";
@@ -32,7 +34,7 @@ function absoluteToolPath(path: string, workerCwd?: string): string {
 
 function translateMutatingArgs(name: string, args: unknown, workerCwd?: string): unknown {
 	if (typeof args !== "object" || args === null) return args;
-	if (name === "bash" || name === "run") {
+	if (name === "bash") {
 		if (!("argv" in args) || !Array.isArray(args.argv) || !args.argv.every(part => typeof part === "string")) return args;
 		const argv = args.argv;
 		const cwd = "cwd" in args && typeof args.cwd === "string" ? absoluteToolPath(args.cwd, workerCwd) : workerCwd;
@@ -63,6 +65,7 @@ export interface FrankHostToolResult {
 export interface FrankHostToolService {
 	handle(name: string, args: unknown, toolCallId?: string): Promise<FrankHostToolResult>;
 	toolNames(): string[];
+	close(): void;
 	closed: boolean;
 }
 
@@ -195,9 +198,17 @@ export function createFrankHostToolService(options: {
 	};
 	const manager = options.session.asyncJobManager;
 	const hostOwnerId = options.session.getAgentId?.() ?? undefined;
-	const deliveredBodies = new Map<string, string>();
-	const unregisterDeliverySink = manager?.registerDeliverySink(options.agentId, (jobId, text) => {
-		deliveredBodies.set(jobId, text);
+	const deliveredBodies = new Map<string, { job: AsyncJob | undefined; text: string }>();
+	const unregisterDeliverySink = manager?.registerDeliverySink(options.agentId, async (jobId, text, job) => {
+		if (text.length > ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS) {
+			const artifact = await options.session.allocateOutputArtifact?.("async");
+			if (!artifact?.path || !artifact.id) throw new Error(`Unable to allocate artifact for async job ${jobId}`);
+			await writeArtifact(artifact.path, text);
+			const preview = `${text.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]\nFull output: artifact://${artifact.id}`;
+			deliveredBodies.set(jobId, { job, text: preview });
+			return;
+		}
+		deliveredBodies.set(jobId, { job, text });
 	});
 	const isMatchingOwner = (job: AsyncJob): boolean =>
 		job.ownerId === options.agentId || (hostOwnerId !== undefined && job.ownerId === hostOwnerId);
@@ -209,15 +220,16 @@ export function createFrankHostToolService(options: {
 	let closed = false;
 	const coordinator = options.workerLane !== undefined && COORDINATOR_SEATS[options.workerLane.agent] === true;
 	let dispatchedTask = !coordinator || (options.workerLane !== undefined && /^[ \t]*single-slice[ \t]*:[ \t]*\S/im.test(options.workerLane.prompt));
-	options.signal?.addEventListener(
-		"abort",
-		() => {
-			closed = true;
-			unregisterDeliverySink?.();
-			deliveredBodies.clear();
-		},
-		{ once: true },
-	);
+	const abortSignal = options.signal;
+	const onAbort = () => {
+		closed = true;
+		unregisterDeliverySink?.();
+		deliveredBodies.clear();
+	};
+	if (abortSignal) {
+		if (abortSignal.aborted) onAbort();
+		else abortSignal.addEventListener("abort", onAbort, { once: true });
+	}
 
 	const ownedJobs = (): AsyncJob[] => manager?.getAllJobs().filter(isMatchingOwner) ?? [];
 
@@ -268,19 +280,17 @@ export function createFrankHostToolService(options: {
 			]);
 		}
 	};
-
 	/**
-	 * The bytes a native parent would have seen for these children, plus what is
-	 * still running. A body over the manager's retention budget is never
-	 * consumed: consuming evicts it, and this channel has no artifact spill, so
-	 * the job row stays the copy of record.
+	 * If a body exceeds the job manager retention budget, spill it to the
+	 * session artifact store before consuming it. When artifact storage is not
+	 * available, leave the full body intact on the job row.
 	 */
-	const drainBodies = (jobs: AsyncJob[]): string => {
+	const drainBodies = async (jobs: AsyncJob[]): Promise<string> => {
 		const entries = jobs
 			.filter(job => job.status !== "running")
 			.map(job => ({
 				jobId: job.id,
-				result: deliveredBodies.get(job.id) ?? job.resultText ?? job.errorText ?? "",
+				result: deliveredBodies.get(job.id)?.job === job ? deliveredBodies.get(job.id)?.text ?? job.resultText ?? job.errorText ?? "" : job.resultText ?? job.errorText ?? "",
 				job,
 				durationMs: Math.max(0, Date.now() - job.startTime),
 				epoch: 0,
@@ -292,30 +302,42 @@ export function createFrankHostToolService(options: {
 				typeof message.content === "string"
 					? message.content
 					: message.content
-							.filter(part => part.type === "text")
-							.map(part => part.text)
-							.join(""),
+						.filter(part => part.type === "text")
+						.map(part => part.text)
+						.join(""),
 			);
 		}
 		const oversized = entries.filter(entry => entry.result.length > ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS);
-		if (oversized.length > 0) {
-			parts.push(
-				"Body over the inline budget, left intact on the job row: " +
-					`${oversized.map(entry => entry.jobId).join(", ")}. Re-read with hub op jobs.`,
-			);
+		for (const entry of oversized) {
+			if (deliveredBodies.get(entry.jobId)?.job === entry.job) continue;
+			const artifact = await options.session.allocateOutputArtifact?.("async");
+			if (!artifact?.path || !artifact.id) {
+				parts.push(`Body over the inline budget, left intact on the job row: ${entry.jobId}. Re-read with hub op jobs.`);
+				continue;
+			}
+			await writeArtifact(artifact.path, entry.result);
+			parts.push(`Full output for ${entry.jobId}: artifact://${artifact.id}`);
+			manager?.consumeJobResults([entry.jobId]);
+			deliveredBodies.delete(entry.jobId);
 		}
 		const running = jobs.filter(job => job.status === "running").map(job => job.id);
 		if (running.length > 0) parts.push(`Still running: ${running.join(", ")} (no body yet).`);
-		if (parts.length === 0) parts.push("No settled child results yet.");
 		manager?.consumeJobResults(
 			entries.filter(entry => entry.result.length <= ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS).map(entry => entry.jobId),
 		);
-		for (const entry of entries) deliveredBodies.delete(entry.jobId);
+		for (const entry of entries) {
+			if (entry.result.length <= ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS) deliveredBodies.delete(entry.jobId);
+		}
 		return parts.join("\n\n");
 	};
 
 	return {
 		toolNames: () => Object.keys(enabled),
+		close() {
+			if (closed) return;
+			onAbort();
+			if (abortSignal) abortSignal.removeEventListener("abort", onAbort);
+		},
 		get closed() {
 			return closed;
 		},
@@ -346,12 +368,12 @@ export function createFrankHostToolService(options: {
 							? params.timeoutMs
 							: CHILD_WAIT_DEFAULT_MS;
 					await settle(children, Math.max(0, Math.min(requested, CHILD_WAIT_MAX_MS)));
-					return { ok: true, content: `${hostMail}${drainBodies(children)}` };
+					return { ok: true, content: `${hostMail}${await drainBodies(children)}` };
 				}
 			}
 			const factory = Object.entries(BUILTIN_TOOLS).find(([toolName]) => toolName === name)?.[1];
 			if (!factory) return { ok: false, error: hostMail ? `${hostMail}${`unknown host tool: ${name}`}` : `unknown host tool: ${name}` };
-			const requireRegistry = name === "write" || name === "edit" || name === "bash" || name === "run";
+			const requireRegistry = name === "write" || name === "edit" || name === "bash";
 			const registeredTool = options.session.toolRegistry?.get(name);
 			if (requireRegistry && !registeredTool) {
 				return { ok: false, error: hostMail ? `${hostMail}host tool is not registered in the host session: ${name}` : `host tool is not registered in the host session: ${name}` };
@@ -372,7 +394,7 @@ export function createFrankHostToolService(options: {
 				// nest a Frank worker's children under the host and send its messages
 				// as the host, so build both for the worker and wrap with the host's hooks.
 				const wrapWithHooks = options.session.wrapWithHooks;
-				const buildForWorker = name === "hub" || name === "bash" || name === "run" || (name === "task" && wrapWithHooks !== undefined);
+				const buildForWorker = name === "hub" || ((name === "task" || name === "bash") && wrapWithHooks !== undefined);
 				const built = buildForWorker ? await factory(bridgedSession) : undefined;
 				const workerTool = built ? (wrapWithHooks ? wrapWithHooks(built) : built) : undefined;
 				const tool = editReplaceTool ?? workerTool ?? registeredTool ?? (await factory(bridgedSession));
@@ -407,7 +429,7 @@ export function createFrankHostToolService(options: {
 					if (details?.async?.state === "running") text += `\n\n${BRIDGE_DRAIN_NOTE}`;
 					return { ok: true, content: `${hostMail}${text}` };
 				}
-				if (name === "bash" || name === "run") {
+				if (name === "bash") {
 					const details = result.details as { async?: { state?: string; jobId?: string } } | undefined;
 					if (details?.async?.state === "running") {
 						if (details.async.jobId) dispatched.add(details.async.jobId);
@@ -417,7 +439,7 @@ export function createFrankHostToolService(options: {
 				}
 				if (name !== "hub") return { ok: true, content: `${hostMail}${text}` };
 				const children = drainableChildren(params);
-				const drained = children.length === 0 ? text : `${text}\n\n${drainBodies(children)}`;
+				const drained = children.length === 0 ? text : `${text}\n\n${await drainBodies(children)}`;
 				return { ok: true, content: `${hostMail}${drained}` };
 			} catch (error) {
 				return { ok: false, error: `${hostMail}${error instanceof Error ? error.message : String(error)}` };
