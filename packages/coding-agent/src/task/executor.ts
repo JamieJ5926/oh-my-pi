@@ -3168,7 +3168,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				const removeDelivery = AgentRegistry.global().registerRetainedDelivery(id, async (message: IrcMessage) => {
 					try {
 						const outcome = await handle.steer(`[${message.id}] ${message.from}${message.replyTo ? ` (reply to ${message.replyTo})` : ""}: ${message.body}`);
-						return outcome === "delivered" ? { kind: "delivered" } : { kind: "unsupported" };
+						return outcome === "delivered" ? { kind: "delivered" } : outcome === "timeout" ? { kind: "failed", error: "Frank steer acknowledgement timed out; delivery status is unknown" } : { kind: "unsupported" };
 					} catch (error) {
 						return { kind: "failed", error: error instanceof Error ? error.message : String(error) };
 					}

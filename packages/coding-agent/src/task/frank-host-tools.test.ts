@@ -892,6 +892,21 @@ describe("Frank hub send mailbox", () => {
 			remove();
 		}
 	});
+	test("does not enqueue a retained message when steer acknowledgement times out", async () => {
+		const registry = AgentRegistry.global();
+		const id = "SteerRetainedTimeoutProbe";
+		registry.unregister(id);
+		registry.register({ id, displayName: id, kind: "sub", session: null, status: "running" });
+		const remove = registry.registerRetainedDelivery(id, async () => ({ kind: "failed", error: "Frank steer acknowledgement timed out; delivery status is unknown" }));
+		try {
+			const receipt = await IrcBus.global().send({ from: "Main", to: id, body: "possibly delivered" });
+			expect(receipt).toEqual({ to: id, outcome: "failed", error: "Frank steer acknowledgement timed out; delivery status is unknown" });
+			expect(IrcBus.global().unreadCount(id)).toBe(0);
+		} finally {
+			remove();
+			registry.unregister(id);
+		}
+	});
 	test("does not enqueue a retained message when its delivery handler fails", async () => {
 		const registry = AgentRegistry.global();
 		const id = "SteerRetainedFailureProbe";

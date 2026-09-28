@@ -336,6 +336,19 @@ describe("Frank worker transport", () => {
 			await rm(stub.cwd, { recursive: true, force: true });
 		}
 	});
+	// This process integration test exercises a real child-process ack arriving after the worker's real timeout.
+	test("times out a steer before its late acknowledgement without changing its outcome", async () => {
+		const stub = await makeStub(`IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"do the work"}' ] || exit 4; printf '%s\\n' '{"type":"event","seq":1,"event":{"name":"done"}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"steer","version":1,"message":"hello"}' ] || exit 5; sleep 0.15; printf '%s\\n' '{"type":"ack","version":1,"accepted":true,"op":"steer"}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ]`);
+		const worker = await startFrankWorker({ ...workerOptions(stub.exe, stub.cwd, () => {}), steerTimeoutMs: 30 });
+		try {
+			await worker.runTurn("do the work");
+			await expect(worker.steer("hello")).resolves.toBe("timeout");
+			await new Promise(resolve => setTimeout(resolve, 200));
+		} finally {
+			await worker.close();
+			await rm(stub.cwd, { recursive: true, force: true });
+		}
+	});
 	test("keeps one worker process alive for two sequential turns", async () => {
 		const stub = await makeStub(`printf '%s\\n' "$$" >> "$FRANK_PID_FILE"; IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":1,"text":"first"}' ] || exit 4; printf '%s\\n' '{"type":"event","seq":1,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"first answer"}]},"assistantMessageEvent":{"type":"text_delta","delta":"first answer"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":1,"accepted":true}' '{"type":"terminal","version":1,"turn_id":1,"terminal":"Answer","final_seq":1}' >&2; IFS= read -r input; [ "$input" = '{"op":"submit","turn_id":2,"text":"second"}' ] || exit 5; printf '%s\\n' '{"type":"event","seq":2,"event":{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"second answer"}]},"assistantMessageEvent":{"type":"text_delta","delta":"second answer"}}}'; printf '%s\\n' '{"type":"ack","version":1,"turn_id":2,"accepted":true}' '{"type":"terminal","version":1,"turn_id":2,"terminal":"Answer","final_seq":2}' >&2; IFS= read -r input; [ "$input" = '{"op":"shutdown"}' ] || exit 6`);
 		const pidFile = path.join(stub.cwd, "pids");
