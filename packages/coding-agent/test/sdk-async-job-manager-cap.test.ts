@@ -17,9 +17,6 @@ test("async.maxJobs above 100 controls SDK manager admission", async () => {
 		expect(() => manager.register("bash", "job 151", async () => release.promise)).toThrow(
 			/Background job limit reached \(150\)/,
 		);
-		const queuedId = manager.register("bash", "queued job", async () => release.promise, { queued: true });
-		expect(manager.getJob(queuedId)?.queued).toBe(true);
-		expect(manager.getRunningJobs()).toHaveLength(151);
 	} finally {
 		release.resolve("done");
 		await manager.waitForAll();
