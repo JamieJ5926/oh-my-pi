@@ -505,6 +505,26 @@ describe("Frank host tool service: child drain", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
+	test("oversized async delivery without artifact storage stays readable without retrying", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		try {
+			const service = createFrankHostToolService({
+				session: { asyncJobManager: manager, getAgentId: () => "Host" } as unknown as ToolSession,
+				agentId: "frank-test",
+			});
+			const body = "x".repeat(13_000);
+			manager.register("task", "ChildBig", async () => body, { id: "ChildBig", agentId: "ChildBig", ownerId: "frank-test" });
+			await manager.getJob("ChildBig")?.promise;
+			await manager.waitForOwnerJobs("frank-test", { timeoutMs: 5_000 });
+			const result = await service.handle("hub", { op: "wait", to: "ChildBig", timeoutMs: 5_000 });
+
+			expect(result.content).toContain("Output truncated");
+			expect(result.content).toContain("Full output unavailable: session artifact storage is not configured.");
+			expect(manager.isJobResultConsumed("ChildBig")).toBe(true);
+		} finally {
+			await manager.dispose();
+		}
+	});
 
 	test("a child owned by another session is never answered from this bridge", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: 4 });

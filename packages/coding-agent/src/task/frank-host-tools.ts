@@ -202,8 +202,16 @@ export function createFrankHostToolService(options: {
 	const unregisterDeliverySink = manager?.registerDeliverySink(options.agentId, async (jobId, text, job) => {
 		if (text.length > ASYNC_CONSUMED_BODY_RETAIN_MAX_CHARS) {
 			const artifact = await options.session.allocateOutputArtifact?.("async");
-			if (!artifact?.path || !artifact.id) throw new Error(`Unable to allocate artifact for async job ${jobId}`);
+			if (!artifact?.path || !artifact.id) {
+				if (!closed) {
+					const preview = `${text.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]\nFull output unavailable: session artifact storage is not configured.`;
+					deliveredBodies.set(jobId, { job, text: preview });
+				}
+				return;
+			}
+			if (closed) return;
 			await writeArtifact(artifact.path, text);
+			if (closed) return;
 			const preview = `${text.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]\nFull output: artifact://${artifact.id}`;
 			deliveredBodies.set(jobId, { job, text: preview });
 			return;
