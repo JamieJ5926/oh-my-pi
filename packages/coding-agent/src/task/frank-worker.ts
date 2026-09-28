@@ -8,6 +8,7 @@ import type { AgentDefinition } from "./types";
 
 type FrankControl =
 	| { kind: "ack"; version: 1; turn_id: number; accepted: boolean; pending_id?: number; error?: string }
+	| { kind: "steer_ack"; version: 1; accepted: true; op: "steer" }
 	| { kind: "heartbeat"; version: 1; at_ms: number }
 	| { kind: "terminal"; version: 1; turn_id: number; terminal: "Answer" | "Error" | "Cancelled" | "BudgetExceeded"; final_seq: number; error?: string }
 	| { kind: "saved"; version: 1; path: string }
@@ -91,6 +92,7 @@ export interface SpawnFrankWorkerOptions {
 export type StartFrankWorkerOptions = Omit<SpawnFrankWorkerOptions, "text">;
 
 export interface FrankWorkerHandle {
+	steer(message: string): Promise<"delivered" | "unsupported">;
 	runTurn(text: string): Promise<FrankWorkerResult>;
 	close(): Promise<void>;
 }
@@ -123,6 +125,10 @@ export function parseFrankControl(value: unknown): FrankControl {
 	if (!isRecord(value) || value.version !== 1 || typeof value.type !== "string") throw new Error("Invalid Frank control envelope");
 	switch (value.type) {
 		case "ack":
+			if (value.op === "steer") {
+				if (value.accepted !== true) throw new Error("Invalid Frank steer ack control");
+				return { kind: "steer_ack", version: 1, accepted: true, op: "steer" };
+			}
 			if (!positiveInteger(value.turn_id) || typeof value.accepted !== "boolean" || (value.pending_id !== undefined && !nonnegativeInteger(value.pending_id)) || (value.error !== undefined && typeof value.error !== "string")) throw new Error("Invalid Frank ack control");
 			return { kind: "ack", version: 1, turn_id: value.turn_id, accepted: value.accepted, ...(value.pending_id === undefined ? {} : { pending_id: value.pending_id }), ...(value.error === undefined ? {} : { error: value.error }) };
 		case "heartbeat":
@@ -235,6 +241,7 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 	let abortReason: Error | undefined;
 	let failure: Error | undefined;
  	let shuttingDown = false;
+	const pendingSteers: { promise: Promise<"delivered" | "unsupported">; resolve: (result: "delivered" | "unsupported") => void; reject: (error: Error) => void }[] = [];
 	const closeTimeoutMs = 500;
 	const failTurn = (error: Error) => {
 		if (failure) return;
@@ -328,8 +335,14 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
  	stderr.on("line", line => {
  			if (shuttingDown) return;
  			try {
- 			const control = parseFrankControl(parseLine(line));
+			const control = parseFrankControl(parseLine(line));
 			switch (control.kind) {
+				case "steer_ack": {
+					const pending = pendingSteers.shift();
+					if (!pending) throw new FrankProtocolError("Unexpected Frank steer ack");
+					pending.resolve("delivered");
+					return;
+				}
 				case "ack": {
 					const turn = activeTurn;
 					if (!turn || control.turn_id !== turn.id) throw new Error(`Unexpected Frank ack turn_id ${control.turn_id}`);
@@ -349,8 +362,15 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 					completeTurn();
 					return;
 				}
-				case "error":
+				case "error": {
+					const pending = pendingSteers.shift();
+					if (pending && control.message === 'unknown op Some("steer")') {
+						pending.resolve("unsupported");
+						return;
+					}
+					if (pending) pending.reject(new FrankProtocolError(control.message));
 					throw new FrankProtocolError(control.message);
+				}
 				case "tool_request": {
 					const request: FrankToolRequest = { call_id: control.call_id, turn_id: control.turn_id, name: control.name, args: control.args };
 					void (async () => {
@@ -376,8 +396,9 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 	child.on("error", failTurn);
 	child.on("close", (code, signal) => {
 		markClosed([code, signal]);
+		for (const pending of pendingSteers.splice(0)) pending.reject(new Error("Frank lane exited before steer delivery"));
 		const turn = activeTurn;
- 		if (!turn) return;
+		if (!turn) return;
  		if (!turn.terminal) {
  			failTurn(new Error(`Frank exited before completing the turn (code ${code}, signal ${signal})`));
  			return;
@@ -399,6 +420,19 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 	}
  	options.signal?.addEventListener("abort", abort, { once: true });
 	return {
+		steer: async message => {
+			if (failure || child.exitCode !== null || child.signalCode !== null) throw new Error("Frank lane exited before steer delivery");
+			const pending = Promise.withResolvers<"delivered" | "unsupported">();
+			pendingSteers.push(pending);
+			try {
+				await writeLine(child.stdin, { op: "steer", version: 1, message });
+			} catch (error) {
+				const index = pendingSteers.indexOf(pending);
+				if (index >= 0) pendingSteers.splice(index, 1);
+				pending.reject(error instanceof Error ? error : new Error(String(error)));
+			}
+			return pending.promise;
+		},
 		runTurn: async text => {
 			if (failure) throw failure;
 			if (closePromise) throw new Error("Frank worker is closed");

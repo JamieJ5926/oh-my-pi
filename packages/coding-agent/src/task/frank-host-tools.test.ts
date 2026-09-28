@@ -550,6 +550,27 @@ describe("Frank hub send mailbox", () => {
 		expect(IrcBus.global().unreadCount(id)).toBe(0);
 		AgentRegistry.global().unregister(id);
 	});
+	test("delivers to a retained Frank and queues its unsupported steer for inbox", async () => {
+		const registry = AgentRegistry.global();
+		const id = "SteerRetainedProbe";
+		registry.unregister(id);
+		registry.register({ id, displayName: id, kind: "sub", session: null, status: "running" });
+		const remove = registry.registerRetainedDelivery(id, async message => message.body === "legacy" ? { kind: "unsupported" } : { kind: "delivered" });
+		try {
+			const delivered = await IrcBus.global().send({ from: "Main", to: id, body: "live" });
+			expect(delivered.outcome).toBe("injected");
+			expect(IrcBus.global().unreadCount(id)).toBe(0);
+			const unsupported = await IrcBus.global().send({ from: "Main", to: id, body: "legacy" });
+			expect(unsupported.outcome).toBe("queued");
+			const service = createFrankHostToolService({ session: {} as ToolSession, agentId: id, names: ["hub"] });
+			const inbox = await service.handle("hub", { op: "inbox" });
+			expect(inbox.content ?? "").toContain("[hub from Main] legacy");
+			expect(IrcBus.global().unreadCount(id)).toBe(0);
+		} finally {
+			remove();
+			registry.unregister(id);
+		}
+	});
 
 	// 2026-09-26: FFExp02/03/07 could not report to Main: the bridge served the
 	// host's own hub instance, so the lane's send carried the host identity and

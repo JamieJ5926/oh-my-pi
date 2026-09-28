@@ -43,6 +43,7 @@ import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prom
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import type { IrcMessage } from "../irc/bus";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../registry/persisted-agents";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
@@ -111,9 +112,9 @@ export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "t
 
 interface RetainedFrankWorker {
 	handle: FrankWorkerHandle;
-	spawnOptions: StartFrankWorkerOptions;
 	closed: boolean;
 	setOnEvent: (onEvent: (event: FrankEvent) => void | Promise<void>) => void;
+	removeDelivery: () => void;
 }
 
 const retainedFrankWorkers = new Map<string, RetainedFrankWorker>();
@@ -122,6 +123,7 @@ async function closeRetainedFrankWorker(id: string, worker: RetainedFrankWorker)
 	if (retainedFrankWorkers.get(id) === worker) retainedFrankWorkers.delete(id);
 	if (worker.closed) return;
 	worker.closed = true;
+	worker.removeDelivery();
 	await worker.handle.close();
 }
 
@@ -3114,11 +3116,20 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				result = await spawnFrankWorker({ ...workerOptions, text: options.text });
 			} else if (options.keepAlive && !options.runWorker) {
 				const handle = await startFrankWorker(workerOptions);
+				const removeDelivery = AgentRegistry.global().registerRetainedDelivery(id, async (message: IrcMessage) => {
+					try {
+						const outcome = await handle.steer(message.body);
+						return outcome === "delivered" ? { kind: "delivered" } : { kind: "unsupported" };
+					} catch (error) {
+						return { kind: "failed", error: error instanceof Error ? error.message : String(error) };
+					}
+				});
 				retainedWorker = {
 					handle,
 					spawnOptions: workerOptions,
 					closed: false,
 					setOnEvent: callback => { forwardEvent = callback; },
+					removeDelivery,
 				};
 				retainedFrankWorkers.set(id, retainedWorker);
 				result = await handle.runTurn(options.text);

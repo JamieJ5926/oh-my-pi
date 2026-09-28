@@ -21,6 +21,7 @@ export interface SessionPublication {
 import type { AgentSession } from "../session/agent-session";
 import { oneLineLabel } from "../task/types";
 
+import type { IrcMessage } from "../irc/bus";
 export const MAIN_AGENT_ID = "Main";
 
 /** Sidecar marker retained beside a child transcript after an explicit kill. */
@@ -122,6 +123,9 @@ export interface RegisterInput {
 	history?: AgentHistorySummary;
 }
 
+export type RetainedDeliveryResult = { kind: "delivered" } | { kind: "unsupported" } | { kind: "failed"; error: string };
+type RetainedDeliveryHandler = (message: IrcMessage) => Promise<RetainedDeliveryResult>;
+
 export class AgentRegistry {
 	static #global: AgentRegistry | undefined;
 
@@ -141,6 +145,20 @@ export class AgentRegistry {
 	readonly #listeners = new Set<RegistryListener>();
 	#publication: { directory: PublicationDirectory; identity: Omit<SessionIdentity, "session">; ttlMs: number } | undefined;
 	readonly #published = new Map<AgentRef, SessionPublication>();
+	readonly #retainedDeliveries = new Map<string, RetainedDeliveryHandler>();
+
+	registerRetainedDelivery(id: string, handler: RetainedDeliveryHandler): () => void {
+		this.#retainedDeliveries.set(id, handler);
+		return () => {
+			if (this.#retainedDeliveries.get(id) === handler) this.#retainedDeliveries.delete(id);
+		};
+	}
+
+	async deliverRetainedMessage(message: IrcMessage): Promise<RetainedDeliveryResult | undefined> {
+		const handler = this.#retainedDeliveries.get(message.to);
+		if (!handler) return undefined;
+		return handler(message);
+	}
 
 	configurePublication(directory: PublicationDirectory, identity: Omit<SessionIdentity, "session">, ttlMs = 30_000): void {
 		if (this.#published.size > 0) throw new Error("Cannot replace publication directory with live sessions");
