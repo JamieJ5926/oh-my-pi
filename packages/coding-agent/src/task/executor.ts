@@ -3126,7 +3126,6 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				});
 				retainedWorker = {
 					handle,
-					spawnOptions: workerOptions,
 					closed: false,
 					setOnEvent: callback => { forwardEvent = callback; },
 					removeDelivery,
