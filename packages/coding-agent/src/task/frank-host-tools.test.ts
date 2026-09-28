@@ -186,6 +186,43 @@ describe("Frank host tool service", () => {
 		}
 	});
 
+	// 2026-09-26: Frank leaves (frank-explorer, frank-reviewer-fast) spawned children because
+	// every Frank lane got `task` and the host session's "*" spawn list.
+	test("a Frank leaf without task in its names cannot dispatch children", async () => {
+		const original = BUILTIN_TOOLS.task;
+		let built = false;
+		BUILTIN_TOOLS.task = async () => {
+			built = true;
+			return { name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text", text: "spawned" }] }) } as never;
+		};
+		try {
+			const hostSession = { getAgentId: () => "Host", getToolContext: () => undefined, getSessionSpawns: () => "*" } as unknown as ToolSession;
+			const service = createFrankHostToolService({ session: hostSession, agentId: "Leaf", names: ["hub", "write", "edit", "bash"], spawns: "" });
+			const result = await service.handle("task", { task: "child" });
+			expect(result.ok).toBe(false);
+			expect(built).toBe(false);
+		} finally {
+			BUILTIN_TOOLS.task = original;
+		}
+	});
+
+	test("the task tool a Frank pot builds sees the pot's spawn list, not the host's", async () => {
+		const original = BUILTIN_TOOLS.task;
+		let seen: string | null | undefined;
+		BUILTIN_TOOLS.task = async session => {
+			seen = session.getSessionSpawns?.();
+			return { name: "task", label: "Task", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text", text: "spawned" }] }) } as never;
+		};
+		try {
+			const hostSession = { getAgentId: () => "Host", getToolContext: () => undefined, getSessionSpawns: () => "*" } as unknown as ToolSession;
+			const service = createFrankHostToolService({ session: hostSession, agentId: "Pot", names: ["task"], spawns: "frank-explorer,frank-implementer" });
+			await service.handle("task", { task: "child" });
+			expect(seen).toBe("frank-explorer,frank-implementer");
+		} finally {
+			BUILTIN_TOOLS.task = original;
+		}
+	});
+
 	test("task bridge with session hooks builds the tool for the Frank worker and wraps it", async () => {
 		let factorySession: ToolSession | undefined;
 		const wrapped: string[] = [];
@@ -512,5 +549,36 @@ describe("Frank hub send mailbox", () => {
 		expect(drained.content ?? "").toContain("steer this lane");
 		expect(IrcBus.global().unreadCount(id)).toBe(0);
 		AgentRegistry.global().unregister(id);
+	});
+
+	// 2026-09-26: FFExp02/03/07 could not report to Main: the bridge served the
+	// host's own hub instance, so the lane's send carried the host identity and
+	// tripped "Cannot send a message to yourself."
+	test("a bridged hub send carries the Frank lane identity, so a report to Main is delivered", async () => {
+		const registry = AgentRegistry.global();
+		const leaf = "FrankLeafReport";
+		registry.unregister(leaf);
+		registry.register({ id: leaf, displayName: leaf, kind: "sub", session: null, status: "running" });
+		let seen: string | null | undefined;
+		const original = BUILTIN_TOOLS.hub;
+		BUILTIN_TOOLS.hub = async session => {
+			seen = session.getAgentId?.();
+			return { name: "hub", label: "Hub", description: "", parameters: {}, execute: async () => ({ content: [{ type: "text", text: "queued" }] }) } as never;
+		};
+		try {
+			const hostHub = { execute: async () => ({ content: [{ type: "text" as const, text: "Cannot send a message to yourself." }] }) };
+			const hostSession = {
+				getAgentId: () => "Main",
+				getToolContext: () => undefined,
+				toolRegistry: new Map([["hub", hostHub]]),
+			} as unknown as ToolSession;
+			const service = createFrankHostToolService({ session: hostSession, agentId: leaf, names: ["hub"] });
+			const result = await service.handle("hub", { op: "send", to: "Main", message: "report" });
+			expect(seen).toBe(leaf);
+			expect(result.content ?? "").not.toContain("Cannot send a message to yourself");
+		} finally {
+			BUILTIN_TOOLS.hub = original;
+			registry.unregister(leaf);
+		}
 	});
 });

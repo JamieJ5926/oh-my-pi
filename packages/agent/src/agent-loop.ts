@@ -387,6 +387,44 @@ function snapshotAssistantMessage(message: AssistantMessage): AssistantMessage {
 		toolCallAbortMessages: message.toolCallAbortMessages ? { ...message.toolCallAbortMessages } : undefined,
 	};
 }
+/**
+ * Incremental snapshotting avoids re-cloning finalized blocks for each delta.
+ * The current block, still-open blocks, and newly appended blocks are copied.
+ */
+function snapshotAssistantMessageIncremental(
+	live: AssistantMessage,
+	previous: AssistantMessage,
+	changedIndex: number,
+	openBlocks: ReadonlySet<number>,
+): AssistantMessage {
+	const liveContent = live.content;
+	const previousContent = previous.content;
+	const previousLength = previousContent.length;
+	const content = previousContent.slice();
+	for (let index = previousLength; index < liveContent.length; index++) {
+		content.push(snapshotAssistantContentBlock(liveContent[index]!));
+	}
+	if (changedIndex >= 0 && changedIndex < previousLength && changedIndex < liveContent.length) {
+		content[changedIndex] = snapshotAssistantContentBlock(liveContent[changedIndex]!);
+	}
+	for (const openIndex of openBlocks) {
+		if (
+			openIndex !== changedIndex &&
+			openIndex >= 0 &&
+			openIndex < previousLength &&
+			openIndex < liveContent.length
+		) {
+			content[openIndex] = snapshotAssistantContentBlock(liveContent[openIndex]!);
+		}
+	}
+	return {
+		...live,
+		content,
+		usage: { ...live.usage, cost: { ...live.usage.cost } },
+		disabledFeatures: live.disabledFeatures ? [...live.disabledFeatures] : undefined,
+		toolCallAbortMessages: live.toolCallAbortMessages ? { ...live.toolCallAbortMessages } : undefined,
+	};
+}
 
 /**
  * Deep-clone an assistant streaming event so subscribers get an immutable view.
@@ -1774,6 +1812,8 @@ async function streamAssistantResponse(
 
 			let partialMessage: AssistantMessage | null = null;
 			let addedPartial = false;
+			let turnSnapshot: AssistantMessage | null = null;
+			const openBlocks = new Set<number>();
 			const completedToolCallIds = new Set<string>();
 
 			const responseIterator = response[Symbol.asyncIterator]();
@@ -1894,11 +1934,9 @@ async function streamAssistantResponse(
 							if (addedPartial) {
 								context.messages[context.messages.length - 1] = partialMessage;
 								completedToolCallIds.clear();
-								// `message` and `assistantMessageEvent.partial` intentionally share one
-								// immutable snapshot of the streaming partial: every message_update
-								// consumer treats both as read-only, so cloning the identical partial
-								// twice per delta was pure waste.
 								const messageSnapshot = snapshotAssistantMessage(partialMessage);
+								turnSnapshot = messageSnapshot;
+								openBlocks.clear();
 								stream.push({
 									type: "message_update",
 									assistantMessageEvent: snapshotAssistantMessageEvent(event, messageSnapshot),
@@ -1907,7 +1945,8 @@ async function streamAssistantResponse(
 							} else {
 								context.messages.push(partialMessage);
 								addedPartial = true;
-								stream.push({ type: "message_start", message: snapshotAssistantMessage(partialMessage) });
+								turnSnapshot = snapshotAssistantMessage(partialMessage);
+								stream.push({ type: "message_start", message: turnSnapshot });
 							}
 							break;
 
@@ -1928,11 +1967,24 @@ async function streamAssistantResponse(
 								partialMessage = event.partial;
 								context.messages[context.messages.length - 1] = partialMessage;
 								config.onAssistantMessageEvent?.(partialMessage, event);
+								const contentIndex = event.contentIndex;
+								if (contentIndex !== undefined) {
+									if (event.type.endsWith("_start")) openBlocks.add(contentIndex);
+									else if (event.type.endsWith("_end")) openBlocks.delete(contentIndex);
+								}
+								const messageSnapshot: AssistantMessage = turnSnapshot
+									? snapshotAssistantMessageIncremental(
+											partialMessage,
+											turnSnapshot,
+											contentIndex ?? -1,
+											openBlocks,
+										)
+									: snapshotAssistantMessage(partialMessage);
+								turnSnapshot = messageSnapshot;
 								// `message` and `assistantMessageEvent.partial` intentionally share one
 								// immutable snapshot of the streaming partial: every message_update
 								// consumer treats both as read-only, so cloning the identical partial
-								// twice per delta was pure waste.
-								const messageSnapshot = snapshotAssistantMessage(partialMessage);
+								// twice per delta was pure waste. The snapshot itself is rebuilt incrementally.
 								stream.push({
 									type: "message_update",
 									assistantMessageEvent: snapshotAssistantMessageEvent(event, messageSnapshot),

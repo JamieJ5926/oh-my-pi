@@ -144,11 +144,23 @@ async function frankWorkerOptions(
 			session,
 			agentId: options.id,
 			signal,
-			names: ["task", "hub", "write", "edit", "bash"],
+			names: frankSpawns(options.agent) === "" ? ["hub", "write", "edit", "bash"] : ["task", "hub", "write", "edit", "bash"],
+			spawns: frankSpawns(options.agent),
 			workerCwd: options.cwd,
 			workerLane: { prompt: options.task, agent: options.agent.name },
 		}),
 	};
+}
+
+/**
+ * The spawn list a Frank lane may use, by the same rule native lanes follow
+ * (executor.ts spawnsEnv): a seat with no `spawns` spawns nothing. Before this,
+ * every Frank lane received `task` and the host session's "*", so a Frank
+ * explorer or reviewer could nest children (2026-09-26).
+ */
+function frankSpawns(agent: { spawns?: string[] | "*" }): string {
+	if (agent.spawns === undefined) return "";
+	return agent.spawns === "*" ? "*" : agent.spawns.join(",");
 }
 /** Validation behavior requested for an effective output schema. */
 export type StructuredSubagentSchemaMode = "permissive" | "strict";

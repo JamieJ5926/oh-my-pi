@@ -3065,7 +3065,14 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			const events: FrankEvent[] = [];
 			let forwardEvent = createFrankEventForwarder(id, options.eventBus, options.subagentEventBus);
 			let role: StartFrankWorkerOptions["role"];
-			const rolePrompt = options.agent.systemPrompt.trim();
+			// Native lanes autoload skills via sendCustomMessage before the first
+			// prompt; a Frank lane reads exactly roles/<name>/instructions/<name>.md,
+			// so the same skill bodies ride in that file. Measured 2026-09-26: Frank
+			// pots spent 20-40 s reading skill files one call at a time before dispatching.
+			const autoloaded = await Promise.all(
+				(options.autoloadSkills ?? []).map(async skill => (await buildSkillPromptMessage(skill, "", "autoload")).message),
+			);
+			const rolePrompt = [options.agent.systemPrompt.trim(), ...autoloaded].filter(Boolean).join("\n\n");
 			if (rolePrompt && options.artifactsDir) {
 				const root = path.join(options.artifactsDir, `${id}.frank-profiles`);
 				const name = options.agent.name.replace(/[^A-Za-z0-9_-]/g, "-");

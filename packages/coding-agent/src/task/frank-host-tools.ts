@@ -183,12 +183,15 @@ export function createFrankHostToolService(options: {
 	signal?: AbortSignal;
 	names?: string[];
 	workerCwd?: string;
+	/** The worker seat's spawn list ("" none, "*" any, or CSV). Omitted keeps the host session's. */
+	spawns?: string;
 	/** The worker's rendered prompt and seat; when set, bridged tool hooks run in the worker's lane scope. */
 	workerLane?: { prompt: string; agent: string };
 }): FrankHostToolService {
 	const bridgedSession: ToolSession = {
 		...options.session,
 		getAgentId: () => options.agentId,
+		...(options.spawns !== undefined ? { getSessionSpawns: () => options.spawns ?? "" } : {}),
 	};
 	const manager = options.session.asyncJobManager;
 	const hostOwnerId = options.session.getAgentId?.() ?? undefined;
@@ -358,12 +361,14 @@ export function createFrankHostToolService(options: {
 				// refusal above already fired). Hooks fire: the instance is an
 				// ExtensionToolWrapper around the session's own runner.
 				const editReplaceTool = name === "edit" ? (options.session.getEditReplaceTool?.() ?? registeredTool) : undefined;
-				// task files its children under the building session's agent id; the
-				// host registry instance would nest a Frank worker's children under the
-				// host, so build it for the worker and wrap it with the host's hooks.
+				// task files its children under the building session's agent id, and
+				// hub sends carry that id as the sender; the host registry instance would
+				// nest a Frank worker's children under the host and send its messages
+				// as the host, so build both for the worker and wrap with the host's hooks.
 				const wrapWithHooks = options.session.wrapWithHooks;
-				const built = name === "task" && wrapWithHooks ? await factory(bridgedSession) : undefined;
-				const workerTool = built && wrapWithHooks ? wrapWithHooks(built) : undefined;
+				const buildForWorker = name === "hub" || (name === "task" && wrapWithHooks !== undefined);
+				const built = buildForWorker ? await factory(bridgedSession) : undefined;
+				const workerTool = built ? (wrapWithHooks ? wrapWithHooks(built) : built) : undefined;
 				const tool = editReplaceTool ?? workerTool ?? registeredTool ?? (await factory(bridgedSession));
 				if (!tool) return { ok: false, error: hostMail ? `${hostMail}host tool is unavailable: ${name}` : `host tool is unavailable: ${name}` };
 				const hostContext = bridgedSession.getToolContext?.();
