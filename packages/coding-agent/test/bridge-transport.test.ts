@@ -116,6 +116,88 @@ function envelope(sequence: number) {
 		});
 	});
 
+	it("reclaims journal bytes after ACK so compacted capacity can be reused", async () => {
+		const directory = await mkdtemp(path.join(os.tmpdir(), "omp-bridge-journal-bytes-"));
+		const socketPath = path.join(directory, "broker.sock");
+		const journalPath = path.join(directory, "broker.jsonl");
+		const first = envelope(6);
+		const entryBytes = Buffer.byteLength(`${JSON.stringify({ envelope: first, attempts: 0, nextAttemptAt: Date.now() })}\n`, "utf8");
+		const server = new BrokerTransportServer({ socketPath, journalPath, limits: { maxJournalBytes: entryBytes } });
+		const receiver = new BrokerBackedTransportAdapter({ socketPath, journalPath: path.join(directory, "receiver.jsonl") });
+		const sender = new BrokerBackedTransportAdapter({ socketPath, journalPath: path.join(directory, "sender.jsonl") });
+		const { destination } = addresses();
+		const firstDelivered = Promise.withResolvers<void>();
+		const allowFirstAck = Promise.withResolvers<void>();
+		const secondDelivered = Promise.withResolvers<void>();
+		let deliveries = 0;
+		try {
+			await server.listen();
+			await receiver.register(destination, async () => {
+				deliveries += 1;
+				if (deliveries === 1) {
+					firstDelivered.resolve();
+					await allowFirstAck.promise;
+				}
+				if (deliveries === 2) secondDelivered.resolve();
+			});
+			await sender.send(first);
+			await Promise.race([firstDelivered.promise, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("first delivery timeout")), 500))]);
+			const firstEntry = JSON.parse((await Bun.file(journalPath).text()).trim()) as unknown;
+			expect(Buffer.byteLength(`${JSON.stringify(firstEntry)}\n`, "utf8")).toBe(entryBytes);
+			allowFirstAck.resolve();
+			await Promise.race([
+				(async (): Promise<void> => {
+					while (await Bun.file(journalPath).exists()) await new Promise<void>(resolve => setImmediate(resolve));
+				})(),
+				new Promise<never>((_, reject) => setTimeout(() => reject(new Error("ACK compaction timeout")), 500)),
+			]);
+			expect(await Bun.file(journalPath).exists()).toBe(false);
+			const second = await sender.send(envelope(7));
+			expect(second.kind).not.toBe("rejected");
+			await Promise.race([secondDelivered.promise, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("second delivery timeout")), 500))]);
+			expect(deliveries).toBe(2);
+		} finally {
+			await sender.close();
+			await receiver.close();
+			await server.close();
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+	it("reclaims journal bytes after dead-lettering so compacted capacity can be reused", async () => {
+		const directory = await mkdtemp(path.join(os.tmpdir(), "omp-bridge-journal-dead-letter-bytes-"));
+		const socketPath = path.join(directory, "broker.sock");
+		const journalPath = path.join(directory, "broker.jsonl");
+		const deadLetterPath = `${journalPath}.dead-letter.jsonl`;
+		const first = envelope(8);
+		const entryBytes = Buffer.byteLength(`${JSON.stringify({ envelope: first, attempts: 0, nextAttemptAt: Date.now() })}\n`, "utf8");
+		const server = new BrokerTransportServer({ socketPath, journalPath, limits: { maxJournalBytes: entryBytes, retryBaseMs: 5, retryMaxMs: 5, maxAttempts: 1 } });
+		const receiver = new BrokerBackedTransportAdapter({ socketPath, journalPath: path.join(directory, "receiver.jsonl") });
+		const sender = new BrokerBackedTransportAdapter({ socketPath, journalPath: path.join(directory, "sender.jsonl") });
+		const { destination } = addresses();
+		const secondDelivered = Promise.withResolvers<void>();
+		try {
+			await server.listen();
+			await receiver.register(destination, message => {
+				if (message.id === "message-9") secondDelivered.resolve();
+				if (message.id === "message-8") return Promise.reject(new Error("permanent"));
+			});
+			await sender.send(first);
+			await Promise.race([
+				(async (): Promise<void> => {
+					while (!(await Bun.file(deadLetterPath).exists()) || await Bun.file(journalPath).exists()) await new Promise<void>(resolve => setImmediate(resolve));
+				})(),
+				new Promise<never>((_, reject) => setTimeout(() => reject(new Error("dead-letter compaction timeout")), 500)),
+			]);
+			const second = await sender.send(envelope(9));
+			expect(second.kind).not.toBe("rejected");
+			await Promise.race([secondDelivered.promise, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("second delivery timeout")), 500))]);
+		} finally {
+			await sender.close();
+			await receiver.close();
+			await server.close();
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
 	it("keeps a successful final delivery out of the dead-letter journal", async () => {
 		const directory = await mkdtemp(path.join(os.tmpdir(), "omp-bridge-final-ack-"));
 		const socketPath = path.join(directory, "broker.sock");

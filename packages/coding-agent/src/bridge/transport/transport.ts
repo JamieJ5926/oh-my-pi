@@ -728,6 +728,7 @@ export class BrokerTransportServer {
 				if (entry.nextAttemptAt > now) continue;
 				if (entry.attempts >= this.#limits.maxAttempts) {
 					this.#pending.delete(id);
+					this.#journalBytes -= Buffer.byteLength(journalLine(entry), "utf8");
 					await appendDeadLetter(this.#deadLetterPath, {
 						envelope: entry.envelope,
 						attempts: entry.attempts,
@@ -750,6 +751,7 @@ export class BrokerTransportServer {
 					attempts: entry.attempts + 1,
 					nextAttemptAt: retryAt(entry, this.#limits),
 				};
+				this.#journalBytes += Buffer.byteLength(journalLine(updated), "utf8") - Buffer.byteLength(journalLine(entry), "utf8");
 				this.#pending.set(id, updated);
 				changed = true;
 			}
@@ -780,11 +782,13 @@ export class BrokerTransportServer {
 			)
 				continue;
 			target.socket.write(encodeWire({ type: "delivery", envelope: entry.envelope }));
-			this.#pending.set(id, {
+			const updated: JournalEntry = {
 				envelope: entry.envelope,
 				attempts: entry.attempts + 1,
 				nextAttemptAt: retryAt(entry, this.#limits),
-			});
+			};
+			this.#journalBytes += Buffer.byteLength(journalLine(updated), "utf8") - Buffer.byteLength(journalLine(entry), "utf8");
+			this.#pending.set(id, updated);
 			changed = true;
 		}
 		if (!changed) {
@@ -916,7 +920,10 @@ export class BrokerTransportServer {
 			return;
 		}
 		if (message.type === "ack") {
-			if (!this.#pending.delete(message.messageId)) return;
+			const entry = this.#pending.get(message.messageId);
+			if (!entry) return;
+			this.#pending.delete(message.messageId);
+			this.#journalBytes -= Buffer.byteLength(journalLine(entry), "utf8");
 			this.#origins.get(message.messageId)?.write(encodeWire({ type: "accepted", messageId: message.messageId }));
 			this.#origins.delete(message.messageId);
 			this.#journalWrite = this.#journalWrite.then(() =>
