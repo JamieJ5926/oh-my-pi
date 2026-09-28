@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { logger } from "@oh-my-pi/pi-utils";
+import type { Provider } from "@oh-my-pi/pi-ai";
 import { executeCancel } from "../tools/hub/jobs";
 import { IrcBus, type IrcMessage } from "../irc/bus";
 import { BUILTIN_TOOLS } from "../tools";
@@ -193,13 +196,28 @@ function coordinatorItemsMissingDelegable(args: unknown): string[] {
 		return /^[ \t]*(?:delegable[ \t]*:|single-slice[ \t]*:)[ \t]*\S/im.test(task) ? [] : [String(index + 1)];
 	});
 }
-
+function parseRefreshKeyRequest(args: unknown): { model: string; stale_key_sha256: string } | undefined {
+	if (typeof args !== "object" || args === null || Array.isArray(args)) return undefined;
+	if (!("op" in args) || args.op !== "refresh_key") return undefined;
+	if (!("model" in args) || typeof args.model !== "string") return undefined;
+	if (
+		!("stale_key_sha256" in args) ||
+		typeof args.stale_key_sha256 !== "string" ||
+		!/^[a-f0-9]{64}$/.test(args.stale_key_sha256)
+	)
+		return undefined;
+	return { model: args.model, stale_key_sha256: args.stale_key_sha256 };
+}
 export function createFrankHostToolService(options: {
 	session: ToolSession;
 	agentId: string;
 	signal?: AbortSignal;
 	names?: string[];
 	workerCwd?: string;
+	apiKey?: string;
+	authProvider?: Provider;
+	modelId?: string;
+	sessionId?: string;
 	/** The worker seat's spawn list ("" none, "*" any, or CSV). Omitted keeps the host session's. */
 	spawns?: string;
 	/** The worker's rendered prompt and seat; when set, bridged tool hooks run in the worker's lane scope. */
@@ -210,6 +228,7 @@ export function createFrankHostToolService(options: {
 		getAgentId: () => options.agentId,
 		...(options.spawns !== undefined ? { getSessionSpawns: () => options.spawns ?? "" } : {}),
 	};
+	let currentWorkerKey = options.apiKey;
 	const manager = options.session.asyncJobManager;
 	const hostOwnerId = options.session.getAgentId?.() ?? undefined;
 	const deliveredBodies = new Map<string, { job: AsyncJob | undefined; text: string }>();
@@ -370,6 +389,37 @@ export function createFrankHostToolService(options: {
 		async handle(name, args, toolCallId) {
 			if (closed || options.signal?.aborted) {
 				return { ok: false, error: "host tool service is closed" };
+			}
+			if (name === "refresh_key") {
+				const request = parseRefreshKeyRequest(args);
+				logger.debug("Frank host key refresh request", {
+					provider: options.authProvider,
+					model: request?.model,
+					staleKeySha256Prefix: request?.stale_key_sha256.slice(0, 12),
+				});
+				if (!request || !options.authProvider || !currentWorkerKey || !options.session.modelRegistry) {
+					return { ok: true, content: JSON.stringify({ ok: false, error: "key refresh is unavailable" }) };
+				}
+				try {
+					const currentKey = currentWorkerKey;
+					if (createHash("sha256").update(currentKey).digest("hex") !== request.stale_key_sha256) {
+						return { ok: true, content: JSON.stringify({ ok: true, key: currentKey }) };
+					}
+					const refreshedKey = await options.session.modelRegistry?.getApiKeyForProvider(
+						options.authProvider,
+						options.sessionId,
+						{ modelId: options.modelId, forceRefresh: true, signal: options.signal },
+					);
+					if (!refreshedKey)
+						return {
+							ok: true,
+							content: JSON.stringify({ ok: false, error: "key refresh did not return a key" }),
+						};
+					currentWorkerKey = refreshedKey;
+					return { ok: true, content: JSON.stringify({ ok: true, key: refreshedKey }) };
+				} catch {
+					return { ok: true, content: JSON.stringify({ ok: false, error: "key refresh failed" }) };
+				}
 			}
 			if (!enabled[name]) return { ok: false, error: `host tool is not enabled: ${name}` };
 			if (coordinator && !dispatchedTask && FIRST_WORK_TOOLS[name]) {

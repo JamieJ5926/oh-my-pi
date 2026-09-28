@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { registerLogSink } from "@oh-my-pi/pi-utils/logger";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,7 +10,170 @@ import { BUILTIN_TOOLS } from "../tools";
 import type { ToolSession } from "../tools";
 import { createFrankHostToolService } from "./frank-host-tools";
 import { AgentRegistry } from "../registry/agent-registry";
+import { Settings } from "../config/settings";
 import { IrcBus } from "../irc/bus";
+
+function staleKeyHash(key: string): string {
+	return createHash("sha256").update(key).digest("hex");
+}
+
+describe("Frank host key refresh", () => {
+	test("refreshes the spawn-time key only when its fingerprint is stale", async () => {
+		const calls: unknown[][] = [];
+		const originalKey = "old-secret";
+		const events: unknown[] = [];
+		const logged: unknown[] = [];
+		const disposeLogSink = registerLogSink(event => logged.push(event));
+		const service = createFrankHostToolService({
+			session: {
+				authStorage: { getApiKey: async () => "new-secret" },
+				modelRegistry: {
+					getApiKeyForProvider: async (...args: unknown[]) => {
+						calls.push(args);
+						return "new-secret";
+					},
+				},
+				sessionManager: { appendMessage: (event: unknown) => events.push(event) },
+			} as unknown as ToolSession,
+			agentId: "refresh-stale",
+			apiKey: originalKey,
+			authProvider: "openai",
+			modelId: "model-a",
+			sessionId: "session-a",
+		});
+
+		try {
+			const response = await service.handle(
+				"refresh_key",
+				{
+					op: "refresh_key",
+					model: "openai/model-a:high",
+					stale_key_sha256: staleKeyHash(originalKey),
+				},
+				"call-a",
+			);
+
+			expect(response).toEqual({ ok: true, content: JSON.stringify({ ok: true, key: "new-secret" }) });
+			expect(calls).toEqual([
+				["openai", "session-a", { modelId: "model-a", forceRefresh: true, signal: undefined }],
+			]);
+			expect(events).toEqual([]);
+			expect(logged).toHaveLength(1);
+			expect(JSON.stringify(logged)).not.toContain(originalKey);
+			expect(JSON.stringify(logged)).toContain("openai/model-a:high");
+			expect(JSON.stringify(logged)).toContain(staleKeyHash(originalKey).slice(0, 12));
+		} finally {
+			disposeLogSink();
+		}
+	});
+
+	test("returns the current key without refresh when the fingerprint differs", async () => {
+		let refreshes = 0;
+		const service = createFrankHostToolService({
+			session: {
+				authStorage: { getApiKey: async () => "unexpected" },
+				modelRegistry: {
+					getApiKeyForProvider: async () => {
+						refreshes++;
+						return "unexpected";
+					},
+				},
+			} as unknown as ToolSession,
+			agentId: "refresh-current",
+			apiKey: "current-secret",
+			authProvider: "openai",
+			modelId: "model-a",
+		});
+
+		const response = await service.handle("refresh_key", {
+			op: "refresh_key",
+			model: "different-provider/model-b:high",
+			stale_key_sha256: staleKeyHash("different-secret"),
+		});
+
+		expect(response).toEqual({ ok: true, content: JSON.stringify({ ok: true, key: "current-secret" }) });
+		expect(refreshes).toBe(0);
+	});
+
+	test("returns an error envelope without exposing credential bytes when refresh fails", async () => {
+		const service = createFrankHostToolService({
+			session: {
+				authStorage: {
+					getApiKey: async () => {
+						throw new Error("should not be called");
+					},
+				},
+				modelRegistry: {
+					getApiKeyForProvider: async () => {
+						throw new Error("provider rejected secret");
+					},
+				},
+			} as unknown as ToolSession,
+			agentId: "refresh-failure",
+			apiKey: "old-secret",
+			authProvider: "openai",
+			modelId: "model-a",
+		});
+
+		const response = await service.handle("refresh_key", {
+			op: "refresh_key",
+			model: "model-a",
+			stale_key_sha256: staleKeyHash("old-secret"),
+		});
+
+		expect(response).toEqual({ ok: true, content: JSON.stringify({ ok: false, error: "key refresh failed" }) });
+		expect(JSON.stringify(response)).not.toContain("old-secret");
+		expect(JSON.stringify(response)).not.toContain("provider rejected secret");
+	});
+
+	test("returns an error envelope when model registry is unavailable", async () => {
+		const service = createFrankHostToolService({
+			session: { authStorage: { getApiKey: async () => "old-secret" } } as unknown as ToolSession,
+			agentId: "refresh-no-registry",
+			apiKey: "old-secret",
+			authProvider: "openai",
+			modelId: "model-a",
+		});
+
+		const response = await service.handle("refresh_key", {
+			op: "refresh_key",
+			model: "openai/model-a:high",
+			stale_key_sha256: staleKeyHash("old-secret"),
+		});
+
+		expect(response).toEqual({
+			ok: true,
+			content: JSON.stringify({ ok: false, error: "key refresh is unavailable" }),
+		});
+	});
+
+	test("keeps refresh requests out of enabled tool names and recorded events", async () => {
+		const events: unknown[] = [];
+		const session = {
+			authStorage: { getApiKey: async () => "new-secret" },
+			modelRegistry: { getApiKeyForProvider: async () => "new-secret" },
+			sessionManager: { appendMessage: (event: unknown) => events.push(event) },
+		} as unknown as ToolSession;
+		const service = createFrankHostToolService({
+			session,
+			agentId: "refresh-private",
+			apiKey: "old-secret",
+			authProvider: "openai",
+			modelId: "model-a",
+		});
+
+		const response = await service.handle("refresh_key", {
+			op: "refresh_key",
+			model: "model-a",
+			stale_key_sha256: staleKeyHash("old-secret"),
+		});
+
+		expect(service.toolNames()).toEqual(["task", "hub"]);
+		expect(events).toEqual([]);
+		expect(JSON.stringify(events)).not.toContain("old-secret");
+		expect(JSON.stringify(response)).not.toContain("old-secret");
+	});
+});
 
 describe("Frank host tool service", () => {
 	const session = {} as ToolSession;
@@ -954,42 +1119,52 @@ describe("Frank hub send mailbox", () => {
 		AgentRegistry.global().unregister(id);
 	});
 
-	// 2026-09-26: FFExp02/03/07 could not report to Main: the bridge served the
-	// host's own hub instance, so the lane's send carried the host identity and
-	// tripped "Cannot send a message to yourself."
-	test("a bridged hub send carries the Frank lane identity, so a report to Main is delivered", async () => {
+	// 2026-09-26: FFExp02/03/07 could not report to Main because the bridge
+	// used the host's hub instance, so Frank sent with the host identity.
+	test("a bridged hub send carries the Frank lane identity and delivers to its OMP parent", async () => {
 		const registry = AgentRegistry.global();
 		const leaf = "FrankLeafReport";
+		const parent = "FrankParentReport";
 		registry.unregister(leaf);
-		registry.register({ id: leaf, displayName: leaf, kind: "sub", session: null, status: "running" });
-		let seen: string | null | undefined;
-		const original = BUILTIN_TOOLS.hub;
-		BUILTIN_TOOLS.hub = async session => {
-			seen = session.getAgentId?.();
-			return {
-				name: "hub",
-				label: "Hub",
-				description: "",
-				parameters: {},
-				execute: async () => ({ content: [{ type: "text", text: "queued" }] }),
-			} as never;
-		};
+		registry.unregister(parent);
+		registry.register({
+			id: leaf,
+			displayName: leaf,
+			kind: "sub",
+			parentId: parent,
+			session: null,
+			status: "running",
+		});
+		registry.register({
+			id: parent,
+			displayName: parent,
+			kind: "sub",
+			session: null,
+			status: "running",
+		});
 		try {
-			const hostHub = {
-				execute: async () => ({ content: [{ type: "text" as const, text: "Cannot send a message to yourself." }] }),
-			};
+			const toolRegistry = new Map();
 			const hostSession = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				agentRegistry: registry,
 				getAgentId: () => "Main",
+				getSessionFile: () => null,
 				getToolContext: () => undefined,
-				toolRegistry: new Map([["hub", hostHub]]),
+				toolRegistry,
 			} as unknown as ToolSession;
+			toolRegistry.set("hub", (await BUILTIN_TOOLS.hub(hostSession))!);
 			const service = createFrankHostToolService({ session: hostSession, agentId: leaf, names: ["hub"] });
-			const result = await service.handle("hub", { op: "send", to: "Main", message: "report" });
-			expect(seen).toBe(leaf);
-			expect(result.content ?? "").not.toContain("Cannot send a message to yourself");
+			const result = await service.handle("hub", { op: "send", to: parent, message: "report from Frank" });
+			expect(result.ok).toBe(true);
+			expect(result.content ?? "").toContain(`- ${parent}: queued`);
+			expect(IrcBus.global().inbox(parent)).toMatchObject([
+				{ from: leaf, to: parent, body: "report from Frank" },
+			]);
 		} finally {
-			BUILTIN_TOOLS.hub = original;
 			registry.unregister(leaf);
+			registry.unregister(parent);
 		}
 	});
 });
