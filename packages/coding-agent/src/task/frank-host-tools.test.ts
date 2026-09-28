@@ -341,7 +341,10 @@ describe("Frank host tool service", () => {
 
 	test("closing the bridge unregisters its sink and rejects later tool calls", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
-		const service = createFrankHostToolService({ session: { asyncJobManager: manager } as unknown as ToolSession, agentId: "frank-test" });
+		const service = createFrankHostToolService({
+			session: { asyncJobManager: manager } as unknown as ToolSession,
+			agentId: "frank-test",
+		});
 		service.close();
 		expect(service.closed).toBe(true);
 		expect(await service.handle("hub", {})).toEqual({ ok: false, error: "host tool service is closed" });
@@ -350,7 +353,6 @@ describe("Frank host tool service", () => {
 		expect(manager.isJobResultConsumed("after-close")).toBe(false);
 		await manager.dispose();
 	});
-
 
 	test("coordinator batch requires each coordinator item to declare its own delegable scope", async () => {
 		let invocations = 0;
@@ -685,19 +687,32 @@ describe("Frank host tool service", () => {
 	test("bash bridge registers a background job to the Frank worker owner and drains its delivery", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
 		const gate = Promise.withResolvers<string>();
-		const hostRegistry = { execute: async () => ({ content: [{ type: "text" as const, text: "parent" }], details: { async: { state: "running", jobId: "bridge-bash" } } }) };
+		const hostRegistry = {
+			execute: async () => ({
+				content: [{ type: "text" as const, text: "parent" }],
+				details: { async: { state: "running", jobId: "bridge-bash" } },
+			}),
+		};
 		const originalBash = BUILTIN_TOOLS.bash;
-		BUILTIN_TOOLS.bash = async workerSession => ({
-			name: "bash",
-			label: "Bash",
-			description: "",
-			parameters: {},
-			execute: async () => {
-				const ownerId = workerSession.getAgentId?.() ?? undefined;
-				manager.register("bash", "Frank worker", () => gate.promise, { id: "bridge-bash", agentId: ownerId, ownerId });
-				return { content: [{ type: "text" as const, text: "started" }], details: { async: { state: "running", jobId: "bridge-bash" } } };
-			},
-		} as never);
+		BUILTIN_TOOLS.bash = async workerSession =>
+			({
+				name: "bash",
+				label: "Bash",
+				description: "",
+				parameters: {},
+				execute: async () => {
+					const ownerId = workerSession.getAgentId?.() ?? undefined;
+					manager.register("bash", "Frank worker", () => gate.promise, {
+						id: "bridge-bash",
+						agentId: ownerId,
+						ownerId,
+					});
+					return {
+						content: [{ type: "text" as const, text: "started" }],
+						details: { async: { state: "running", jobId: "bridge-bash" } },
+					};
+				},
+			}) as never;
 		try {
 			const sessionWithRegistry = {
 				asyncJobManager: manager,
@@ -705,7 +720,11 @@ describe("Frank host tool service", () => {
 				toolRegistry: new Map([["bash", hostRegistry]]),
 				wrapWithHooks: (tool: { name: string; execute: unknown }) => tool,
 			} as unknown as ToolSession;
-			const service = createFrankHostToolService({ session: sessionWithRegistry, agentId: "FrankWorker", names: ["bash", "hub"] });
+			const service = createFrankHostToolService({
+				session: sessionWithRegistry,
+				agentId: "FrankWorker",
+				names: ["bash", "hub"],
+			});
 			await service.handle("bash", { argv: ["echo", "worker"] });
 			expect(manager.getJob("bridge-bash")?.ownerId).toBe("FrankWorker");
 			gate.resolve("FRANK_DELIVERY");
@@ -755,7 +774,8 @@ describe("Frank host tool service", () => {
 			}),
 		};
 		const originalBash = BUILTIN_TOOLS.bash;
-		BUILTIN_TOOLS.bash = async () => ({ name: "bash", label: "Bash", description: "", parameters: {}, ...registeredTool }) as never;
+		BUILTIN_TOOLS.bash = async () =>
+			({ name: "bash", label: "Bash", description: "", parameters: {}, ...registeredTool }) as never;
 		try {
 			const service = createFrankHostToolService({
 				session: { toolRegistry: { get: () => registeredTool } } as unknown as ToolSession,
@@ -780,7 +800,8 @@ describe("Frank host tool service", () => {
 			}),
 		};
 		const originalBash = BUILTIN_TOOLS.bash;
-		BUILTIN_TOOLS.bash = async () => ({ name: "bash", label: "Bash", description: "", parameters: {}, ...settledTool }) as never;
+		BUILTIN_TOOLS.bash = async () =>
+			({ name: "bash", label: "Bash", description: "", parameters: {}, ...settledTool }) as never;
 		try {
 			const service = createFrankHostToolService({
 				session: { toolRegistry: { get: () => settledTool } } as unknown as ToolSession,
@@ -981,12 +1002,19 @@ describe("Frank host tool service: child drain", () => {
 				session: {
 					asyncJobManager: manager,
 					getAgentId: () => "Host",
-					allocateOutputArtifact: async () => ({ id: "77", path: (artifactPath = path.join(dir, "77.async.log")) }),
+					allocateOutputArtifact: async () => ({
+						id: "77",
+						path: (artifactPath = path.join(dir, "77.async.log")),
+					}),
 				} as unknown as ToolSession,
 				agentId: "frank-test",
 			});
 			const body = "x".repeat(13_000);
-			manager.register("task", "ChildBig", async () => body, { id: "ChildBig", agentId: "ChildBig", ownerId: "Host" });
+			manager.register("task", "ChildBig", async () => body, {
+				id: "ChildBig",
+				agentId: "ChildBig",
+				ownerId: "Host",
+			});
 			await manager.getJob("ChildBig")?.promise;
 
 			const result = await service.handle("hub", { op: "wait", to: "ChildBig", timeoutMs: 5_000 });
@@ -1007,7 +1035,11 @@ describe("Frank host tool service: child drain", () => {
 				agentId: "frank-test",
 			});
 			const body = "x".repeat(13_000);
-			manager.register("task", "ChildBig", async () => body, { id: "ChildBig", agentId: "ChildBig", ownerId: "frank-test" });
+			manager.register("task", "ChildBig", async () => body, {
+				id: "ChildBig",
+				agentId: "ChildBig",
+				ownerId: "frank-test",
+			});
 			await manager.getJob("ChildBig")?.promise;
 			await manager.waitForOwnerJobs("frank-test", { timeoutMs: 5_000 });
 			const result = await service.handle("hub", { op: "wait", to: "ChildBig", timeoutMs: 5_000 });
@@ -1159,9 +1191,7 @@ describe("Frank hub send mailbox", () => {
 			const result = await service.handle("hub", { op: "send", to: parent, message: "report from Frank" });
 			expect(result.ok).toBe(true);
 			expect(result.content ?? "").toContain(`- ${parent}: queued`);
-			expect(IrcBus.global().inbox(parent)).toMatchObject([
-				{ from: leaf, to: parent, body: "report from Frank" },
-			]);
+			expect(IrcBus.global().inbox(parent)).toMatchObject([{ from: leaf, to: parent, body: "report from Frank" }]);
 		} finally {
 			registry.unregister(leaf);
 			registry.unregister(parent);
