@@ -124,10 +124,10 @@ describe("Frank host key refresh", () => {
 		expect(JSON.stringify(response)).not.toContain("provider rejected secret");
 	});
 
-	test("returns an error envelope when auth storage is unavailable", async () => {
+	test("returns an error envelope when model registry is unavailable", async () => {
 		const service = createFrankHostToolService({
-			session: {} as ToolSession,
-			agentId: "refresh-no-storage",
+			session: { authStorage: { getApiKey: async () => "old-secret" } } as unknown as ToolSession,
+			agentId: "refresh-no-registry",
 			apiKey: "old-secret",
 			authProvider: "openai",
 			modelId: "model-a",
@@ -806,6 +806,121 @@ describe("Frank host tool service: child drain", () => {
 		release();
 	});
 
+	test("wait with ids returns on the first newly settled child", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		let finishFast: () => void = () => {};
+		let finishSlow: () => void = () => {};
+		let fastStarted!: () => void;
+		let slowStarted!: () => void;
+		const fastReady = new Promise<void>(resolve => {
+			fastStarted = resolve;
+		});
+		const slowReady = new Promise<void>(resolve => {
+			slowStarted = resolve;
+		});
+		manager.register(
+			"task",
+			"Fast",
+			async () => {
+				fastStarted();
+				await new Promise<void>(resolve => {
+					finishFast = resolve;
+				});
+				return "FAST_BODY";
+			},
+			{ id: "Fast", agentId: "Fast", ownerId: "Host" },
+		);
+		manager.register(
+			"task",
+			"Slow",
+			async () => {
+				slowStarted();
+				await new Promise<void>(resolve => {
+					finishSlow = resolve;
+				});
+				return "SLOW_BODY";
+			},
+			{ id: "Slow", agentId: "Slow", ownerId: "Host" },
+		);
+		await Promise.all([fastReady, slowReady]);
+		const resultPromise = bridge(manager).handle("hub", { op: "wait", ids: ["Fast", "Slow"], timeoutMs: 5_000 });
+		let returned = false;
+		void resultPromise.then(() => {
+			returned = true;
+		});
+		finishFast();
+		await manager.getJob("Fast")?.promise;
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		const returnedAfterFirst = returned;
+		finishSlow();
+		const result = await resultPromise;
+		expect(returnedAfterFirst).toBe(true);
+		expect(result.content).toContain("FAST_BODY");
+		expect(result.content).toContain("Still running: Slow");
+		await manager.getJob("Slow")?.promise;
+	});
+
+	test("cancel bridge cancels only requested Frank-owned jobs", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		let signal: AbortSignal | undefined;
+		let started!: () => void;
+		const ready = new Promise<void>(resolve => {
+			started = resolve;
+		});
+		manager.register(
+			"task",
+			"CancelMe",
+			async ctx => {
+				signal = ctx.signal;
+				started();
+				await new Promise<void>(resolve => ctx.signal.addEventListener("abort", () => resolve(), { once: true }));
+				return "cancelled";
+			},
+			{ id: "CancelMe", agentId: "CancelMe", ownerId: "frank-test" },
+		);
+		await ready;
+		const session = { asyncJobManager: manager, getAgentId: () => "Host" } as unknown as ToolSession;
+		const result = await createFrankHostToolService({ session, agentId: "frank-test" }).handle("hub", {
+			op: "cancel",
+			ids: ["CancelMe"],
+		});
+		expect(result.ok).toBe(true);
+		expect(signal?.aborted).toBe(true);
+		expect(result.content).toContain("CancelMe");
+		await manager.getJob("CancelMe")?.promise;
+	});
+	test("zero timeout waits up to the native hub maximum when a child is pending", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
+		let finish: () => void = () => {};
+		let started!: () => void;
+		const ready = new Promise<void>(resolve => {
+			started = resolve;
+		});
+		manager.register(
+			"task",
+			"WaitForever",
+			async () => {
+				started();
+				await new Promise<void>(resolve => {
+					finish = resolve;
+				});
+				return "DONE";
+			},
+			{ id: "WaitForever", agentId: "WaitForever", ownerId: "Host" },
+		);
+		await ready;
+		const wait = bridge(manager).handle("hub", { op: "wait", ids: ["WaitForever"], timeoutMs: 0 });
+		let returned = false;
+		void wait.then(() => {
+			returned = true;
+		});
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		expect(returned).toBe(false);
+		finish();
+		const result = await wait;
+		expect(result.content).toContain("DONE");
+		await manager.getJob("WaitForever")?.promise;
+	});
 	test("a body over the inline budget stays on the job row instead of being consumed", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: 4 });
 		manager.register("task", "ChildBig", async () => "x".repeat(13_000), {

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Provider } from "@oh-my-pi/pi-ai";
+import { executeCancel } from "../tools/hub/jobs";
 import { IrcBus, type IrcMessage } from "../irc/bus";
 import { BUILTIN_TOOLS } from "../tools";
 import type { ToolSession } from "../tools";
@@ -287,15 +288,17 @@ export function createFrankHostToolService(options: {
 	};
 
 	/** Wait for children to settle, bounded by the caller's budget and the worker's own abort signal. */
-	const settle = async (jobs: AsyncJob[], budgetMs: number): Promise<void> => {
+	const settle = async (jobs: AsyncJob[], budgetMs: number, firstSettled: boolean): Promise<void> => {
 		const deadline = Date.now() + budgetMs;
 		for (;;) {
+			if (firstSettled && jobs.some(job => job.status !== "running")) return;
 			const running = jobs.filter(job => job.status === "running");
 			if (running.length === 0 || closed || options.signal?.aborted || Date.now() >= deadline) return;
 			await Promise.race([
-				Promise.all(running.map(job => job.promise)),
+				...(firstSettled ? running.map(job => job.promise) : [Promise.all(running.map(job => job.promise))]),
 				Bun.sleep(Math.max(1, Math.min(deadline - Date.now(), 1_000))),
 			]);
+			if (firstSettled && jobs.some(job => job.status !== "running")) return;
 		}
 	};
 
@@ -408,9 +411,26 @@ export function createFrankHostToolService(options: {
 						typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs)
 							? params.timeoutMs
 							: CHILD_WAIT_DEFAULT_MS;
-					await settle(children, Math.max(0, Math.min(requested, CHILD_WAIT_MAX_MS)));
+					const budget = requested === 0 ? CHILD_WAIT_MAX_MS : Math.max(0, Math.min(requested, CHILD_WAIT_MAX_MS));
+					await settle(children, budget, Array.isArray(params.ids) && params.ids.length > 0);
 					return { ok: true, content: `${hostMail}${drainBodies(children)}` };
 				}
+			}
+			if (name === "hub" && params.op === "cancel") {
+				if (!manager) return { ok: false, error: "Async execution is disabled; no background jobs are available." };
+				if (
+					!Array.isArray(params.ids) ||
+					!params.ids.every(id => typeof id === "string") ||
+					params.ids.length === 0
+				) {
+					return { ok: false, error: '`ids` is required for op="cancel".' };
+				}
+				const result = await executeCancel(bridgedSession, manager, options.agentId, params.ids);
+				const text = result.content
+					.filter((part): part is { type: "text"; text: string } => part.type === "text")
+					.map(part => part.text)
+					.join("");
+				return { ok: true, content: `${hostMail}${text}` };
 			}
 			const factory = Object.entries(BUILTIN_TOOLS).find(([toolName]) => toolName === name)?.[1];
 			if (!factory)
