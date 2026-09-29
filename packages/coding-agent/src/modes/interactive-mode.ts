@@ -121,6 +121,7 @@ import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { interruptedFrankLaneLines } from "../task/executor";
 import { labelEchoesHandle } from "../task/label";
 import { oneLineLabel } from "../task/types";
 import { formatTaskId } from "../task/render";
@@ -5211,6 +5212,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#isShuttingDown) return;
 		this.#isShuttingDown = true;
 		await this.#teardown();
+		this.#printInterruptedFrankLanes();
 
 		// Print resumption hint only if the session was actually materialized to
 		// durable storage — `--resume <id>` fails on a never-written file (see
@@ -5238,6 +5240,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#isShuttingDown) return;
 		this.#isShuttingDown = true;
 		await this.#teardown();
+		this.#printInterruptedFrankLanes();
 
 		const cmd = [...resolveCliEntryCmd(), ...restartArgv(process.argv.slice(2), this.#resumableSessionId())];
 		await postmortem.cleanup();
@@ -5251,6 +5254,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const child = Bun.spawn(cmd, { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
 		await postmortem.quit(await child.exited);
+	}
+
+	#printInterruptedFrankLanes(): void {
+		for (const line of interruptedFrankLaneLines()) process.stderr.write(`${chalk.yellow(line)}\n`);
 	}
 
 	/**
