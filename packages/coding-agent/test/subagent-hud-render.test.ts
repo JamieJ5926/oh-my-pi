@@ -335,14 +335,30 @@ describe("subagent HUD lines", () => {
 	it("counts only active reviewer siblings in a collapsed group", () => {
 		const parent = makeSession({ id: "Lead" });
 		const members = [
-			makeSession({ id: "Lead.ReviewA", agent: "frank-reviewer", status: "aborted", progress: makeProgress({ id: "Lead.ReviewA", tokens: 0 }) }),
-			makeSession({ id: "Lead.ReviewB", agent: "frank-reviewer", status: "aborted", progress: makeProgress({ id: "Lead.ReviewB", tokens: 0 }) }),
-			makeSession({ id: "Lead.ReviewC", agent: "frank-reviewer", status: "active", progress: makeProgress({ id: "Lead.ReviewC", tokens: 0 }) }),
+			makeSession({
+				id: "Lead.ReviewA",
+				agent: "frank-reviewer",
+				status: "aborted",
+				progress: makeProgress({ id: "Lead.ReviewA", tokens: 0 }),
+			}),
+			makeSession({
+				id: "Lead.ReviewB",
+				agent: "frank-reviewer",
+				status: "aborted",
+				progress: makeProgress({ id: "Lead.ReviewB", tokens: 0 }),
+			}),
+			makeSession({
+				id: "Lead.ReviewC",
+				agent: "frank-reviewer",
+				status: "active",
+				progress: makeProgress({ id: "Lead.ReviewC", tokens: 0 }),
+			}),
 		];
 		const ancestry = members.map(member => ({ id: member.id, parentId: parent.id }));
-		const line = Bun.stripANSI(renderSubagentHudLines([parent, ...members], 160, ancestry).subagents.join("\n"))
-			.split("\n")
-			.find(row => row.includes("frank-reviewer")) ?? "";
+		const line =
+			Bun.stripANSI(renderSubagentHudLines([parent, ...members], 160, ancestry).subagents.join("\n"))
+				.split("\n")
+				.find(row => row.includes("frank-reviewer")) ?? "";
 
 		expect(line).toContain("frank-reviewer ×1");
 		expect(line).not.toContain("frank-reviewer ×3");
@@ -407,12 +423,14 @@ describe("subagent HUD lines", () => {
 			makeSession({ id: "Lead.Broken", agent: "explorer", status: "failed" }),
 		];
 		const ancestry = members.map(member => ({ id: member.id, parentId: parent.id }));
-		const line = Bun.stripANSI(
-			renderSubagentHudLines([parent, ...members], 160, ancestry).subagents.join("\n"),
-		).split("\n").find(row => row.includes("explorer ×"));
+		const line = Bun.stripANSI(renderSubagentHudLines([parent, ...members], 160, ancestry).subagents.join("\n"))
+			.split("\n")
+			.find(row => row.includes("explorer ×"));
 
 		expect(line).toBe(
-			"  └─ ● explorer ×1    Live  Broken                                                                                                              ●         0  · ?",
+			"  └─ ● explorer ×1    Live  Broken " +
+				"                                                                          " +
+				"                                    ●         0  · ?",
 		);
 	});
 
@@ -436,26 +454,32 @@ describe("subagent HUD lines", () => {
 		expect(out).not.toContain("Finished");
 	});
 
-	it("tags a non-group row with a dim ⟨role⟩ cell, drops it on a generic task lane, and keeps group rows bracketless", () => {
-		const parent = makeSession({ id: "Lead" });
-		const solo = makeSession({ id: "Lead.PaneExitDiag", agent: "diagnose", description: "pane driving" });
-		const generic = makeSession({ id: "Lead.GateOff", description: "gate watching" });
-		const grouped = Array.from({ length: 3 }, (_, index) =>
-			makeSession({ id: `Lead.Kid${index}`, agent: "explorer" }),
-		);
-		const ancestry = [solo, generic, ...grouped].map(child => ({ id: child.id, parentId: parent.id }));
-		const frame = renderSubagentHudLines([parent, solo, generic, ...grouped], 160, ancestry, 2).subagents.join("\n");
-		const out = Bun.stripANSI(frame);
-		expect(frame).toContain(`${theme.bold("PaneExitDiag")} ${theme.fg("dim", "⟨diagnose⟩")}`);
-		expect(out).toMatch(/PaneExitDiag ⟨diagnose⟩ {2,}pane driving/);
-		// The generic worker holds no role, so it draws no badge rather than the word "task".
-		expect(out).toMatch(/GateOff {2,}gate watching/);
-		expect(out).not.toContain("⟨task⟩");
-		const group = out.split("\n").find(line => line.includes("explorer ×3")) ?? "";
-		expect(group).toContain("explorer ×3");
-		expect(group).not.toContain("⟨explorer⟩");
-		expect(group).not.toContain("⟨task⟩");
-	});
+	it(
+		"tags a non-group row with a dim ⟨role⟩ cell, drops it on a generic task lane, " +
+			"and keeps group rows bracketless",
+		() => {
+			const parent = makeSession({ id: "Lead" });
+			const solo = makeSession({ id: "Lead.PaneExitDiag", agent: "diagnose", description: "pane driving" });
+			const generic = makeSession({ id: "Lead.GateOff", description: "gate watching" });
+			const grouped = Array.from({ length: 3 }, (_, index) =>
+				makeSession({ id: `Lead.Kid${index}`, agent: "explorer" }),
+			);
+			const ancestry = [solo, generic, ...grouped].map(child => ({ id: child.id, parentId: parent.id }));
+			const frame = renderSubagentHudLines([parent, solo, generic, ...grouped], 160, ancestry, 2).subagents.join(
+				"\n",
+			);
+			const out = Bun.stripANSI(frame);
+			expect(frame).toContain(`${theme.bold("PaneExitDiag")} ${theme.fg("dim", "⟨diagnose⟩")}`);
+			expect(out).toMatch(/PaneExitDiag ⟨diagnose⟩ {2,}pane driving/);
+			// The generic worker holds no role, so it draws no badge rather than the word "task".
+			expect(out).toMatch(/GateOff {2,}gate watching/);
+			expect(out).not.toContain("⟨task⟩");
+			const group = out.split("\n").find(line => line.includes("explorer ×3")) ?? "";
+			expect(group).toContain("explorer ×3");
+			expect(group).not.toContain("⟨explorer⟩");
+			expect(group).not.toContain("⟨task⟩");
+		},
+	);
 
 	it("holds one description column across rows, widening the block when a Name ⟨role⟩ cell overruns it", () => {
 		const parent = makeSession({ id: "Lead" });
@@ -483,8 +507,12 @@ describe("subagent HUD lines", () => {
 	it("leaves the strip cell blank on a leaf row", () => {
 		const parent = makeSession({ id: "Lead" });
 		const leaf = makeSession({ id: "Lead.Leaf", agent: "explorer", description: "no children" });
-		const frame = renderSubagentHudLines([parent, leaf], 160, [{ id: leaf.id, parentId: parent.id }], 4)
-			.subagents.join("\n");
+		const frame = renderSubagentHudLines(
+			[parent, leaf],
+			160,
+			[{ id: leaf.id, parentId: parent.id }],
+			4,
+		).subagents.join("\n");
 		const leafLine = frame.split("\n").find(line => Bun.stripANSI(line).includes("Leaf"));
 		if (!leafLine) throw new Error("Expected a leaf row");
 		expect(Bun.stripANSI(leafLine)).toMatch(/Leaf ⟨explorer⟩\s+no children\s+0\s+· \?/);
@@ -761,8 +789,7 @@ describe("subagent HUD lines", () => {
 				],
 				120,
 				[...ancestry, { id: late.id, parentId: "Lead.Settled" }],
-			)
-				.subagents.join("\n"),
+			).subagents.join("\n"),
 		);
 		expect(reopened).toContain("1 active below");
 	});
@@ -798,8 +825,9 @@ describe("subagent HUD lines", () => {
 				expect(Bun.stringWidth(line)).toBeLessThanOrEqual(Math.max(1, width));
 				expect(line).not.toContain("\n");
 			}
-			expect(Bun.stripANSI(narrow.completed.join("")).replace(/\s/g, ""))
-				.toBe(Bun.stripANSI(full.completed.join("")).replace(/\s/g, ""));
+			expect(Bun.stripANSI(narrow.completed.join("")).replace(/\s/g, "")).toBe(
+				Bun.stripANSI(full.completed.join("")).replace(/\s/g, ""),
+			);
 		}
 		expect(registry.getSessions()).toEqual(before);
 		registry.dispose();
@@ -1039,8 +1067,9 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(narrow.length).toBeGreaterThan(2);
 		expect(Bun.stripANSI(narrow[0]).trim()).toBe("Completed");
 		for (const line of narrow) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(20);
-		expect(Bun.stripANSI(narrow.slice(1).join("")).replace(/\s/g, ""))
-			.toBe(Bun.stripANSI(wide.slice(1).join("")).replace(/\s/g, ""));
+		expect(Bun.stripANSI(narrow.slice(1).join("")).replace(/\s/g, "")).toBe(
+			Bun.stripANSI(wide.slice(1).join("")).replace(/\s/g, ""),
+		);
 		expect(mode.completedContainer.render(120)).toEqual(wide);
 	});
 
@@ -1171,7 +1200,8 @@ describe("InteractiveMode subagent observer UI sync", () => {
 	}, 20000);
 
 	it("clears A only after the actual picker successfully adopts B", async () => {
-		// The real picker combines filesystem discovery with UI timers; retain the standalone repro's platform-clock polling.
+		// The real picker combines filesystem discovery with UI timers; retain the
+		// standalone repro's platform-clock polling.
 		await mode.init({ suppressWelcomeIntro: true });
 		const target = SessionManager.create(tempDir.path(), tempDir.path());
 		target.appendMessage({ role: "user", content: "PickerTargetB", timestamp: Date.now() });
@@ -1253,7 +1283,12 @@ describe("InteractiveMode subagent observer UI sync", () => {
 describe("subagent HUD Frank tag", () => {
 	it("tags a Frank lane with ⟨🧟⟩ after its role and leaves a native lane untagged", () => {
 		const parent = makeSession({ id: "Lead", description: "parent" });
-		const frank = makeSession({ id: "Lead.Writer", agent: "implementer", runtime: "frank", description: "frank work" });
+		const frank = makeSession({
+			id: "Lead.Writer",
+			agent: "implementer",
+			runtime: "frank",
+			description: "frank work",
+		});
 		const native = makeSession({ id: "Lead.Reader", agent: "reviewer", description: "native work" });
 		const ancestry = [frank, native].map(child => ({ id: child.id, parentId: parent.id }));
 		const out = Bun.stripANSI(renderSubagentHudLines([parent, frank, native], 200, ancestry, 2).subagents.join("\n"));
