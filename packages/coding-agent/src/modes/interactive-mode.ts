@@ -879,7 +879,7 @@ export function renderSubagentHudLines(
 					cells: rowCells({
 						depth,
 						marker: "",
-						state: aggregateState(group),
+						state: aggregateState(running),
 						name: `${role} ×${running.length}`,
 						frank: group.every(member => member.runtime === "frank"),
 						description: group.map(member => localName(member)).join("  "),
