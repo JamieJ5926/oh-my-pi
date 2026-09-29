@@ -35,4 +35,36 @@ describe("frank cancel orphan", () => {
 		expect(registry.get("Pot")).toBeUndefined();
 		expect(registry.get("Deep")).toBeUndefined();
 	});
+
+	// CancelWhy4: the root cancelled a parked pot and its children in one call;
+	// dropping the pot registration first broke the chain, so each child came
+	// back "Agent GuardRevA2 was not spawned by you and cannot be cancelled".
+	test("root cancels a grandchild named after the parked pot it came through", async () => {
+		const registry = new AgentRegistry();
+		registry.register({ id: "Pot", displayName: "Pot", kind: "sub", parentId: "Main", session: null, status: "parked" });
+		registry.register({ id: "Child", displayName: "Child", kind: "sub", parentId: "Pot", session: null, status: "running" });
+		const manager = new AsyncJobManager({});
+		manager.register("task", "Child", () => new Promise<string>(() => {}), { id: "Child", ownerId: "Pot", agentId: "Child" });
+
+		const result = await executeCancel(sessionWith(registry), manager, "Main", ["Pot", "Child"]);
+		const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("");
+
+		expect(text).not.toContain("not spawned by you");
+		expect(manager.getJob("Child")?.status).toBe("cancelled");
+		expect(registry.get("Child")).toBeUndefined();
+	});
+
+	test("root cancels a grandchild whose pot registration is gone but whose pot job row remains", async () => {
+		const registry = new AgentRegistry();
+		registry.register({ id: "Child", displayName: "Child", kind: "sub", parentId: "Pot", session: null, status: "running" });
+		const manager = new AsyncJobManager({});
+		manager.register("task", "Pot", () => new Promise<string>(() => {}), { id: "Pot", ownerId: "Main", agentId: "Pot" });
+		manager.register("task", "Child", () => new Promise<string>(() => {}), { id: "Child", ownerId: "Pot", agentId: "Child" });
+
+		const result = await executeCancel(sessionWith(registry), manager, "Main", ["Child"]);
+
+		expect(result.details?.cancelled?.map(row => row.status)).toEqual(["cancelled"]);
+		expect(manager.getJob("Child")?.status).toBe("cancelled");
+		expect(manager.getJob("Pot")?.status).toBe("running");
+	});
 });
