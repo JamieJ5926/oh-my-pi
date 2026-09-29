@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { BUILTIN_TOOLS } from "../src/tools";
+import { AsyncJobManager } from "../src/async";
 import type { ToolSession } from "../src/tools";
 import { createFrankHostToolService } from "../src/task/frank-host-tools";
 
@@ -64,6 +65,57 @@ describe("Frank bridge synchronous bash", () => {
 			expect(result.content).not.toContain("(no output)");
 		} finally {
 			BUILTIN_TOOLS.bash = originalBash;
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("does not background a bridged bash call when the host receives a message", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "frank-bash-steer-"));
+		const originalBash = BUILTIN_TOOLS.bash;
+		const asyncJobManager = new AsyncJobManager({});
+		try {
+			const steering = new AbortController();
+			const service = createFrankHostToolService({
+				session: {
+					cwd: dir,
+					hasUI: false,
+					skills: [],
+					getAgentId: () => "FrankHost",
+					getToolContext: () => ({ toolCall: { steeringSignal: steering.signal } }),
+					getSessionId: () => "frank-bash-steer-test",
+					asyncJobManager,
+					getSessionFile: () => null,
+					getClientBridge: () => undefined,
+					settings: {
+						get(key: string) {
+							if (key === "bash.autoBackground.enabled") return true;
+							if (key === "bash.autoBackground.thresholdMs") return 60_000;
+							return false;
+						},
+						getBashInterceptorRules: () => [],
+					},
+					toolRegistry: new Map([
+						["bash", { execute: async () => ({ content: [{ type: "text" as const, text: "unused host bash" }] }) }],
+					]),
+					wrapWithHooks: (tool: { name: string; execute: unknown }) => tool,
+				} as unknown as ToolSession,
+				agentId: "FrankWorker",
+				workerCwd: dir,
+				names: ["bash"],
+			});
+			setTimeout(() => steering.abort(), 100);
+
+			const result = await service.handle("bash", {
+				argv: ["bash", "-c", "sleep 1.5; printf FRANK_BRIDGED_INLINE_OUTPUT"],
+				timeout_ms: 20_000,
+			});
+
+			if (!result.ok) throw new Error(result.error);
+			expect(result.content).toContain("FRANK_BRIDGED_INLINE_OUTPUT");
+			expect(result.content).not.toContain("Backgrounded as job");
+		} finally {
+			BUILTIN_TOOLS.bash = originalBash;
+			await asyncJobManager.dispose();
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
