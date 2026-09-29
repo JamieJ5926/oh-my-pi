@@ -872,6 +872,7 @@ export function renderSubagentHudLines(
 		for (const { group, session } of childRowsOf(parent)) {
 			if (group) {
 				const role = roleOf(group[0]!);
+				const running = group.filter(member => member.status === "active");
 				const groupModel = modelCell(group[0]!);
 				rowEntries.push({
 					kind: "row",
@@ -879,10 +880,10 @@ export function renderSubagentHudLines(
 						depth,
 						marker: "",
 						state: aggregateState(group),
-						name: `${role} ×${group.length}`,
+						name: `${role} ×${running.length}`,
 						frank: group.every(member => member.runtime === "frank"),
 						description: group.map(member => localName(member)).join("  "),
-						strip: stripOf(group.map(member => member.status)),
+						strip: stripOf(running.map(member => member.status)),
 						token: formatHudTokenCount(group.reduce((sum, member) => sum + tokens(member), 0)),
 						model: group.every(member => {
 							const other = modelCell(member);

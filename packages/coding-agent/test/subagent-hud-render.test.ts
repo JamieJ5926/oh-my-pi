@@ -340,13 +340,14 @@ describe("subagent HUD lines", () => {
 			makeSession({ id: "Lead.ReviewC", agent: "frank-reviewer", status: "active", progress: makeProgress({ id: "Lead.ReviewC", tokens: 0 }) }),
 		];
 		const ancestry = members.map(member => ({ id: member.id, parentId: parent.id }));
-		const line = Bun.stripANSI(renderSubagentHudLines([parent, ...members], 160, ancestry).subagents.join("\\n"))
-			.split("\\n")
+		const line = Bun.stripANSI(renderSubagentHudLines([parent, ...members], 160, ancestry).subagents.join("\n"))
+			.split("\n")
 			.find(row => row.includes("frank-reviewer")) ?? "";
 
 		expect(line).toContain("frank-reviewer ×1");
 		expect(line).not.toContain("frank-reviewer ×3");
-		expect(line.match(/●/g) ?? []).toHaveLength(1);
+		const dots = line.match(/ReviewC\s+(●+)/)?.[1] ?? "";
+		expect(dots).toBe("●");
 	});
 
 	it("keeps staggered terminal siblings compact with child tags and own usage", () => {
@@ -364,30 +365,22 @@ describe("subagent HUD lines", () => {
 			const selected = members.slice(0, count);
 			const frame = renderSubagentHudLines([parent, ...selected], 160, ancestry).subagents.join("\n");
 			const out = Bun.stripANSI(frame);
-			expect(out).toContain(`explorer ×${count}`);
+			const runningCount = selected.filter(member => member.status === "active").length;
+			expect(out).toContain(`explorer ×${runningCount}`);
 			expect(out).toMatch(
-				new RegExp(`explorer ×${count}✗?\\s+Child0(?:  Child\\d)*\\s+${"●".repeat(count)}\\s+\\d+`),
+				new RegExp(`explorer ×${runningCount}✗?\\s+Child0(?:  Child\\d)*\\s+${"●".repeat(runningCount)}\\s+\\d+`),
 			);
 			expect(out).toContain(count === 1 ? "Σ 7" : count === 3 ? "Σ 10" : "Σ 22");
 			for (const member of selected) expect(out).toContain(member.id.split(".").pop());
-			for (const member of selected) {
-				const color =
-					member.status === "active"
-						? "warning"
-						: member.status === "failed"
-							? "error"
-							: member.status === "aborted"
-								? "muted"
-								: "success";
+			for (const member of selected.filter(item => item.status === "active")) {
+				const color = "warning";
 				const name = member.id.split(".").pop() ?? member.id;
 				expect(frame).toContain(theme.fg(color, "●"));
 				expect(out).not.toMatch(new RegExp(`[●✗⊘] ${name}`));
 				expect(out).not.toMatch(new RegExp(`${name}[●✗⊘]`));
 			}
 			if (count === 6) {
-				expect(frame).toContain(
-					`${theme.styledSymbol("status.enabled", "error")} ${theme.bold("explorer ×6")}${theme.fg("error", "✗")}`,
-				);
+				expect(out).toContain("explorer ×1");
 			} else {
 				expect(out).not.toContain(`explorer ×${count}✗`);
 			}
@@ -395,8 +388,8 @@ describe("subagent HUD lines", () => {
 		parent.status = "completed";
 		const out = Bun.stripANSI(renderSubagentHudLines([parent, ...members], 160, ancestry).subagents.join("\n"));
 		expect(out).toContain("Σ 22");
-		expect(out).toContain("explorer ×6");
-		expect(out).toMatch(/explorer ×6✗?\s+Child0  Child1  Child2  Child3  Child4  Child5\s+●●●●●●\s+15/);
+		expect(out).toContain("explorer ×1✗");
+		expect(out).toMatch(/explorer ×1✗?\s+Child0  Child1  Child2  Child3  Child4  Child5\s+●\s+15/);
 		const narrow = renderSubagentHudLines([parent, ...members, makeSession({ id: "DeepWork" })], 42, [
 			...ancestry,
 			{ id: "DeepWork", parentId: members[0].id },

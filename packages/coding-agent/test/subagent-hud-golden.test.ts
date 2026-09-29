@@ -11,6 +11,8 @@ import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task";
 // ⟨poteto-agent⟩⟨model-thinking⟩⟨provider emoji⟩". The 2026-09-11 "model-emoji" clause described the
 // row when the emoji WAS the model information. Once id:level is on the row the emoji is redundant
 // and drops before the model id. Seat stays on the name. Strip still counts child rows a lane draws.
+// TUI-SETTLED-COUNT: collapsed groups now count and dot only active children, so this 2-active + 1-completed
+// group renders ×2 and two dots instead of the prior inflated ×3 and three dots.
 
 function session(
 	id: string,
@@ -61,7 +63,7 @@ const GOLDEN_SUBAGENTS = [
 	"▾ ● RulesTrack ⟨poteto-agent⟩       Nested rules synthesis                       ●●    Σ 2.1m  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
 	"  ├─▾ ● RulesInner ⟨poteto-agent⟩                                                 ●   Σ 82.3k  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
 	"  │ └─▾ ● RulesSynth ⟨synthesizer⟩                                                ●   Σ 39.7k  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
-	"  │   └─ ● explorer ×3              RuleA  RuleB  RuleC                         ●●●      1.2k  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
+	"  │   └─ ● explorer ×2              RuleA  RuleB  RuleC                          ●●      1.2k  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
 	"  └─ ● Owner ⟨owner⟩                Writes the merged file                                 2m  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
 ];
 
@@ -94,10 +96,11 @@ describe("subagent HUD golden render", () => {
 		const named = lines.filter(line => /● (RulesTrack|RulesInner|RulesSynth|Owner) /.test(line));
 		expect(named.length).toBe(4);
 		for (const line of named) expect(line).toMatch(/● \S+ ⟨[a-z-]+⟩ {2,}\S/);
-		const group = lines.find(line => line.includes("explorer ×3")) ?? "";
-		expect(group).toContain("explorer ×3");
+		const group = lines.find(line => line.includes("explorer ×2")) ?? "";
+		expect(group).toContain("explorer ×2");
+		expect(group).not.toContain("×3");
 		expect(group).not.toContain("⟨explorer⟩");
-		expect(group).not.toMatch(/● explorer ×3 ⟨[a-z-]+⟩/);
+		expect(group).not.toMatch(/● explorer ×2 ⟨[a-z-]+⟩/);
 	});
 
 	it("never renders task prompt text on any row", () => {
