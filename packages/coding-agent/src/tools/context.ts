@@ -8,6 +8,9 @@ declare module "@oh-my-pi/pi-agent-core" {
 		hasUI?: boolean;
 		toolNames?: string[];
 		toolCall?: ToolCallContext;
+		/** Set by the Frank host bridge: the call belongs to a Frank worker, so
+		 *  host steering and auto-background must not detach it. */
+		frankBridge?: boolean;
 		/** Set on `xd://` device dispatches: the write tool's outer approval gate
 		 *  already resolved this call at the mounted tool's tier, so the inner
 		 *  wrapper must not re-prompt for the same action (explicit per-tool

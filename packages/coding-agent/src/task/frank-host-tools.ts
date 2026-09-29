@@ -523,24 +523,23 @@ export function createFrankHostToolService(options: {
 							: `host tool is unavailable: ${name}`,
 					};
 				const hostContext = bridgedSession.getToolContext?.();
-				const context = {
-					...(hostContext ?? {}),
-					...(name === "bash"
+				const scoped =
+					hostContext && options.workerLane !== undefined
 						? {
-								frankBridge: true,
-								...(hostContext?.toolCall
-									? { toolCall: { ...hostContext.toolCall, steeringSignal: undefined } }
-									: {}),
-							}
-						: {}),
-					...(hostContext && options.workerLane !== undefined
-						? {
+								...hostContext,
 								hookScope: {
 									sessionManager: laneSessionView(hostContext.sessionManager, options.workerLane),
 								},
 							}
-						: {}),
-				};
+						: hostContext;
+				const context =
+					scoped && name === "bash"
+						? {
+								...scoped,
+								frankBridge: true,
+								...(scoped.toolCall ? { toolCall: { ...scoped.toolCall, steeringSignal: undefined } } : {}),
+							}
+						: scoped;
 				const result = await tool.execute(
 					toolCallId ?? `frank-bridge:${name}`,
 					translatedArgs,
