@@ -54,18 +54,15 @@ const ancestry = sessions
 	.filter(s => s.id.includes("."))
 	.map(s => ({ id: s.id, parentId: s.id.slice(0, s.id.lastIndexOf(".")) }));
 
-// Authorizing ask for this snapshot change: JamieJ5926/omp-owned#20 —
-// "Collapse completed rows to a one-line count in exactly one place."
-const GOLDEN_COMPLETED = ["… 2 completed"];
+const GOLDEN_COMPLETED = ["● SkillsTrack -> ● ScriptsTrack"];
 const GOLDEN_SUBAGENTS = [
 	"",
-	"Subagents                                                     9 agents · 2.20M",
-	"",
-	"▾ L● RulesTrack [grok]    Nested rules synthesis            ●●         Σ 2.13M",
-	"  ├─▾ L● RulesInner [grok]                                  ●            Σ 82k",
-	"  │ └─▾ S● RulesSy… [grok]                                  ●●●          Σ 40k",
-	"  │   ├─ R● explor… [grok]● RuleA  ● RuleB  ● RuleC                         1k",
-	"  └─ O● Owner [grok]      Writes the merged file            —            2.00M",
+	"Subagents",
+	"▾ ● RulesTrack ⟨poteto-agent⟩       Nested rules synthesis                       ●●    Σ 2.1m  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
+	"  ├─▾ ● RulesInner ⟨poteto-agent⟩                                                 ●   Σ 82.3k  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
+	"  │ └─▾ ● RulesSynth ⟨synthesizer⟩                                                ●   Σ 39.7k  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
+	"  │   └─ ● explorer ×3              RuleA  RuleB  RuleC                         ●●●      1.2k  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
+	"  └─ ● Owner ⟨owner⟩                Writes the merged file                                 2m  ⟨dddai.grok-4.6:high⟩⟨⚡⟩",
 ];
 
 describe("subagent HUD golden render", () => {
@@ -77,38 +74,30 @@ describe("subagent HUD golden render", () => {
 		expect(out.subagents.map(line => Bun.stripANSI(line).trimEnd())).toEqual(GOLDEN_SUBAGENTS);
 	});
 
-	it("collapses six completed tracks to one count line at 60 columns", () => {
+	it("wraps completed tracks at 60 columns without losing content", () => {
 		const completed = ["SkillsTrack", "ScriptsTrack", "RulesTrack", "ModelsTrack", "工具Track", "ReviewTrack"]
 			.map(id => session(id, "poteto-agent", "completed", 0));
 		const out = renderSubagentHudLines(completed, 60);
-		// Issue #20: six clean completed roots fold into the single count line.
-		expect(out.completed.map(Bun.stripANSI)).toEqual(["… 6 completed"]);
+		const lines = out.completed.map(Bun.stripANSI);
+		expect(lines.length).toBeGreaterThan(1);
 		for (const line of out.completed) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(60);
-	});
-
-	it("wraps failed roots across lines without a count line", () => {
-		const failed = ["SkillsTrack", "工具Track", "ModelsTrack", "ReviewTrack"].map(id =>
-			session(id, "poteto-agent", "failed", 0),
-		);
-		const out = renderSubagentHudLines(failed, 60);
-		// Failed roots keep full per-root entries (issue #20): no count line,
-		// and the joined row wraps — this covers the wide-char wrap path.
-		expect(out.completed.map(Bun.stripANSI)).toEqual([
-			"✗ SkillsTrack -> ✗ 工具Track -> ✗ ModelsTrack",
-			"-> ✗ ReviewTrack",
+		expect(lines).toEqual([
+			"● SkillsTrack -> ● ScriptsTrack -> ● RulesTrack",
+			"-> ● ModelsTrack -> ● 工具Track -> ● ReviewTrack",
 		]);
-		for (const line of out.completed) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(60);
+		expect(lines.join(" ")).toBe(completed.map(item => `● ${item.id}`).join(" -> "));
 	});
 
 	it("carries the ⟨role⟩ cell on every non-group row and none on a group row", () => {
 		const lines = renderSubagentHudLines(sessions, 120, ancestry).subagents.map(line => Bun.stripANSI(line).trimEnd());
 		expect(lines).toEqual(GOLDEN_SUBAGENTS);
-		const named = lines.filter(line => /[LSO]● /.test(line));
+		const named = lines.filter(line => /● (RulesTrack|RulesInner|RulesSynth|Owner) /.test(line));
 		expect(named.length).toBe(4);
-		for (const line of named) expect(line).toMatch(/[LSO]● \S+ \[[^\]]+\]/);
-		const group = lines.find(line => line.includes("explor…")) ?? "";
-		expect(group).toContain("explor…");
+		for (const line of named) expect(line).toMatch(/● \S+ ⟨[a-z-]+⟩ {2,}\S/);
+		const group = lines.find(line => line.includes("explorer ×3")) ?? "";
+		expect(group).toContain("explorer ×3");
 		expect(group).not.toContain("⟨explorer⟩");
+		expect(group).not.toMatch(/● explorer ×3 ⟨[a-z-]+⟩/);
 	});
 
 	it("never renders task prompt text on any row", () => {

@@ -878,31 +878,18 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		const lines: string[] = [];
 		const hitRows: Array<number | undefined> = [];
 		const rendered = new Map<number, string[]>();
-		const groupIndexes = new Map<string, number[]>();
-		const groupAt = new Map<number, string>();
-		for (let index = 0; index < this.#rows.length; index++) {
-			const ref = this.#rows[index];
-			if (ref.kind !== "sub" || !ref.parentId || this.#childrenByParent.has(ref.id)) continue;
-			const seat = this.#observableFor(ref.id)?.progress?.agent ?? ref.history?.agent;
-			if (!seat) continue;
-			const key = `${ref.parentId}\u0000${seat}`;
-			const members = groupIndexes.get(key);
-			if (members) members.push(index);
-			else groupIndexes.set(key, [index]);
-			groupAt.set(index, key);
-		}
 		const entryAt = (index: number): string[] => {
 			const cached = rendered.get(index);
 			if (cached) return cached;
-			const ref = this.#rows[index];
-			const entry = this.#renderEntry(ref, index === this.#selectedRow, width, this.#observableFor(ref.id), index === this.#hoveredRow);
+			const entry = this.#renderEntry(
+				this.#rows[index],
+				index === this.#selectedRow,
+				width,
+				this.#observableFor(this.#rows[index].id),
+				index === this.#hoveredRow,
+			);
 			rendered.set(index, entry);
 			return entry;
-		};
-		const visibleLength = (index: number): number => {
-			const key = groupAt.get(index);
-			const members = key ? groupIndexes.get(key) : undefined;
-			return members && members.length > 1 ? Number(members[0] === index) : entryAt(index).length;
 		};
 		const appendEntry = (index: number, entry = entryAt(index)): void => {
 			for (const line of entry) {
@@ -910,63 +897,52 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				hitRows.push(index);
 			}
 		};
-		const appendGroupedEntry = (index: number): void => {
-			const key = groupAt.get(index);
-			const members = key ? groupIndexes.get(key) : undefined;
-			if (!key || !members || members.length < 2 || members[0] !== index) {
-				appendEntry(index);
-				return;
-			}
-			const seat = key.slice(key.indexOf("\u0000") + 1);
-			const representative = this.#rows[index];
-			const cursor = members.includes(this.#selectedRow) ? theme.fg("accent", theme.nav.cursor) : " ";
-			const ids = members.map(member => sanitizeDisplayText(this.#rows[member].id)).join(", ");
-			lines.push(truncateToWidth(`${cursor} ${statusGlyph(representative.status)} ${theme.bold(sanitizeDisplayText(representative.id))} ${members.length} ${sanitizeDisplayText(seat)} · ${ids}`, Math.max(1, width)));
-			hitRows.push(index);
-		};
-		const selectedGroup = groupAt.get(this.#selectedRow);
-		const selectedMembers = selectedGroup ? groupIndexes.get(selectedGroup) : undefined;
-		const selectedAnchor = selectedMembers && selectedMembers.length > 1 ? selectedMembers[0]! : this.#selectedRow;
-		let start = selectedAnchor;
-		let end = selectedAnchor + 1;
-		let used = selectedMembers && selectedMembers.length > 1 ? 1 : entryAt(this.#selectedRow).length;
+
+		let start = this.#selectedRow;
+		let end = this.#selectedRow + 1;
+		let used = entryAt(this.#selectedRow).length;
 		if (used > budget) {
 			appendEntry(this.#selectedRow, entryAt(this.#selectedRow).slice(0, budget));
 			return { lines, hitRows };
 		}
-		// Grow around selection using only rows with visible height. Grouped members
-		// retain agent indices for navigation but cannot inflate paint or observation.
+
+		// Grow a window around the selection. Only visible entries are rendered,
+		// so the 5,000-agent Hub retains bounded paint cost.
 		for (let grew = true; grew;) {
 			grew = false;
 			if (end < this.#rows.length) {
-				const nextLength = visibleLength(end);
-				if (used + nextLength <= budget) {
-					used += nextLength;
+				const next = entryAt(end);
+				if (used + next.length <= budget) {
+					used += next.length;
 					end++;
 					grew = true;
 				}
 			}
 			if (start > 0) {
-				const previousLength = visibleLength(start - 1);
-				if (used + previousLength <= budget) {
+				const previous = entryAt(start - 1);
+				if (used + previous.length <= budget) {
 					start--;
-					used += previousLength;
+					used += previous.length;
 					grew = true;
 				}
 			}
 		}
+		// Overflow labels consume real rows. Trim the farthest visible neighbors
+		// before painting them so the selected entry and both labels fit.
 		for (
 			let markerRows = Number(start > 0) + Number(end < this.#rows.length);
 			used + markerRows > budget && start < end;
 			markerRows = Number(start > 0) + Number(end < this.#rows.length)
 		) {
 			if (end - 1 > this.#selectedRow) {
-				used -= visibleLength(end - 1);
 				end--;
+				used -= entryAt(end).length;
 			} else if (start < this.#selectedRow) {
-				used -= visibleLength(start);
+				used -= entryAt(start).length;
 				start++;
-			} else break;
+			} else {
+				break;
+			}
 		}
 		const showTopOverflow = start > 0 && used < budget;
 		const showBottomOverflow = end < this.#rows.length && used + Number(showTopOverflow) < budget;
@@ -974,13 +950,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			lines.push(theme.fg("dim", `… ${start} more`));
 			hitRows.push(undefined);
 		}
-		for (let i = start; i < end; i++) {
-			const key = groupAt.get(i);
-			const members = key ? groupIndexes.get(key) : undefined;
-			if (members && members.length > 1) {
-				if (members[0] === i) appendGroupedEntry(i);
-			} else appendEntry(i);
-		}
+		for (let i = start; i < end; i++) appendEntry(i);
 		if (showBottomOverflow) {
 			lines.push(theme.fg("dim", `… ${this.#rows.length - end} more`));
 			hitRows.push(undefined);
