@@ -314,7 +314,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				if (!params.ids?.length) {
 					return hubErrorResult('`ids` is required for op="cancel".', { op: "cancel", jobs: [] });
 				}
-				return await executeCancel(this.session, manager, this.#ownerId(), params.ids);
+				return await executeCancel(this.session, manager, this.#ownerId(), params.ids, signal);
 			}
 			case "jobs": {
 				const manager = this.session.asyncJobManager;
