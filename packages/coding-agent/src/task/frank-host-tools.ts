@@ -214,6 +214,13 @@ function parseRefreshKeyRequest(args: unknown): { model: string; stale_key_sha25
 		return undefined;
 	return { model: args.model, stale_key_sha256: args.stale_key_sha256 };
 }
+/**
+ * Host tools a Frank lane may call whenever the host session registered them.
+ * The session's own instance serves the call, so its settings and credentials
+ * apply and a host without the tool refuses it.
+ */
+const HOST_SESSION_TOOLS: readonly string[] = ["web_search", "github"];
+
 export function createFrankHostToolService(options: {
 	session: ToolSession;
 	agentId: string;
@@ -262,7 +269,10 @@ export function createFrankHostToolService(options: {
 	/** Child ids this bridge dispatched, so an `inbox` drain cannot read a sibling's child. */
 	const dispatched = new Set<string>();
 	const enabled: Record<string, true> = Object.fromEntries(
-		(options.names ?? ["task", "hub"]).map(name => [name, true]),
+		[
+			...(options.names ?? ["task", "hub"]),
+			...HOST_SESSION_TOOLS.filter(name => options.session.toolRegistry?.get(name) !== undefined),
+		].map(name => [name, true]),
 	);
 	let closed = false;
 	const coordinator = options.workerLane !== undefined && COORDINATOR_SEATS[options.workerLane.agent] === true;
@@ -488,7 +498,12 @@ export function createFrankHostToolService(options: {
 					ok: false,
 					error: hostMail ? `${hostMail}${`unknown host tool: ${name}`}` : `unknown host tool: ${name}`,
 				};
-			const requireRegistry = name === "write" || name === "edit" || name === "bash" || name === "run";
+			const requireRegistry =
+				name === "write" ||
+				name === "edit" ||
+				name === "bash" ||
+				name === "run" ||
+				HOST_SESSION_TOOLS.includes(name);
 			const registeredTool = options.session.toolRegistry?.get(name);
 			if (requireRegistry && !registeredTool) {
 				return {
