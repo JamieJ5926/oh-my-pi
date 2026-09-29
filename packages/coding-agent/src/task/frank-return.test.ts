@@ -342,6 +342,35 @@ describe("Frank task return integration", () => {
 		}
 	});
 
+	test("the lane's Frank process exits within 5s of its final answer", async () => {
+		const id = "FrankReturnExitsAfterAnswer";
+		const artifactsDir = await mkdtemp(path.join(os.tmpdir(), "frank-return-exit-"));
+		artifactDirs.push(artifactsDir);
+		const stub = await makeWorkerStub(
+			`printf '%s\\n' "$$" >> "$FRANK_PID_FILE"; while IFS= read -r input; do case "$input" in *shutdown*) exit 0;; *submit*) ${workerEvents("only answer", 1, 1)};; esac; done`,
+		);
+		const pidFile = path.join(stub.cwd, "pids");
+		process.env.FRANK_PID_FILE = pidFile;
+		try {
+			const result = await runFrankSubagent({ ...workerOptions(id, stub.exe, stub.cwd, artifactsDir), keepAlive: undefined });
+			expect(result.output).toBe("only answer");
+			const pid = Number((await readFile(pidFile, "utf8")).trim());
+			const deadline = Date.now() + 5_000;
+			let alive = true;
+			while (alive && Date.now() < deadline) {
+				try {
+					process.kill(pid, 0);
+					await Bun.sleep(50);
+				} catch {
+					alive = false;
+				}
+			}
+			expect(alive).toBe(false);
+		} finally {
+			delete process.env.FRANK_PID_FILE;
+		}
+	});
+
 	test("spawns a fresh process after an aborted retained follow-up", async () => {
 		AgentRegistry.resetGlobalForTests();
 		const id = "FrankReturnAbortFresh";
