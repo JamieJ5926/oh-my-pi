@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { IrcBus } from "../irc/bus";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
+import { daemonLaneHandle, exportDaemonLaneSession } from "./frank-daemon-worker";
 import { runFrankSubagent, saveRunningFrankLanes } from "./executor";
 
 const dirs: string[] = [];
@@ -91,4 +92,26 @@ done
 		delete process.env.FRANK_INPUTS;
 		delete process.env.FRANK_SAVE_PATH;
 	}
+});
+
+test("dispose with a daemon-transport lane exports its transcript mirror instead of stopping the daemon", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "frank-lane-exit-daemon-"));
+	dirs.push(root);
+	const sessionArtifacts = path.join(root, "session");
+	await Bun.write(path.join(sessionArtifacts, ".keep"), "");
+	const id = "UStoreSweep";
+	const mirror = path.join(sessionArtifacts, `${id}.frank.jsonl`);
+	const lines = [
+		JSON.stringify({ seq: 1, kind: { AssistantDelta: "daemon answer" } }),
+		JSON.stringify({ seq: 2, kind: { TerminalDone: { seq: 2, outcome: "Cancelled" } } }),
+		JSON.stringify({ details: "daemon answer" }),
+	].join("\n");
+	await Bun.write(mirror, `${lines}\n`);
+	const handle = daemonLaneHandle({ text: "sweep the store", artifactsDir: sessionArtifacts, id });
+
+	const savePath = await exportDaemonLaneSession(handle);
+
+	expect(savePath).toBe(path.join(sessionArtifacts, `${id}.frank-session.jsonl`));
+	expect(await readFile(savePath, "utf8")).toBe(`${lines}\n`);
+	expect(await Bun.file(mirror).exists()).toBe(true);
 });

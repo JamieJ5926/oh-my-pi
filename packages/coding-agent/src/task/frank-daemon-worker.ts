@@ -194,6 +194,33 @@ async function admitRun(options: DaemonOptions, env: NodeJS.ProcessEnv, stateDir
 	if (retry !== 0) throw new Error(`Frank daemon start failed with exit code ${retry}; see ${logPath}`);
 }
 
+export type DaemonWorkerAdmitOptions = Pick<DaemonOptions, "text" | "artifactsDir" | "id">;
+
+export interface DaemonLaneHandle {
+	artifactsDir: string;
+	id: string;
+}
+
+/** Snapshot a daemon lane's routing so dispose can export it after the run settles. */
+export function daemonLaneHandle(options: DaemonWorkerAdmitOptions): DaemonLaneHandle {
+	return { artifactsDir: options.artifactsDir, id: options.id };
+}
+
+/**
+ * Omp is exiting with a daemon lane still mid-turn: export the live
+ * transcript mirror (`<id>.frank.jsonl`, already complete through
+ * TerminalDone) to `<id>.frank-session.jsonl`. The shared daemon is never
+ * stopped — sibling lanes keep running — so this is a file copy, not a
+ * session teardown.
+ */
+export async function exportDaemonLaneSession(handle: DaemonLaneHandle): Promise<string> {
+	const eventsPath = path.join(handle.artifactsDir, `${handle.id}.frank.jsonl`);
+	const savePath = path.join(handle.artifactsDir, `${handle.id}.frank-session.jsonl`);
+	const contents = await readFile(eventsPath, "utf8");
+	await writeFile(savePath, contents.endsWith("\n") ? contents : `${contents}\n`);
+	return savePath;
+}
+
 export async function spawnFrankDaemonWorker(options: DaemonOptions): Promise<FrankWorkerResult> {
 	if (options.signal?.aborted) throw options.signal.reason ?? new Error("Frank worker aborted");
 	const bin = options.frankBin ?? process.env.FRANK_BIN?.trim() ?? "frank";

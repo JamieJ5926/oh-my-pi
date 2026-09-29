@@ -100,6 +100,8 @@ import type {
 import { spawnFrankWorker, startFrankWorker } from "./frank-worker";
 import { FrankWorkerExitError, extractFrankYieldItems } from "./frank-worker-fold";
 import type { FrankHostToolService } from "./frank-host-tools";
+import type { DaemonLaneHandle } from "./frank-daemon-worker";
+import { daemonLaneHandle, exportDaemonLaneSession } from "./frank-daemon-worker";
 
 export interface FrankExecutorOptions extends Pick<
 	ExecutorOptions,
@@ -150,6 +152,8 @@ interface RetainedFrankWorker {
 	inFlight: number;
 	idleTimer?: NodeJS.Timeout;
 	lane: { agent: string; cwd: string; task: string; artifactsDir?: string };
+	/** Daemon-transport lanes share one host daemon, so dispose exports the mirror instead of `save`. */
+	daemon?: DaemonLaneHandle;
 }
 
 const retainedFrankWorkers = new Map<string, RetainedFrankWorker>();
@@ -223,6 +227,17 @@ export async function saveRunningFrankLanes(sessionArtifactsDir: string | null |
 			const dir = worker.lane.artifactsDir ?? sessionArtifactsDir;
 			const lane = { id, agent: worker.lane.agent, cwd: worker.lane.cwd, task: worker.lane.task };
 			if (!dir) return { ...lane, savedSessionPath: null, saveError: "no artifacts dir" };
+			// Daemon-transport lanes share one host daemon: no per-lane
+			// process exists to `save`, and no `frank cancel` subcommand
+			// exists either. Export the live transcript mirror the daemon
+			// kept writing to <id>.frank.jsonl; never stop the daemon.
+			if (worker.daemon) {
+				try {
+					return { ...lane, savedSessionPath: await exportDaemonLaneSession(worker.daemon) };
+				} catch (error) {
+					return { ...lane, savedSessionPath: null, saveError: error instanceof Error ? error.message : String(error) };
+				}
+			}
 			const savePath = path.join(dir, `${id}.frank-session.jsonl`);
 			try {
 				return { ...lane, savedSessionPath: await worker.handle.save(savePath) };
@@ -3256,8 +3271,39 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				: options.text;
 			let result: FrankWorkerResult;
 			const keepAlive = options.keepAlive !== false;
-			if (options.transport === "daemon" && !(options.keepAlive === true && !options.runWorker)) {
+			const daemonLane = options.transport === "daemon" && options.keepAlive === true && !options.runWorker;
+			if (options.transport === "daemon" && !daemonLane) {
 				result = await spawnFrankWorker({ ...workerOptions, text: firstPrompt });
+			} else if (daemonLane) {
+				// keepAlive daemon lanes retain a process worker for steer and
+				// follow-up turns; dispose exports the daemon's transcript
+				// mirror for the save path, so snapshot the routing now.
+				const handle = await startFrankWorker(workerOptions);
+				const removeDelivery = AgentRegistry.global().registerRetainedDelivery(id, async (message: IrcMessage) => {
+					const worker = retainedWorker;
+					if (worker) holdRetainedFrankWorker(worker);
+					try {
+						const outcome = await handle.steer(formatIncoming(message));
+						return outcome === "delivered" ? { kind: "delivered" } : outcome === "timeout" ? { kind: "failed", error: "Frank steer acknowledgement timed out; delivery status is unknown" } : { kind: "unsupported" };
+					} catch (error) {
+						return { kind: "failed", error: error instanceof Error ? error.message : String(error) };
+					} finally {
+						if (worker) releaseRetainedFrankWorker(id, worker);
+					}
+				});
+				retainedWorker = {
+					handle,
+					spawnOptions: workerOptions,
+					hostToolService,
+					closed: false,
+					setOnEvent: callback => { forwardEvent = callback; },
+					removeDelivery,
+					inFlight: 1,
+					lane: { agent: agent.name, cwd: options.cwd, task: options.text, artifactsDir: options.artifactsDir },
+					daemon: options.artifactsDir ? daemonLaneHandle({ text: firstPrompt, artifactsDir: options.artifactsDir, id }) : undefined,
+				};
+				retainedFrankWorkers.set(id, retainedWorker);
+				result = await handle.runTurn(firstPrompt);
 			} else if (keepAlive && !options.runWorker) {
 				const handle = await startFrankWorker(workerOptions);
 				const removeDelivery = AgentRegistry.global().registerRetainedDelivery(id, async (message: IrcMessage) => {
