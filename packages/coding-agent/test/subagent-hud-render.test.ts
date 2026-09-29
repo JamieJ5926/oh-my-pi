@@ -399,6 +399,22 @@ describe("subagent HUD lines", () => {
 		for (let index = 1; index < 6; index++) expect(Bun.stripANSI(narrow.join("\n"))).not.toContain(`Child${index}`);
 		expect(Bun.stripANSI(narrow.join("\n"))).toContain("DeepWork");
 	});
+	it("keeps failed markers scoped to active collapsed-group members", () => {
+		const parent = makeSession({ id: "Lead" });
+		const members = [
+			makeSession({ id: "Lead.Live", agent: "explorer", status: "active" }),
+			makeSession({ id: "Lead.Broken", agent: "explorer", status: "failed" }),
+		];
+		const ancestry = members.map(member => ({ id: member.id, parentId: parent.id }));
+		const line = Bun.stripANSI(
+			renderSubagentHudLines([parent, ...members], 160, ancestry).subagents.join("\n"),
+		).split("\n").find(row => row.includes("explorer ×"));
+
+		expect(line).toBe(
+			"  └─ ● explorer ×1   Live  Broken                                                                                                              ●         0  · ?",
+		);
+	});
+
 	it("keeps a failed lane with a red ✗ and hides finished and cancelled lanes", () => {
 		const parent = makeSession({ id: "Lead", description: "parent" });
 		const children = [
