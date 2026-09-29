@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Provider } from "@oh-my-pi/pi-ai";
-import { executeCancel } from "../tools/hub/jobs";
+import { cancelDescendants, executeCancel } from "../tools/hub/jobs";
 import { IrcBus, type IrcMessage } from "../irc/bus";
 import { BUILTIN_TOOLS } from "../tools";
 import type { ToolSession } from "../tools";
@@ -81,6 +81,8 @@ export interface FrankHostToolResult {
 export interface FrankHostToolService {
 	handle(name: string, args: unknown, toolCallId?: string): Promise<FrankHostToolResult>;
 	toolNames(): string[];
+	/** Cancel every job and agent this lane spawned through the bridge, recursively. */
+	cancelChildren(): Promise<void>;
 	close(): void;
 	closed: boolean;
 }
@@ -388,6 +390,9 @@ export function createFrankHostToolService(options: {
 
 	return {
 		toolNames: () => Object.keys(enabled),
+		async cancelChildren() {
+			if (manager) await cancelDescendants(bridgedSession, manager, options.agentId, options.agentId);
+		},
 		close() {
 			if (closed) return;
 			onAbort();

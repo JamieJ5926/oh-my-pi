@@ -429,6 +429,7 @@ describe("Frank task return integration", () => {
 				hostToolService: {
 					handle: async () => ({ ok: true }),
 					toolNames: () => [],
+					cancelChildren: async () => {},
 					close: () => {
 						serviceClosed = true;
 					},

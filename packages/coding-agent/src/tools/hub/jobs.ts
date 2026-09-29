@@ -345,11 +345,7 @@ export async function executeCancel(
 			// row with its abortController un-aborted. Cross-agent kills stay
 			// impossible: a broken or unregistered link denies.
 			if (existing?.status === "running" && ownerId && existing.ownerId !== ownerId) {
-				const registry = session.agentRegistry;
-				const ref =
-					registry?.get(id) ??
-					(existing.agentId && existing.agentId !== id ? registry?.get(existing.agentId) : undefined);
-				if (ref && isCancelAuthorized(registry, ref.parentId, ownerId)) {
+				if (isCancelAuthorized(session, manager, id, ownerId)) {
 					await cancelJobTree(session, manager, id, ownerId);
 					cancelOutcomes.push({
 						id,
@@ -362,7 +358,12 @@ export async function executeCancel(
 			// No job by this id (or it belongs to another agent): a budget-aborted
 			// keep-alive subagent lives on as a jobless registration long after its
 			// job row is reaped, so let cancel reach the agent registration too.
-			cancelOutcomes.push(await cancelAgentRegistration(session, ownerId, id));
+			// Its descendants go first: once the registration drops, the parent
+			// link that authorizes them is gone.
+			if (session.agentRegistry?.get(id)?.kind === "sub" && isCancelAuthorized(session, manager, id, ownerId)) {
+				await cancelDescendants(session, manager, id, ownerId);
+			}
+			cancelOutcomes.push(await cancelAgentRegistration(session, ownerId, id, manager));
 			continue;
 		}
 		if (existing.status !== "running") {
@@ -370,7 +371,7 @@ export async function executeCancel(
 			// The agent registration behind it (job id == agent id for task
 			// spawns) can outlive the row as an idle/parked zombie — try the
 			// registration kill before reporting the row as already done.
-			const regOutcome = await cancelAgentRegistration(session, ownerId, id);
+			const regOutcome = await cancelAgentRegistration(session, ownerId, id, manager);
 			cancelOutcomes.push(
 				regOutcome.status === "cancelled"
 					? regOutcome
@@ -389,23 +390,34 @@ export async function executeCancel(
 }
 
 /**
- * Ancestor cancel authority: the caller may cancel a registration whose
- * parentId chain reaches the caller, not only a direct child. Intermediate
- * parents need not be running (a parked midpoint still confers grandparent
- * authority), but every link must resolve: an unregistered midpoint breaks
- * the chain and denies. Bounded walk guards against a corrupt parentId cycle.
+ * Ancestor cancel authority: the caller may cancel an agent whose parent chain
+ * reaches the caller, not only a direct child. A link is the registration's
+ * parentId, or the owner of the agent's job row when the registration is gone
+ * (a Frank pot's registration can drop while its children run). Intermediate
+ * parents need not be running, but every link must resolve through one of the
+ * two: a link neither knows denies. Bounded walk guards against a cycle.
  */
 function isCancelAuthorized(
-	registry: ToolSession["agentRegistry"],
-	parentId: string | undefined,
-	ownerId: string,
+	session: ToolSession,
+	manager: AsyncJobManager | undefined,
+	id: string,
+	ownerId: string | undefined,
 ): boolean {
-	let current = parentId;
+	if (!ownerId) return true;
+	let current = parentOf(session, manager, id);
 	for (let hops = 0; hops < 64 && current; hops += 1) {
 		if (current === ownerId) return true;
-		current = registry?.get(current)?.parentId;
+		current = parentOf(session, manager, current);
 	}
 	return false;
+}
+
+function jobFor(manager: AsyncJobManager | undefined, id: string) {
+	return manager?.getJob(id) ?? manager?.getAllJobs().find(job => job.agentId === id);
+}
+
+function parentOf(session: ToolSession, manager: AsyncJobManager | undefined, id: string): string | undefined {
+	return session.agentRegistry?.get(id)?.parentId ?? jobFor(manager, id)?.ownerId;
 }
 /**
  * Agent ids under `root`, including `root` when it is registered.
@@ -440,16 +452,43 @@ async function cancelJobTree(
 	id: string,
 	ownerId: string | undefined,
 ): Promise<void> {
-	const targets = descendantAgentIds(session.agentRegistry, id);
-	for (const target of targets) {
-		if (target === id || target === ownerId) continue;
-		const job = manager.getJob(target) ?? manager.getAllJobs().find(candidate => candidate.agentId === target);
-		if (job?.status === "running") manager.cancel(job.id);
-		await cancelAgentRegistration(session, ownerId, target);
-	}
-	if (id !== ownerId) await cancelAgentRegistration(session, ownerId, id);
+	await cancelDescendants(session, manager, id, ownerId);
+	if (id !== ownerId) await cancelAgentRegistration(session, ownerId, id, manager);
 	const named = manager.getJob(id);
 	if (named?.status === "running") manager.cancel(id);
+}
+
+/**
+ * Cancel every agent and job below `id`: registered descendants by parentId,
+ * plus running jobs whose owner is `id` or one of those descendants, so a
+ * child whose registration already dropped still takes its jobs down.
+ */
+export async function cancelDescendants(
+	session: ToolSession,
+	manager: AsyncJobManager,
+	id: string,
+	ownerId: string | undefined,
+): Promise<void> {
+	const tree = new Set(descendantAgentIds(session.agentRegistry, id));
+	tree.add(id);
+	for (let grew = true; grew && tree.size < 256; ) {
+		grew = false;
+		for (const job of manager.getRunningJobs()) {
+			if (!job.ownerId || !tree.has(job.ownerId)) continue;
+			for (const member of [job.id, job.agentId]) {
+				if (member && member !== ownerId && !tree.has(member)) {
+					tree.add(member);
+					grew = true;
+				}
+			}
+		}
+	}
+	for (const target of tree) {
+		if (target === id || target === ownerId) continue;
+		const job = jobFor(manager, target);
+		if (job?.status === "running") manager.cancel(job.id);
+		await cancelAgentRegistration(session, ownerId, target, manager);
+	}
 }
 
 
@@ -466,6 +505,7 @@ async function cancelAgentRegistration(
 	session: ToolSession,
 	ownerId: string | undefined,
 	id: string,
+	manager?: AsyncJobManager,
 ): Promise<CancelOutcome> {
 	const registry = session.agentRegistry;
 	const ref = registry?.get(id);
@@ -475,7 +515,7 @@ async function cancelAgentRegistration(
 	if (id === ownerId) {
 		return { id, status: "not_found", message: `Cannot cancel yourself (${id}).` };
 	}
-	if (ownerId && !isCancelAuthorized(registry, ref.parentId, ownerId)) {
+	if (!isCancelAuthorized(session, manager, id, ownerId)) {
 		return { id, status: "not_found", message: `Agent ${id} was not spawned by you and cannot be cancelled.` };
 	}
 	const lifecycle = session.agentLifecycle?.();

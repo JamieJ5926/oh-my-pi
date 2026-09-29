@@ -174,6 +174,19 @@ function releaseRetainedFrankWorker(id: string, worker: RetainedFrankWorker): vo
 	worker.idleTimer.unref?.();
 }
 
+/**
+ * A Frank lane's turn has ended, whatever its terminal: nothing it spawned
+ * through the bridge may outlive it (CancelWhy4, children running > 1 h after
+ * their pot ended on Answer or a 401 Error).
+ */
+async function cancelFrankChildren(id: string, service: FrankHostToolService | undefined): Promise<void> {
+	try {
+		await service?.cancelChildren();
+	} catch (error) {
+		logger.warn("Frank lane child cascade failed", { id, error: String(error) });
+	}
+}
+
 async function closeRetainedFrankWorker(id: string, worker: RetainedFrankWorker): Promise<void> {
 	if (retainedFrankWorkers.get(id) === worker) retainedFrankWorkers.delete(id);
 	if (worker.closed) {
@@ -2934,6 +2947,7 @@ async function runRetainedFrankFollowUpTurn(
 		else await closeRetainedFrankWorker(id, worker);
 	} finally {
 		if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+		await cancelFrankChildren(id, worker.hostToolService);
 		monitor.finish();
 		releaseRetainedFrankWorker(id, worker);
 	}
@@ -3267,6 +3281,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			abortReason = signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? "Cancelled");
 		}
 	}
+	await cancelFrankChildren(id, hostToolService);
 	if (retainedWorker) {
 		if (options.keepAlive !== false && exitCode === 0 && !aborted) {
 			retainedFrankWorkers.set(id, retainedWorker);
