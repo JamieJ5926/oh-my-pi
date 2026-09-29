@@ -95,6 +95,8 @@ export type StartFrankWorkerOptions = Omit<SpawnFrankWorkerOptions, "text">;
 export interface FrankWorkerHandle {
 	steer(message: string): Promise<"delivered" | "unsupported" | "timeout">;
 	runTurn(text: string): Promise<FrankWorkerResult>;
+	/** Cancel any in-flight turn, then persist the Frank session to `path` (agent-mode `save` op). */
+	save(path: string, timeoutMs?: number): Promise<string>;
 	close(): Promise<void>;
 }
 
@@ -245,6 +247,8 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
  	let shuttingDown = false;
 	const pendingSteers: { promise: Promise<"delivered" | "unsupported" | "timeout">; resolve: (result: "delivered" | "unsupported" | "timeout") => void; reject: (error: Error) => void; timeout?: NodeJS.Timeout; timedOut?: boolean }[] = [];
 	const steerTimeoutMs = options.steerTimeoutMs ?? 10_000;
+	let pendingSave: { resolve: (path: string) => void; reject: (error: Error) => void } | undefined;
+	let saving: Promise<unknown> | undefined;
 	const closeTimeoutMs = 500;
 	const failTurn = (error: Error) => {
 		if (failure) return;
@@ -269,6 +273,7 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 	const closeWorker = async () => {
 		if (closePromise) return closePromise;
 		closePromise = (async () => {
+			await saving?.catch(() => {});
  			shuttingDown = true;
 			clearTimeout(timer);
  			if (child.exitCode !== null || child.signalCode !== null) options.signal?.removeEventListener("abort", abort);
@@ -359,8 +364,11 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 					completeTurn();
 					return;
 				}
-				case "heartbeat":
 				case "saved":
+					pendingSave?.resolve(control.path);
+					pendingSave = undefined;
+					return;
+				case "heartbeat":
 				case "cancelled":
 					return;
 				case "terminal": {
@@ -373,6 +381,11 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 				case "error": {
 					if (control.turn_id !== undefined) {
 						failTurn(new FrankProtocolError(control.message));
+						return;
+					}
+					if (pendingSave && /^save: /.test(control.message)) {
+						pendingSave.reject(new Error(control.message));
+						pendingSave = undefined;
 						return;
 					}
 					const pending = pendingSteers[0];
@@ -481,6 +494,38 @@ export async function startFrankWorker(options: StartFrankWorkerOptions): Promis
 				activeTurn = undefined;
 				throw reason;
 			}
+		},
+		save: (savePath, timeoutMs = 10_000) => {
+			const run = (async () => {
+				if (closePromise || workerExited) throw new Error("Frank worker is closed");
+				const deadline = Date.now() + timeoutMs;
+				const bounded = <T>(promise: Promise<T>, what: string) =>
+					Promise.race([
+						promise,
+						new Promise<never>((_, reject) =>
+							setTimeout(() => reject(new Error(`Frank ${what} timed out`)), Math.max(0, deadline - Date.now())).unref(),
+						),
+					]);
+				const turn = activeTurn;
+				if (turn && !turn.completed) {
+					await writeLine(child.stdin, { op: "cancel", turn_id: turn.id });
+					await bounded(turn.promise.catch(() => {}), "cancel before save");
+				}
+				for (;;) {
+					const saved = new Promise<string>((resolve, reject) => {
+						pendingSave = { resolve, reject };
+					});
+					await writeLine(child.stdin, { op: "save", path: savePath });
+					try {
+						return await bounded(saved, "save");
+					} catch (error) {
+						if (!(error instanceof Error && error.message === "save: Busy") || Date.now() >= deadline) throw error;
+						await Bun.sleep(50);
+					}
+				}
+			})();
+			saving = run;
+			return run;
 		},
 		close: closeWorker,
 	};

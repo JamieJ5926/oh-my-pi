@@ -149,6 +149,7 @@ interface RetainedFrankWorker {
 	removeDelivery: () => void;
 	inFlight: number;
 	idleTimer?: NodeJS.Timeout;
+	lane: { agent: string; cwd: string; task: string; artifactsDir?: string };
 }
 
 const retainedFrankWorkers = new Map<string, RetainedFrankWorker>();
@@ -186,6 +187,53 @@ async function closeRetainedFrankWorker(id: string, worker: RetainedFrankWorker)
 	worker.removeDelivery();
 	await worker.handle.close();
 	AgentRegistry.global().setStatus(id, "parked");
+}
+
+export interface FrankLaneAtExit {
+	id: string;
+	agent: string;
+	cwd: string;
+	savedSessionPath: string | null;
+	task: string;
+	saveError?: string;
+}
+
+/**
+ * Omp is exiting: persist every Frank lane still mid-turn (agent-mode `save`
+ * after cancelling the turn) and record it in `<artifactsDir>/frank-lanes-at-exit.json`
+ * so the lane can be resumed later with `frank_accept agent --load`.
+ */
+export async function saveRunningFrankLanes(sessionArtifactsDir: string | null | undefined): Promise<FrankLaneAtExit[]> {
+	const running = [...retainedFrankWorkers].filter(([, worker]) => !worker.closed && worker.inFlight > 0);
+	const lanes = await Promise.all(
+		running.map(async ([id, worker]): Promise<FrankLaneAtExit> => {
+			const dir = worker.lane.artifactsDir ?? sessionArtifactsDir;
+			const lane = { id, agent: worker.lane.agent, cwd: worker.lane.cwd, task: worker.lane.task };
+			if (!dir) return { ...lane, savedSessionPath: null, saveError: "no artifacts dir" };
+			const savePath = path.join(dir, `${id}.frank-session.jsonl`);
+			try {
+				return { ...lane, savedSessionPath: await worker.handle.save(savePath) };
+			} catch (error) {
+				return { ...lane, savedSessionPath: null, saveError: error instanceof Error ? error.message : String(error) };
+			}
+		}),
+	);
+	if (lanes.length > 0 && sessionArtifactsDir) {
+		await Bun.write(path.join(sessionArtifactsDir, "frank-lanes-at-exit.json"), `${JSON.stringify(lanes, null, 2)}\n`);
+	}
+	interruptedFrankLanes.push(...lanes);
+	return lanes;
+}
+
+const interruptedFrankLanes: FrankLaneAtExit[] = [];
+
+/** One line per Frank lane interrupted by this process's exit, for the exit banner. */
+export function interruptedFrankLaneLines(): string[] {
+	return interruptedFrankLanes.map(
+		lane =>
+			`Frank lane ${lane.id} (${lane.agent}) interrupted in ${lane.cwd}; ` +
+			(lane.savedSessionPath ? `session saved to ${lane.savedSessionPath}` : `save failed: ${lane.saveError}`),
+	);
 }
 
 function createFrankEventForwarder(
@@ -3218,6 +3266,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 					setOnEvent: callback => { forwardEvent = callback; },
 					removeDelivery,
 					inFlight: 1,
+					lane: { agent: agent.name, cwd: options.cwd, task: options.text, artifactsDir: options.artifactsDir },
 				};
 				retainedFrankWorkers.set(id, retainedWorker);
 				result = await handle.runTurn(firstPrompt);

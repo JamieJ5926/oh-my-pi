@@ -3993,6 +3993,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						unregisterPublicationPostmortem?.();
 					}
 					if (agentKind === "main") {
+						try {
+							const { saveRunningFrankLanes } = await import("./task/executor");
+							await saveRunningFrankLanes(sessionManager.getArtifactsDir());
+						} catch (error) {
+							logger.warn("Saving running Frank lanes at exit failed", { error: String(error) });
+						}
 						// Top-level teardown owns the global agent lifecycle: park timers,
 						// adopted subagent sessions, revivers. Tear it down while shared
 						// resources (kernels, MCP, LSP) are still live. Subagent disposal
