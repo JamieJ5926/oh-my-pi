@@ -147,9 +147,32 @@ interface RetainedFrankWorker {
 	closed: boolean;
 	setOnEvent: (onEvent: (event: FrankEvent) => void | Promise<void>) => void;
 	removeDelivery: () => void;
+	inFlight: number;
+	idleTimer?: NodeJS.Timeout;
 }
 
 const retainedFrankWorkers = new Map<string, RetainedFrankWorker>();
+
+/** An answered lane's frank_accept exits after this idle grace; a steer or follow-up turn in flight holds it open. */
+const FRANK_IDLE_EXIT_MS = 1_000;
+
+function holdRetainedFrankWorker(worker: RetainedFrankWorker): void {
+	clearTimeout(worker.idleTimer);
+	worker.inFlight++;
+}
+
+function releaseRetainedFrankWorker(id: string, worker: RetainedFrankWorker): void {
+	worker.inFlight = Math.max(0, worker.inFlight - 1);
+	if (worker.closed || worker.inFlight > 0) return;
+	clearTimeout(worker.idleTimer);
+	worker.idleTimer = setTimeout(() => {
+		if (worker.closed || worker.inFlight > 0) return;
+		closeRetainedFrankWorker(id, worker).catch(error =>
+			logger.warn("Frank idle worker close failed", { id, error: String(error) }),
+		);
+	}, FRANK_IDLE_EXIT_MS);
+	worker.idleTimer.unref?.();
+}
 
 async function closeRetainedFrankWorker(id: string, worker: RetainedFrankWorker): Promise<void> {
 	if (retainedFrankWorkers.get(id) === worker) retainedFrankWorkers.delete(id);
@@ -158,6 +181,7 @@ async function closeRetainedFrankWorker(id: string, worker: RetainedFrankWorker)
 		return;
 	}
 	worker.closed = true;
+	clearTimeout(worker.idleTimer);
 	worker.hostToolService?.close();
 	worker.removeDelivery();
 	await worker.handle.close();
@@ -2881,6 +2905,7 @@ async function runRetainedFrankFollowUpTurn(
 	};
 	let onAbort: (() => void) | undefined;
 	worker.setOnEvent(createFrankEventForwarder(id, options.eventBus, options.subagentEventBus));
+	holdRetainedFrankWorker(worker);
 	try {
 		if (signal?.aborted) {
 			await abort();
@@ -2910,6 +2935,7 @@ async function runRetainedFrankFollowUpTurn(
 	} finally {
 		if (signal && onAbort) signal.removeEventListener("abort", onAbort);
 		monitor.finish();
+		releaseRetainedFrankWorker(id, worker);
 	}
 	const result = await finalizeRunResult({
 		monitor: { ...monitor, rawOutput: () => rawOutput },
@@ -3173,11 +3199,15 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			} else if (keepAlive && !options.runWorker) {
 				const handle = await startFrankWorker(workerOptions);
 				const removeDelivery = AgentRegistry.global().registerRetainedDelivery(id, async (message: IrcMessage) => {
+					const worker = retainedWorker;
+					if (worker) holdRetainedFrankWorker(worker);
 					try {
 						const outcome = await handle.steer(formatIncoming(message));
 						return outcome === "delivered" ? { kind: "delivered" } : outcome === "timeout" ? { kind: "failed", error: "Frank steer acknowledgement timed out; delivery status is unknown" } : { kind: "unsupported" };
 					} catch (error) {
 						return { kind: "failed", error: error instanceof Error ? error.message : String(error) };
+					} finally {
+						if (worker) releaseRetainedFrankWorker(id, worker);
 					}
 				});
 				retainedWorker = {
@@ -3187,6 +3217,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 					closed: false,
 					setOnEvent: callback => { forwardEvent = callback; },
 					removeDelivery,
+					inFlight: 1,
 				};
 				retainedFrankWorkers.set(id, retainedWorker);
 				result = await handle.runTurn(firstPrompt);
@@ -3237,8 +3268,10 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 		}
 	}
 	if (retainedWorker) {
-		if (options.keepAlive !== false && exitCode === 0 && !aborted) retainedFrankWorkers.set(id, retainedWorker);
-		else {
+		if (options.keepAlive !== false && exitCode === 0 && !aborted) {
+			retainedFrankWorkers.set(id, retainedWorker);
+			releaseRetainedFrankWorker(id, retainedWorker);
+		} else {
 			await closeRetainedFrankWorker(id, retainedWorker);
 		}
 	} else hostToolService?.close();
