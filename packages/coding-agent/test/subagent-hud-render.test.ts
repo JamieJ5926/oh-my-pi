@@ -332,6 +332,23 @@ describe("subagent HUD lines", () => {
 		}
 		expect(out).not.toContain("more running");
 	});
+	it("counts only active reviewer siblings in a collapsed group", () => {
+		const parent = makeSession({ id: "Lead" });
+		const members = [
+			makeSession({ id: "Lead.ReviewA", agent: "frank-reviewer", status: "aborted", progress: makeProgress({ id: "Lead.ReviewA", tokens: 0 }) }),
+			makeSession({ id: "Lead.ReviewB", agent: "frank-reviewer", status: "aborted", progress: makeProgress({ id: "Lead.ReviewB", tokens: 0 }) }),
+			makeSession({ id: "Lead.ReviewC", agent: "frank-reviewer", status: "active", progress: makeProgress({ id: "Lead.ReviewC", tokens: 0 }) }),
+		];
+		const ancestry = members.map(member => ({ id: member.id, parentId: parent.id }));
+		const line = Bun.stripANSI(renderSubagentHudLines([parent, ...members], 160, ancestry).subagents.join("\\n"))
+			.split("\\n")
+			.find(row => row.includes("frank-reviewer")) ?? "";
+
+		expect(line).toContain("frank-reviewer ×1");
+		expect(line).not.toContain("frank-reviewer ×3");
+		expect(line.match(/●/g) ?? []).toHaveLength(1);
+	});
+
 	it("keeps staggered terminal siblings compact with child tags and own usage", () => {
 		const parent = makeSession({ id: "Lead", progress: makeProgress({ id: "Lead", tokens: 7 }) });
 		const members = Array.from({ length: 6 }, (_, index) =>
