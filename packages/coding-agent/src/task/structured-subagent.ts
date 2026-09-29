@@ -95,6 +95,22 @@ export function frankModelHop(
 	return `${model.provider}/${id}:${effort}`;
 }
 
+/**
+ * A Frank seat's `model:` list is its fallback chain: Frank retries each hop
+ * with backoff, then moves to the next. Frank talks to one endpoint per turn,
+ * so only hops served by the primary's endpoint join the chain.
+ */
+export function frankModelChain(
+	scopes: ScopedModel[],
+	endpointOf: (model: ScopedModel["model"]) => string | undefined,
+): string {
+	const primaryEndpoint = endpointOf(scopes[0].model);
+	return scopes
+		.filter(scope => endpointOf(scope.model) === primaryEndpoint)
+		.map(scope => frankModelHop(scope.model, scope.thinkingLevel))
+		.join(",");
+}
+
 async function frankWorkerOptions(
 	options: ExecutorOptions,
 	session: ToolSession,
@@ -132,7 +148,7 @@ async function frankWorkerOptions(
 		...options,
 		exe: await resolveFrankAcceptExe(session.cwd),
 		endpoint: frankWorkerEndpoint(endpoint),
-		model: frankModelHop(model, scope.thinkingLevel),
+		model: frankModelChain(selected, m => m.baseUrl ?? session.modelRegistry?.getProviderBaseUrl(m.provider)),
 		apiKey,
 		budgets: resolveFrankWorkerBudgets(options.agent),
 		transport: options.frankTransport ?? session.settings.get("task.frankTransport"),
