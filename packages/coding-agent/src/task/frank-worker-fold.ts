@@ -34,25 +34,25 @@ export function eventAssistantText(event: FrankEvent): string {
 }
 
 export function foldEventsToText(events: FrankEvent[]): string {
+	// The answer is the last assistant message, not every round's text joined.
 	let roundDeltas: string[] = [];
 	let finalText = "";
-	let hasDeltas = false;
 	for (const event of events) {
 		const value = event.event;
 		if (!isRecord(value)) continue;
-		const kind = value.kind;
-		if (kind === "AssistantDone") {
-			finalText = roundDeltas.join("");
+		if (value.kind === "AssistantDone") {
+			if (roundDeltas.length > 0) finalText = roundDeltas.join("");
 			roundDeltas = [];
-			hasDeltas = false;
 			continue;
 		}
 		const text = eventAssistantText(event);
 		if (text === "") continue;
-		roundDeltas.push(text);
-		hasDeltas = true;
+		if (value.type === "message_end") {
+			finalText = text;
+			roundDeltas = [];
+		} else roundDeltas.push(text);
 	}
-	return hasDeltas ? roundDeltas.join("") : finalText;
+	return roundDeltas.length > 0 ? roundDeltas.join("") : finalText;
 }
 
 function parseYieldItem(value: unknown): YieldItem | undefined {
@@ -70,7 +70,6 @@ function parseYieldItem(value: unknown): YieldItem | undefined {
 
 export function extractFrankYieldItems(events: FrankEvent[]): YieldItem[] {
 	const items: YieldItem[] = [];
-	let assistantDelta = "";
 	for (const event of events) {
 		const outer = event.event;
 		if (!isRecord(outer)) continue;
@@ -85,8 +84,8 @@ export function extractFrankYieldItems(events: FrankEvent[]): YieldItem[] {
 			if (item) items.push(item);
 			continue;
 		}
-		if (isRecord(kind) && "AssistantDelta" in kind) assistantDelta += eventAssistantText(event);
 	}
+	const assistantDelta = foldEventsToText(events);
 	if (assistantDelta !== "") {
 		try {
 			const envelope: unknown = JSON.parse(assistantDelta);
