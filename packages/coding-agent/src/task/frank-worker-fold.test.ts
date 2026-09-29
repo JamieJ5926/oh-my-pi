@@ -25,6 +25,39 @@ function terminalKind(events: FrankEvent[]): string | undefined {
 }
 
 describe("Frank captured event wire", () => {
+	test("folds only the last assistant round after AssistantDone boundaries", () => {
+		const events: FrankEvent[] = [
+			{ type: "event", seq: 1, event: { kind: { AssistantDelta: "Collected so far: C01" } } },
+			{ type: "event", seq: 2, event: { kind: { ToolCall: { name: "hub" } } } },
+			{ type: "event", seq: 3, event: { kind: { ToolResult: { content: "1" } } } },
+			{ type: "event", seq: 4, event: { kind: "AssistantDone" } },
+			{ type: "event", seq: 5, event: { kind: { AssistantDelta: "sum=20 children=20" } } },
+			{ type: "event", seq: 6, event: { kind: "AssistantDone" } },
+			{ type: "event", seq: 7, event: { kind: { TerminalDone: { outcome: "Answer", seq: 6 } } } },
+		];
+		expect(foldEventsToText(events)).toBe("sum=20 children=20");
+	});
+
+	test("keeps the last text when the final round made only tool calls", () => {
+		const events: FrankEvent[] = [
+			{ type: "event", seq: 1, event: { kind: { AssistantDelta: "answer=7" } } },
+			{ type: "event", seq: 2, event: { kind: "AssistantDone" } },
+			{ type: "event", seq: 3, event: { kind: { ToolCall: { name: "hub" } } } },
+			{ type: "event", seq: 4, event: { kind: "AssistantDone" } },
+		];
+		expect(foldEventsToText(events)).toBe("answer=7");
+	});
+
+	test("parses a structured yield from the final round despite earlier progress text", () => {
+		const events: FrankEvent[] = [
+			{ type: "event", seq: 1, event: { kind: { AssistantDelta: "Collected so far: C01" } } },
+			{ type: "event", seq: 2, event: { kind: "AssistantDone" } },
+			{ type: "event", seq: 3, event: { kind: { AssistantDelta: '{"data":{"answer":42}}' } } },
+			{ type: "event", seq: 4, event: { kind: "AssistantDone" } },
+		];
+		expect(extractFrankYieldItems(events)).toEqual([{ data: { answer: 42 } }]);
+	});
+
 	test("folds exact saved Answer AssistantDelta text", () => {
 		const events = readFixture("answer");
 		const deltas = events.map(eventAssistantText).filter((text) => text !== "");
