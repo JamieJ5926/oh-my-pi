@@ -5,6 +5,8 @@
  */
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import type { AsyncJob, AsyncJobManager, AsyncJobType } from "../../async";
@@ -326,67 +328,107 @@ export function nothingToWaitForResult(session: ToolSession): AgentToolResult<Co
 	};
 }
 
-/** `cancel`: kill the named jobs; returns immediately with outcomes + snapshots. */
+const ABORTED = Symbol("hub-cancel-aborted");
+
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T | typeof ABORTED> {
+	if (!signal) return work;
+	if (signal.aborted) return Promise.resolve(ABORTED);
+	const { promise, resolve } = Promise.withResolvers<typeof ABORTED>();
+	const onAbort = () => resolve(ABORTED);
+	signal.addEventListener("abort", onAbort, { once: true });
+	return Promise.race([work, promise]).finally(() => signal.removeEventListener("abort", onAbort));
+}
+
+function appendHubLog(session: ToolSession, entry: Record<string, unknown>): void {
+	const dir = session.getArtifactsDir?.();
+	if (!dir) return;
+	try {
+		fs.mkdirSync(dir, { recursive: true });
+		fs.appendFileSync(path.join(dir, "hub.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`);
+	} catch {}
+}
+
+/**
+ * `cancel`: kill the named jobs one at a time. Each outcome is appended to the
+ * session's `hub.jsonl` as it happens, and an abort returns the outcomes so far
+ * plus the ids it never confirmed, so an interrupted bulk cancel still reports.
+ */
 export async function executeCancel(
 	session: ToolSession,
 	manager: AsyncJobManager,
 	ownerId: string | undefined,
 	ids: string[],
+	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	const ownerFilter = ownerId ? { ownerId } : undefined;
 	const cancelOutcomes: CancelOutcome[] = [];
-	for (const id of ids) {
-		const existing = manager.getJob(id);
-		if (!existing || (ownerId && existing.ownerId !== ownerId)) {
-			// A live row owned by another agent is normally out of reach — except
-			// when the caller is an ancestor of the row's agent (e.g. a grandparent
-			// killing a middle-owned grandchild job). Without this, the kill would
-			// fall through to the registration path below and leak the Middle-owned
-			// row with its abortController un-aborted. Cross-agent kills stay
-			// impossible: a broken or unregistered link denies.
-			if (existing?.status === "running" && ownerId && existing.ownerId !== ownerId) {
-				if (isCancelAuthorized(session, manager, id, ownerId)) {
-					await cancelJobTree(session, manager, id, ownerId);
-					cancelOutcomes.push({
-						id,
-						status: "cancelled",
-						message: `Cancelled background job ${id}.`,
-					});
-					continue;
-				}
-			}
-			// No job by this id (or it belongs to another agent): a budget-aborted
-			// keep-alive subagent lives on as a jobless registration long after its
-			// job row is reaped, so let cancel reach the agent registration too.
-			// Its descendants go first: once the registration drops, the parent
-			// link that authorizes them is gone.
-			if (session.agentRegistry?.get(id)?.kind === "sub" && isCancelAuthorized(session, manager, id, ownerId)) {
-				await cancelDescendants(session, manager, id, ownerId);
-			}
-			cancelOutcomes.push(await cancelAgentRegistration(session, ownerId, id, manager));
-			continue;
+	let interruptedAt = -1;
+	for (const [index, id] of ids.entries()) {
+		const outcome = await untilAborted(cancelOne(session, manager, ownerId, id), signal);
+		if (outcome === ABORTED) {
+			interruptedAt = index;
+			break;
 		}
-		if (existing.status !== "running") {
-			// The job row settled but may still be inside the retention window.
-			// The agent registration behind it (job id == agent id for task
-			// spawns) can outlive the row as an idle/parked zombie — try the
-			// registration kill before reporting the row as already done.
-			const regOutcome = await cancelAgentRegistration(session, ownerId, id, manager);
-			cancelOutcomes.push(
-				regOutcome.status === "cancelled"
-					? regOutcome
-					: {
-							id,
-							status: "already_completed",
-							message: `Background job ${id} is already ${existing.status}.`,
-						},
-			);
-			continue;
-		}
-		await cancelJobTree(session, manager, id, ownerId);
-		cancelOutcomes.push({ id, status: "cancelled", message: `Cancelled background job ${id}.` });
+		cancelOutcomes.push(outcome);
+		appendHubLog(session, { op: "cancel", id: outcome.id, status: outcome.status, message: outcome.message });
 	}
-	return buildJobResult(session, manager, "cancel", visibleJobs(manager, ids, ownerId), cancelOutcomes);
+	const result = buildJobResult(session, manager, "cancel", visibleJobs(manager, ids, ownerId), cancelOutcomes);
+	if (interruptedAt < 0) return result;
+	const unconfirmed = ids.slice(interruptedAt);
+	appendHubLog(session, { op: "cancel", status: "interrupted", unconfirmed });
+	const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+	return {
+		...result,
+		content: [
+			{
+				type: "text",
+				text: `${text}\n\n## Interrupted (${unconfirmed.length})\n\nInterrupted before: ${unconfirmed.join(", ")}`,
+			},
+		],
+	};
+}
+
+async function cancelOne(
+	session: ToolSession,
+	manager: AsyncJobManager,
+	ownerId: string | undefined,
+	id: string,
+): Promise<CancelOutcome> {
+	const existing = manager.getJob(id);
+	if (!existing || (ownerId && existing.ownerId !== ownerId)) {
+		// A live row owned by another agent is normally out of reach — except
+		// when the caller is an ancestor of the row's agent (e.g. a grandparent
+		// killing a middle-owned grandchild job). Without this, the kill would
+		// fall through to the registration path below and leak the Middle-owned
+		// row with its abortController un-aborted. Cross-agent kills stay
+		// impossible: a broken or unregistered link denies.
+		if (existing?.status === "running" && ownerId && existing.ownerId !== ownerId) {
+			if (isCancelAuthorized(session, manager, id, ownerId)) {
+				await cancelJobTree(session, manager, id, ownerId);
+				return { id, status: "cancelled", message: `Cancelled background job ${id}.` };
+			}
+		}
+		// No job by this id (or it belongs to another agent): a budget-aborted
+		// keep-alive subagent lives on as a jobless registration long after its
+		// job row is reaped, so let cancel reach the agent registration too.
+		// Its descendants go first: once the registration drops, the parent
+		// link that authorizes them is gone.
+		if (session.agentRegistry?.get(id)?.kind === "sub" && isCancelAuthorized(session, manager, id, ownerId)) {
+			await cancelDescendants(session, manager, id, ownerId);
+		}
+		return await cancelAgentRegistration(session, ownerId, id, manager);
+	}
+	if (existing.status !== "running") {
+		// The job row settled but may still be inside the retention window.
+		// The agent registration behind it (job id == agent id for task
+		// spawns) can outlive the row as an idle/parked zombie — try the
+		// registration kill before reporting the row as already done.
+		const regOutcome = await cancelAgentRegistration(session, ownerId, id, manager);
+		return regOutcome.status === "cancelled"
+			? regOutcome
+			: { id, status: "already_completed", message: `Background job ${id} is already ${existing.status}.` };
+	}
+	await cancelJobTree(session, manager, id, ownerId);
+	return { id, status: "cancelled", message: `Cancelled background job ${id}.` };
 }
 
 /**
