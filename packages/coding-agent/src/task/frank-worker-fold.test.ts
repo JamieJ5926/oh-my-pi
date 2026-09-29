@@ -25,6 +25,19 @@ function terminalKind(events: FrankEvent[]): string | undefined {
 }
 
 describe("Frank captured event wire", () => {
+	test("folds only the last assistant round after AssistantDone boundaries", () => {
+		const events: FrankEvent[] = [
+			{ type: "event", seq: 1, event: { kind: { AssistantDelta: "Collected so far: C01" } } },
+			{ type: "event", seq: 2, event: { kind: { ToolCall: { name: "hub" } } } },
+			{ type: "event", seq: 3, event: { kind: { ToolResult: { content: "1" } } } },
+			{ type: "event", seq: 4, event: { kind: "AssistantDone" } },
+			{ type: "event", seq: 5, event: { kind: { AssistantDelta: "sum=20 children=20" } } },
+			{ type: "event", seq: 6, event: { kind: "AssistantDone" } },
+			{ type: "event", seq: 7, event: { kind: { TerminalDone: { outcome: "Answer", seq: 6 } } } },
+		];
+		 expect(foldEventsToText(events)).toBe("sum=20 children=20");
+	});
+
 	test("folds exact saved Answer AssistantDelta text", () => {
 		const events = readFixture("answer");
 		const deltas = events.map(eventAssistantText).filter((text) => text !== "");

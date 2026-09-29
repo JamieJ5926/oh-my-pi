@@ -34,21 +34,25 @@ export function eventAssistantText(event: FrankEvent): string {
 }
 
 export function foldEventsToText(events: FrankEvent[]): string {
-	const deltas: string[] = [];
+	let roundDeltas: string[] = [];
 	let finalText = "";
 	let hasDeltas = false;
 	for (const event of events) {
 		const value = event.event;
 		if (!isRecord(value)) continue;
+		const kind = value.kind;
+		if (kind === "AssistantDone") {
+			finalText = roundDeltas.join("");
+			roundDeltas = [];
+			hasDeltas = false;
+			continue;
+		}
 		const text = eventAssistantText(event);
 		if (text === "") continue;
-		if (value.type === "message_end") finalText = text;
-		else {
-			deltas.push(text);
-			hasDeltas = true;
-		}
+		roundDeltas.push(text);
+		hasDeltas = true;
 	}
-	return hasDeltas ? deltas.join("") : finalText;
+	return hasDeltas ? roundDeltas.join("") : finalText;
 }
 
 function parseYieldItem(value: unknown): YieldItem | undefined {
