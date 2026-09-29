@@ -388,7 +388,8 @@ describe("subagent HUD lines", () => {
 		parent.status = "completed";
 		const out = Bun.stripANSI(renderSubagentHudLines([parent, ...members], 160, ancestry).subagents.join("\n"));
 		expect(out).toContain("Σ 22");
-		expect(out).toContain("explorer ×1✗");
+		expect(out).toContain("explorer ×1");
+		expect(out).not.toContain("explorer ×1✗");
 		expect(out).toMatch(/explorer ×1✗?\s+Child0  Child1  Child2  Child3  Child4  Child5\s+●\s+15/);
 		const narrow = renderSubagentHudLines([parent, ...members, makeSession({ id: "DeepWork" })], 42, [
 			...ancestry,
@@ -411,7 +412,7 @@ describe("subagent HUD lines", () => {
 		).split("\n").find(row => row.includes("explorer ×"));
 
 		expect(line).toBe(
-			"  └─ ● explorer ×1   Live  Broken                                                                                                              ●         0  · ?",
+			"  └─ ● explorer ×1    Live  Broken                                                                                                              ●         0  · ?",
 		);
 	});
 
