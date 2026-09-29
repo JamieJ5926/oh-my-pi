@@ -1043,6 +1043,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// instead of failing every bash call until a slot frees up.
 		if (
 			this.#autoBackgroundEnabled &&
+			!ctx?.frankBridge &&
 			!pty &&
 			!bridgeTerminalAvailable &&
 			autoBgManager &&
