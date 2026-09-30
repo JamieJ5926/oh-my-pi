@@ -37,23 +37,25 @@ interface PlanArtifact {
 	readonly planDigest: string;
 	readonly operationId: string;
 	readonly changePlanId: string;
+	readonly unitId: string;
 }
 
-async function createPlanArtifact(session: ToolSession, unitId: string, ownedPath: string): Promise<PlanArtifact> {
+async function createPlanArtifact(session: ToolSession, _unitId: string, ownedPath: string): Promise<PlanArtifact> {
 	const tool = new BatchPlanTool(session);
 	const result = await tool.execute("plan-call", {
 		objective: "batch safety",
 		units: [{
-			unitId,
 			objective: "write one path",
 			ownedPaths: [ownedPath],
-			dependencyIds: [],
+			dependencyUnitIndexes: [],
 			validationCommands: ["true"],
 			isolation: "patch",
 		}],
 	});
 	if (result.details === undefined) throw new Error("batch_plan returned no details");
-	return { artifactUri: result.details.artifactUri, planDigest: result.details.planDigest, operationId: result.details.operationId, changePlanId: result.details.changePlanId };
+	const unitId = result.details.batchWriteRequestTemplate.manifest.entries[0]?.unitId;
+	if (unitId === undefined) throw new Error("batch_plan returned no unit ID");
+	return { artifactUri: result.details.artifactUri, planDigest: result.details.planDigest, operationId: result.details.operationId, changePlanId: result.details.changePlanId, unitId };
 }
 
 function manifest(plan: PlanArtifact, unitId: string, manifestPath: string, content = "exploit") {
@@ -72,6 +74,7 @@ function missingPlan(artifactUri: string): PlanArtifact {
 		planDigest: "0".repeat(64),
 		operationId: "op_missing",
 		changePlanId: "change_plan_missing",
+		unitId: "change_unit_0000" as PlanArtifact["unitId"],
 	};
 }
 
@@ -79,26 +82,14 @@ async function createMultiUnitPlan(session: ToolSession): Promise<PlanArtifact> 
 	const result = await new BatchPlanTool(session).execute("multi-plan", {
 		objective: "multi-write failure",
 		units: [
-			{
-				unitId: "change_unit_first",
-				objective: "write first unit",
-				ownedPaths: ["src/a.ts", "src/blocker"],
-				dependencyIds: [],
-				validationCommands: ["true"],
-				isolation: "patch",
-			},
-			{
-				unitId: "change_unit_later",
-				objective: "write dependent unit",
-				ownedPaths: ["src/later.ts"],
-				dependencyIds: ["change_unit_first"],
-				validationCommands: ["true"],
-				isolation: "patch",
-			},
+			{ objective: "write first unit", ownedPaths: ["src/a.ts", "src/blocker"], dependencyUnitIndexes: [], validationCommands: ["true"], isolation: "patch" },
+			{ objective: "write dependent unit", ownedPaths: ["src/later.ts"], dependencyUnitIndexes: [0], validationCommands: ["true"], isolation: "patch" },
 		],
 	});
 	if (result.details === undefined) throw new Error("batch_plan returned no details");
-	return { artifactUri: result.details.artifactUri, planDigest: result.details.planDigest, operationId: result.details.operationId, changePlanId: result.details.changePlanId };
+	const unitId = result.details.batchWriteRequestTemplate.manifest.entries[0]?.unitId;
+	if (unitId === undefined) throw new Error("batch_plan returned no unit ID");
+	return { artifactUri: result.details.artifactUri, planDigest: result.details.planDigest, operationId: result.details.operationId, changePlanId: result.details.changePlanId, unitId };
 }
 
 function artifactPath(session: ToolSession, uri: string): string {
@@ -113,8 +104,8 @@ describe("batch-write manifest safety", () => {
 		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "batch-write-test-"));
 		try {
 			const session = createTestToolSession(tmpDir);
-			const plan = await createPlanArtifact(session, "change_unit_escape", "../outside.ts");
-			const result = await new BatchWriteTool(session).execute("write-call", { artifactUri: plan.artifactUri, manifest: manifest(plan, "change_unit_escape", "../outside.ts") });
+			const plan = await createPlanArtifact(session, "", "../outside.ts");
+			const result = await new BatchWriteTool(session).execute("write-call", { artifactUri: plan.artifactUri, manifest: manifest(plan, plan.unitId, "../outside.ts") });
 			expect(result.isError).toBe(true);
 			expect(result.details?.status).toBe("preflight_rejected");
 			expect(result.details?.issues?.map(issue => issue.code)).toContain("unsafe_path");
@@ -127,8 +118,8 @@ describe("batch-write manifest safety", () => {
 		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "batch-write-test-"));
 		try {
 			const session = createTestToolSession(tmpDir);
-			const plan = await createPlanArtifact(session, "change_unit_absolute", "/etc/passwd");
-			const result = await new BatchWriteTool(session).execute("write-call", { artifactUri: plan.artifactUri, manifest: manifest(plan, "change_unit_absolute", "/etc/passwd") });
+			const plan = await createPlanArtifact(session, "", "/etc/passwd");
+			const result = await new BatchWriteTool(session).execute("write-call", { artifactUri: plan.artifactUri, manifest: manifest(plan, plan.unitId, "/etc/passwd") });
 			expect(result.isError).toBe(true);
 			expect(result.details?.status).toBe("preflight_rejected");
 			expect(result.details?.issues?.map(issue => issue.code)).toContain("unsafe_path");
@@ -143,8 +134,8 @@ describe("batch-write manifest safety", () => {
 		try {
 			await fs.symlink(outsideDir, path.join(tmpDir, "evil-link"));
 			const session = createTestToolSession(tmpDir);
-			const plan = await createPlanArtifact(session, "change_unit_symlink", "evil-link/exploit.ts");
-			const result = await new BatchWriteTool(session).execute("write-call", { artifactUri: plan.artifactUri, manifest: manifest(plan, "change_unit_symlink", "evil-link/exploit.ts") });
+			const plan = await createPlanArtifact(session, "", "evil-link/exploit.ts");
+			const result = await new BatchWriteTool(session).execute("write-call", { artifactUri: plan.artifactUri, manifest: manifest(plan, plan.unitId, "evil-link/exploit.ts") });
 			expect(result.isError).toBe(true);
 			expect(result.details?.status).toBe("preflight_rejected");
 			expect(result.details?.issues?.map(issue => issue.code)).toContain("unsafe_path");
@@ -160,10 +151,10 @@ describe("batch-write manifest safety", () => {
 		try {
 			await fs.mkdir(path.join(tmpDir, "src"), { recursive: true });
 			const session = createTestToolSession(tmpDir);
-			const plan = await createPlanArtifact(session, "change_unit_safe", "src/auth.ts");
+			const plan = await createPlanArtifact(session, "", "src/auth.ts");
 			const result = await new BatchWriteTool(session).execute("write-call", {
 				artifactUri: plan.artifactUri,
-				manifest: manifest(plan, "change_unit_safe", "src/auth.ts", "export const auth = 'safe';"),
+				manifest: manifest(plan, plan.unitId, "src/auth.ts", "export const auth = 'safe';"),
 			});
 			expect(result.isError).not.toBe(true);
 			expect(result.details?.status).toBe("applied");
@@ -182,10 +173,10 @@ describe("batch-write manifest safety", () => {
 		try {
 			await fs.mkdir(path.join(tmpDir, "src"), { recursive: true });
 			const session = createTestToolSession(tmpDir);
-			const plan = await createPlanArtifact(session, "change_unit_error", "src");
+			const plan = await createPlanArtifact(session, "", "src");
 			const result = await new BatchWriteTool(session).execute("write-call", {
 				artifactUri: plan.artifactUri,
-				manifest: manifest(plan, "change_unit_error", "src", "cannot replace a directory"),
+				manifest: manifest(plan, plan.unitId, "src", "cannot replace a directory"),
 			});
 			expect(result.isError).toBe(true);
 			expect(result.details?.status).toBe("runtime_failed");
@@ -202,14 +193,14 @@ describe("batch-write manifest safety", () => {
 		try {
 			await fs.mkdir(path.join(tmpDir, "src"), { recursive: true });
 			const session = createTestToolSession(tmpDir);
-			const plan = await createPlanArtifact(session, "change_unit_tamper", "src/tamper.ts");
+			const plan = await createPlanArtifact(session, "", "src/tamper.ts");
 			const planPath = artifactPath(session, plan.artifactUri);
 			const artifact = JSON.parse(await fs.readFile(planPath, "utf8"));
 			artifact.plan.objective = "tampered";
 			await fs.writeFile(planPath, JSON.stringify(artifact), "utf8");
 			const result = await new BatchWriteTool(session).execute("write-call", {
 				artifactUri: plan.artifactUri,
-				manifest: manifest(plan, "change_unit_tamper", "src/tamper.ts", "tamper"),
+				manifest: manifest(plan, plan.unitId, "src/tamper.ts", "tamper"),
 			});
 			expect(result.isError).toBe(true);
 			expect(result.details?.status).toBe("preflight_rejected");
@@ -234,8 +225,8 @@ describe("batch-write manifest safety", () => {
 					changePlanId: plan.changePlanId,
 					planDigest: plan.planDigest,
 					entries: [
-						{ unitId: "change_unit_later", writes: [{ kind: "full_content", path: "src/later.ts", content: "later" }] },
-						{ unitId: "change_unit_first", writes: [
+						{ unitId: "change_unit_0001", writes: [{ kind: "full_content", path: "src/later.ts", content: "later" }] },
+						{ unitId: "change_unit_0000", writes: [
 							{ kind: "full_content", path: "src/blocker", content: "blocked" },
 							{ kind: "full_content", path: "src/a.ts", content: "first" },
 						] },
@@ -244,7 +235,7 @@ describe("batch-write manifest safety", () => {
 			});
 			expect(result.isError).toBe(true);
 			expect(result.details?.status).toBe("runtime_failed");
-			expect(result.details?.failedUnitId).toBe("change_unit_first");
+			expect(result.details?.failedUnitId).toBe("change_unit_0000");
 			expect(result.details?.appliedPaths).toEqual(["src/a.ts"]);
 			expect(result.details?.pendingPaths).toEqual(["src/blocker", "src/later.ts"]);
 			expect(result.details?.states.map(item => item.state.kind)).toEqual(["rejected", "pending"]);
@@ -275,8 +266,8 @@ describe("batch-write manifest safety", () => {
 					changePlanId: plan.changePlanId,
 					planDigest: plan.planDigest,
 					entries: [
-						{ unitId: "change_unit_later", writes: [{ kind: "full_content", path: "src/later.ts", content: "later" }] },
-						{ unitId: "change_unit_first", writes: [
+						{ unitId: "change_unit_0001", writes: [{ kind: "full_content", path: "src/later.ts", content: "later" }] },
+						{ unitId: "change_unit_0000", writes: [
 							{ kind: "full_content", path: "src/blocker", content: "second" },
 							{ kind: "full_content", path: "src/a.ts", content: "first" },
 						] },
@@ -303,11 +294,11 @@ describe("batch-write manifest safety", () => {
 			await fs.mkdir(artifactRoot, { recursive: true });
 			const plannerSession = createTestToolSession(plannerCwd, artifactRoot);
 			const writerSession = createTestToolSession(writerCwd, artifactRoot);
-			const plan = await createPlanArtifact(plannerSession, "change_unit_shared", "src/shared.ts");
+			const plan = await createPlanArtifact(plannerSession, "", "src/shared.ts");
 			expect(artifactPath(plannerSession, plan.artifactUri).startsWith(artifactRoot)).toBe(true);
 			const result = await new BatchWriteTool(writerSession).execute("write-call", {
 				artifactUri: plan.artifactUri,
-				manifest: manifest(plan, "change_unit_shared", "src/shared.ts", "shared"),
+				manifest: manifest(plan, plan.unitId, "src/shared.ts", "shared"),
 			});
 			expect(result.details?.status).toBe("applied");
 			expect(await fs.readFile(path.join(writerCwd, "src/shared.ts"), "utf8")).toBe("shared");
@@ -325,7 +316,7 @@ describe("batch-write manifest safety", () => {
 			const plan = missingPlan("local://missing-plan.json");
 			const result = await new BatchWriteTool(session).execute("write-call", {
 				artifactUri: plan.artifactUri,
-				manifest: manifest(plan, "change_unit_missing", "src/missing.ts"),
+				manifest: manifest(plan, plan.unitId, "src/missing.ts"),
 			});
 			expect(result.isError).toBe(true);
 			expect(result.details?.status).toBe("preflight_rejected");
@@ -344,7 +335,7 @@ describe("batch-write manifest safety", () => {
 			const plan = missingPlan("local://");
 			const result = await new BatchWriteTool(session).execute("write-call", {
 				artifactUri: plan.artifactUri,
-				manifest: manifest(plan, "change_unit_missing", "src/missing.ts"),
+				manifest: manifest(plan, plan.unitId, "src/missing.ts"),
 			});
 			expect(result.isError).toBe(true);
 			expect(result.details?.status).toBe("preflight_rejected");
@@ -359,8 +350,8 @@ describe("batch-write manifest safety", () => {
 		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "batch-write-test-"));
 		try {
 			const session = createTestToolSession(tmpDir);
-			const first = await createPlanArtifact(session, "change_unit_replay", "src/replay.ts");
-			const second = await createPlanArtifact(session, "change_unit_replay", "src/replay.ts");
+			const first = await createPlanArtifact(session, "", "src/replay.ts");
+			const second = await createPlanArtifact(session, "", "src/replay.ts");
 			expect(first.planDigest).toMatch(/^[a-f0-9]{64}$/);
 			expect(second.planDigest).toMatch(/^[a-f0-9]{64}$/);
 			expect(await fs.readFile(artifactPath(session, first.artifactUri), "utf8")).toContain(first.planDigest);
@@ -379,10 +370,10 @@ describe("batch-write manifest safety", () => {
 				path: "src/direct.ts",
 				content: "direct",
 			})).rejects.toThrow("limited to the xd:// device transport");
-			const plan = await createPlanArtifact(session, "change_unit_restricted", "src/restricted.ts");
+			const plan = await createPlanArtifact(session, "", "src/restricted.ts");
 			const result = await new BatchWriteTool(session).execute("batch-write", {
 				artifactUri: plan.artifactUri,
-				manifest: manifest(plan, "change_unit_restricted", "src/restricted.ts", "batch"),
+				manifest: manifest(plan, plan.unitId, "src/restricted.ts", "batch"),
 			});
 			expect(result.details?.status).toBe("applied");
 			expect(await fs.readFile(path.join(tmpDir, "src/restricted.ts"), "utf8")).toBe("batch");
@@ -400,10 +391,10 @@ describe("batch-write manifest safety", () => {
 			await fs.writeFile(target, "old", "utf8");
 			await fs.chmod(target, 0o744);
 			const session = createTestToolSession(tmpDir, undefined, true);
-			const plan = await createPlanArtifact(session, "change_unit_mode", "src/mode.ts");
+			const plan = await createPlanArtifact(session, "", "src/mode.ts");
 			const result = await new BatchWriteTool(session).execute("batch-write", {
 				artifactUri: plan.artifactUri,
-				manifest: manifest(plan, "change_unit_mode", "src/mode.ts", "new"),
+				manifest: manifest(plan, plan.unitId, "src/mode.ts", "new"),
 			});
 			expect(result.details?.status).toBe("applied");
 			expect((await fs.stat(target)).mode & 0o777).toBe(0o744);
@@ -418,15 +409,14 @@ describe("batch-write manifest safety", () => {
 			const session = createTestToolSession(tmpDir);
 			const result = await new BatchPlanTool(session).execute("unsafe/../call", {
 				objective: "safe identifiers",
-				units: [{
-					unitId: "change_unit_safe_id",
-					objective: "own one file",
-					ownedPaths: ["src/id.ts"],
-					dependencyIds: [],
-					validationCommands: ["true"],
-					isolation: "patch",
-				}],
-			});
+                units: [{
+                    objective: "own one file",
+                    ownedPaths: ["src/id.ts"],
+                    dependencyUnitIndexes: [],
+                    validationCommands: ["true"],
+                    isolation: "patch",
+                }],
+            });
 			if (result.details === undefined) throw new Error("batch_plan returned no details");
 			expect(result.details.operationId).toMatch(/^op_[a-f0-9]{32}$/);
 			expect(result.details.changePlanId).toMatch(/^change_plan_[a-f0-9]{32}$/);
@@ -439,7 +429,7 @@ describe("batch-write manifest safety", () => {
 					operationId: result.details.operationId,
 					changePlanId: result.details.changePlanId,
 					planDigest: result.details.planDigest,
-					entries: [{ unitId: "change_unit_safe_id", writes: [] }],
+						entries: [{ unitId: "change_unit_0000", writes: [] }],
 				},
 			});
 		} finally {
@@ -453,15 +443,14 @@ describe("batch-write manifest safety", () => {
 			const session = createTestToolSession(tmpDir, undefined, true);
 			const planned = await new BatchPlanTool(session).execute("ready-request", {
 				objective: "ready request",
-				units: [{
-					unitId: "change_unit_ready",
-					objective: "write ready file",
-					ownedPaths: ["src/ready.ts"],
-					dependencyIds: [],
-					validationCommands: ["true"],
-					isolation: "patch",
-				}],
-			});
+                units: [{
+                    objective: "write ready file",
+                    ownedPaths: ["src/ready.ts"],
+                    dependencyUnitIndexes: [],
+                    validationCommands: ["true"],
+                    isolation: "patch",
+                }],
+            });
 			if (planned.details === undefined) throw new Error("batch_plan returned no details");
 			const template = planned.details.batchWriteRequestTemplate;
 			const firstEntry = template.manifest.entries[0];

@@ -166,46 +166,31 @@ function canonicalBody(
 }
 
 export function inspectWriteManifest(input: unknown, plan: ChangePlan, expectedPlanDigest: string): WriteManifestInspection {
-	const issues: ManifestIssue[] = [];
-	if (typeof input !== "object" || input === null || Array.isArray(input)) {
-		issue(issues, "schema_invalid", "manifest must be an object");
-		return { issues: sortedIssues(issues) };
-	}
-	const manifestInput = input as UnknownObject;
-	if (!hasOnlyKeys(manifestInput, new Set(["schemaVersion", "operationId", "changePlanId", "planDigest", "entries"]))) {
-		issue(issues, "schema_invalid", "manifest must contain only schemaVersion, operationId, changePlanId, planDigest, and entries");
-		return { issues: sortedIssues(issues) };
-	}
-	if (manifestInput.schemaVersion !== "1") issue(issues, "schema_invalid", "schemaVersion must be \"1\"");
-	const operationId = parseOperationId(manifestInput.operationId);
-	if (operationId === undefined) issue(issues, "schema_invalid", "operationId must be a valid op_ identifier");
-	else if (operationId !== plan.meta.operationId) issue(issues, "operation_id_mismatch", `${operationId} does not match ${plan.meta.operationId}`);
-	const changePlanId = parseChangePlanId(manifestInput.changePlanId);
-	if (changePlanId === undefined) issue(issues, "schema_invalid", "changePlanId must be a valid change_plan_ identifier");
-	else if (changePlanId !== plan.changePlanId) issue(issues, "change_plan_id_mismatch", `${changePlanId} does not match ${plan.changePlanId}`);
-	if (typeof manifestInput.planDigest !== "string" || !/^[a-f0-9]{64}$/.test(manifestInput.planDigest)) {
-		issue(issues, "schema_invalid", "planDigest must be a lowercase SHA-256 digest");
-	} else if (manifestInput.planDigest !== expectedPlanDigest) {
-		issue(issues, "plan_digest_mismatch", `${manifestInput.planDigest} does not match ${expectedPlanDigest}`);
-	}
-	if (!Array.isArray(manifestInput.entries) || manifestInput.entries.length === 0) {
-		issue(issues, "schema_invalid", "entries must be a non-empty array");
-		return { issues: sortedIssues(issues) };
-	}
-	if (manifestInput.entries.length > MAX_MANIFEST_ENTRIES) {
-		issue(issues, "resource_limit", `entries exceeds ${MAX_MANIFEST_ENTRIES}`);
-		return { issues: sortedIssues(issues) };
-	}
-	let rawWriteCount = 0;
-	for (const rawEntry of manifestInput.entries) {
-		if (typeof rawEntry === "object" && rawEntry !== null && !Array.isArray(rawEntry) && "writes" in rawEntry && Array.isArray(rawEntry.writes)) {
-			rawWriteCount += rawEntry.writes.length;
-		}
-	}
-	if (rawWriteCount > MAX_MANIFEST_WRITES) {
-		issue(issues, "resource_limit", `writes exceeds ${MAX_MANIFEST_WRITES}`);
-		return { issues: sortedIssues(issues) };
-	}
+ const issues: ManifestIssue[] = [];
+ if (typeof input !== "object" || input === null || Array.isArray(input)) {
+  issue(issues, "schema_invalid", "manifest must be an object");
+  return { issues: sortedIssues(issues) };
+ }
+ const manifestInput = input as UnknownObject;
+ if (!hasOnlyKeys(manifestInput, new Set(["schemaVersion", "operationId", "changePlanId", "planDigest", "entries"]))) issue(issues, "schema_invalid", "manifest must contain only schemaVersion, operationId, changePlanId, planDigest, and entries");
+ if (manifestInput.schemaVersion !== "1") issue(issues, "schema_invalid", "schemaVersion must be \"1\"");
+ const operationId = parseOperationId(manifestInput.operationId);
+ if (operationId === undefined) issue(issues, "schema_invalid", "operationId must be a valid op_ identifier");
+ else if (operationId !== plan.meta.operationId) issue(issues, "operation_id_mismatch", `${operationId} does not match ${plan.meta.operationId}`);
+ const changePlanId = parseChangePlanId(manifestInput.changePlanId);
+ if (changePlanId === undefined) issue(issues, "schema_invalid", "changePlanId must be a valid change_plan_ identifier");
+ else if (changePlanId !== plan.changePlanId) issue(issues, "change_plan_id_mismatch", `${changePlanId} does not match ${plan.changePlanId}`);
+ if (typeof manifestInput.planDigest !== "string" || !/^[a-f0-9]{64}$/.test(manifestInput.planDigest)) issue(issues, "schema_invalid", "planDigest must be a lowercase SHA-256 digest");
+ else if (manifestInput.planDigest !== expectedPlanDigest) issue(issues, "plan_digest_mismatch", `${manifestInput.planDigest} does not match ${expectedPlanDigest}`);
+ const entriesInput = manifestInput.entries;
+ if (!Array.isArray(entriesInput) || entriesInput.length === 0) issue(issues, "schema_invalid", "entries must be a non-empty array");
+ if (Array.isArray(entriesInput) && entriesInput.length > MAX_MANIFEST_ENTRIES) issue(issues, "resource_limit", `entries exceeds ${MAX_MANIFEST_ENTRIES}`);
+ let rawWriteCount = 0;
+ if (Array.isArray(entriesInput)) for (const rawEntry of entriesInput) if (typeof rawEntry === "object" && rawEntry !== null && !Array.isArray(rawEntry) && "writes" in rawEntry && Array.isArray(rawEntry.writes)) rawWriteCount += rawEntry.writes.length;
+ if (rawWriteCount > MAX_MANIFEST_WRITES) issue(issues, "resource_limit", `writes exceeds ${MAX_MANIFEST_WRITES}`);
+ if (!Array.isArray(entriesInput) || entriesInput.length === 0 || entriesInput.length > MAX_MANIFEST_ENTRIES || rawWriteCount > MAX_MANIFEST_WRITES) return { issues: sortedIssues(issues) };
+ // validation below assumes the bounded entries shape
+ const manifestEntries = entriesInput;
 	let totalContentBytes = 0;
 
 	const planUnits = new Map(plan.units.map(unit => [unit.unitId, unit]));
@@ -216,7 +201,7 @@ export function inspectWriteManifest(input: unknown, plan: ChangePlan, expectedP
 	const pathWaves = new Map<string, { unitId: ChangeUnitId; waveIndex: number }>();
 	const parsedEntries: WriteManifestEntry[] = [];
 
-	for (const rawEntry of manifestInput.entries) {
+ for (const rawEntry of manifestEntries) {
 		if (typeof rawEntry !== "object" || rawEntry === null || Array.isArray(rawEntry)) {
 			issue(issues, "schema_invalid", "each entry must be an object");
 			continue;

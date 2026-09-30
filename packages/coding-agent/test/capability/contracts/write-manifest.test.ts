@@ -11,8 +11,8 @@ function plan(overlap = false): ChangePlan {
 		changePlanId: createChangePlanId("change_plan_test"),
 		objective: "manifest contract",
 		units: [
-			{ unitId: createChangeUnitId("change_unit_a"), objective: "write a", ownedPaths: [overlap ? "src/./shared.ts" : "src/a.ts", "src/z.ts"], dependencyIds: [], validationCommands: ["true"], isolation: "patch" },
-			{ unitId: createChangeUnitId("change_unit_b"), objective: "write b", ownedPaths: [overlap ? "src/shared.ts" : "src/b.ts"], dependencyIds: [], validationCommands: ["true"], isolation: "patch" },
+            { unitId: createChangeUnitId("change_unit_0000"), objective: "write a", ownedPaths: [overlap ? "src/./shared.ts" : "src/a.ts", "src/z.ts"], dependencyIds: [], validationCommands: ["true"], isolation: "patch" },
+            { unitId: createChangeUnitId("change_unit_0001"), objective: "write b", ownedPaths: [overlap ? "src/shared.ts" : "src/b.ts"], dependencyIds: [], validationCommands: ["true"], isolation: "patch" },
 		],
 	};
 }
@@ -31,12 +31,12 @@ function inspect(entries: unknown[], targetPlan = plan()) {
 describe("write manifest contract", () => {
 	test("canonical identity ignores entry and write order", () => {
 		const first = inspect([
-			{ unitId: "change_unit_b", writes: [{ kind: "full_content", path: "src/b.ts", content: "b" }] },
-			{ unitId: "change_unit_a", writes: [{ kind: "full_content", path: "src/z.ts", content: "z" }, { kind: "full_content", path: "src/a.ts", content: "a" }] },
+            { unitId: "change_unit_0001", writes: [{ kind: "full_content", path: "src/b.ts", content: "b" }] },
+            { unitId: "change_unit_0000", writes: [{ kind: "full_content", path: "src/z.ts", content: "z" }, { kind: "full_content", path: "src/a.ts", content: "a" }] },
 		]);
 		const second = inspect([
-			{ unitId: "change_unit_a", writes: [{ kind: "full_content", path: "src/a.ts", content: "a" }, { kind: "full_content", path: "src/z.ts", content: "z" }] },
-			{ unitId: "change_unit_b", writes: [{ kind: "full_content", path: "src/b.ts", content: "b" }] },
+            { unitId: "change_unit_0000", writes: [{ kind: "full_content", path: "src/a.ts", content: "a" }, { kind: "full_content", path: "src/z.ts", content: "z" }] },
+            { unitId: "change_unit_0001", writes: [{ kind: "full_content", path: "src/b.ts", content: "b" }] },
 		]);
 		expect(first.issues).toEqual([]);
 		expect(second.issues).toEqual([]);
@@ -46,12 +46,12 @@ describe("write manifest contract", () => {
 
 	test("content changes manifest identity", () => {
 		const first = inspect([
-			{ unitId: "change_unit_a", writes: [{ kind: "full_content", path: "src/a.ts", content: "a" }, { kind: "full_content", path: "src/z.ts", content: "z" }] },
-			{ unitId: "change_unit_b", writes: [{ kind: "full_content", path: "src/b.ts", content: "b" }] },
+            { unitId: "change_unit_0000", writes: [{ kind: "full_content", path: "src/a.ts", content: "a" }, { kind: "full_content", path: "src/z.ts", content: "z" }] },
+            { unitId: "change_unit_0001", writes: [{ kind: "full_content", path: "src/b.ts", content: "b" }] },
 		]);
 		const second = inspect([
-			{ unitId: "change_unit_a", writes: [{ kind: "full_content", path: "src/a.ts", content: "a" }, { kind: "full_content", path: "src/z.ts", content: "z" }] },
-			{ unitId: "change_unit_b", writes: [{ kind: "full_content", path: "src/b.ts", content: "changed" }] },
+            { unitId: "change_unit_0000", writes: [{ kind: "full_content", path: "src/a.ts", content: "a" }, { kind: "full_content", path: "src/z.ts", content: "z" }] },
+            { unitId: "change_unit_0001", writes: [{ kind: "full_content", path: "src/b.ts", content: "changed" }] },
 		]);
 		expect(first.parsed?.digest).not.toBe(second.parsed?.digest);
 	});
@@ -59,7 +59,7 @@ describe("write manifest contract", () => {
 	test("reports deterministic aggregate issues", () => {
 		const result = inspect([
 			{ unitId: "change_unit_unknown", writes: [] },
-			{ unitId: "change_unit_a", writes: [{ kind: "delete", path: "../escape.ts", content: "x" }, { kind: "full_content", path: "src/not-owned.ts", content: "x" }] },
+			{ unitId: "change_unit_0000", writes: [{ kind: "delete", path: "../escape.ts", content: "x" }, { kind: "full_content", path: "src/not-owned.ts", content: "x" }] },
 		]);
 		expect(result.parsed).toBeUndefined();
 		expect(result.issues.map(issue => issue.code)).toEqual(["unknown_unit", "missing_unit_entry", "empty_writes", "unsupported_operation", "path_not_owned"]);
@@ -67,8 +67,8 @@ describe("write manifest contract", () => {
 
 	test("rejects lexically unsafe paths before ownership", () => {
 		const result = inspect([
-			{ unitId: "change_unit_a", writes: [{ kind: "full_content", path: "../escape.ts", content: "x" }] },
-			{ unitId: "change_unit_b", writes: [{ kind: "full_content", path: "src/b.ts", content: "b" }] },
+			{ unitId: "change_unit_0000", writes: [{ kind: "full_content", path: "../escape.ts", content: "x" }] },
+			{ unitId: "change_unit_0001", writes: [{ kind: "full_content", path: "src/b.ts", content: "b" }] },
 		]);
 		expect(result.issues.map(issue => issue.code)).toContain("unsafe_path");
 		expect(result.issues.map(issue => issue.code)).not.toContain("path_not_owned");
@@ -76,8 +76,8 @@ describe("write manifest contract", () => {
 
 	test("rejects normalized same-wave path ambiguity", () => {
 		const result = inspect([
-			{ unitId: "change_unit_a", writes: [{ kind: "full_content", path: "src/./shared.ts", content: "a" }, { kind: "full_content", path: "src/z.ts", content: "z" }] },
-			{ unitId: "change_unit_b", writes: [{ kind: "full_content", path: "src/shared.ts", content: "b" }] },
+			{ unitId: "change_unit_0000", writes: [{ kind: "full_content", path: "src/./shared.ts", content: "a" }, { kind: "full_content", path: "src/z.ts", content: "z" }] },
+			{ unitId: "change_unit_0001", writes: [{ kind: "full_content", path: "src/shared.ts", content: "b" }] },
 		], plan(true));
 		expect(result.issues.map(issue => issue.code)).toContain("duplicate_wave_path");
 	});
@@ -91,8 +91,8 @@ describe("write manifest contract", () => {
 			changePlanId: "change_plan_test",
 			planDigest: "0".repeat(64),
 			entries: [
-				{ unitId: "change_unit_a", writes: [{ kind: "full_content", path: "src/a.ts", content: "a" }, { kind: "full_content", path: "src/z.ts", content: "z" }] },
-				{ unitId: "change_unit_b", writes: [{ kind: "full_content", path: "src/b.ts", content: "b" }] },
+				{ unitId: "change_unit_0000", writes: [{ kind: "full_content", path: "src/a.ts", content: "a" }, { kind: "full_content", path: "src/z.ts", content: "z" }] },
+				{ unitId: "change_unit_0001", writes: [{ kind: "full_content", path: "src/b.ts", content: "b" }] },
 			],
 		}, targetPlan, digest);
 		expect(result.issues.map(issue => issue.code)).toContain("plan_digest_mismatch");

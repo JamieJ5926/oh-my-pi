@@ -14,27 +14,19 @@ import type { OutputMeta } from "./output-meta";
 import { toolResult } from "./tool-result";
 
 const batchPlanUnitSchema = type({
-	unitId: "string > 0",
 	objective: "string > 0",
 	ownedPaths: type("string > 0").array().atLeastLength(1),
-	"dependencyIds?": type("string").array(),
+	"dependencyUnitIndexes?": type("number").array(),
 	validationCommands: type("string > 0").array().atLeastLength(1),
 	"isolation?": type("'patch' | 'worktree'"),
 });
-
-const batchPlanSchema = type({
-	objective: "string > 0",
-	units: batchPlanUnitSchema.array().atLeastLength(1),
-});
-
+const batchPlanSchema = type({ objective: "string > 0", units: batchPlanUnitSchema.array().atLeastLength(1) });
 type BatchPlanParams = typeof batchPlanSchema.infer;
 type UnknownObject = Readonly<Record<string, unknown>>;
-
 interface BatchPlanUnitInput {
-	readonly unitId: string;
 	readonly objective: string;
 	readonly ownedPaths: readonly [string, ...string[]];
-	readonly dependencyIds: readonly string[];
+	readonly dependencyUnitIndexes: readonly number[];
 	readonly validationCommands: readonly [string, ...string[]];
 	readonly isolation: ChangeIsolation;
 }
@@ -60,7 +52,7 @@ interface BatchPlanDetails {
 	meta?: OutputMeta;
 }
 
-const UNIT_KEYS = new Set(["unitId", "objective", "ownedPaths", "dependencyIds", "validationCommands", "isolation"]);
+const UNIT_KEYS = new Set(["objective", "ownedPaths", "dependencyUnitIndexes", "validationCommands", "isolation"]);
 const MAX_PLAN_UNITS = 128;
 const MAX_UNIT_PATHS = 64;
 const MAX_VALIDATION_COMMANDS = 32;
@@ -81,24 +73,17 @@ function parseUnitInput(value: unknown, index: number): BatchPlanUnitInput {
 	const input = value as UnknownObject;
 	const unexpected = Object.keys(input).filter(key => !UNIT_KEYS.has(key));
 	if (unexpected.length > 0) throw new Error(`units[${index}] has unsupported fields: ${unexpected.sort().join(", ")}`);
-	if (typeof input.unitId !== "string" || input.unitId.length > MAX_TEXT_LENGTH) throw new Error(`units[${index}].unitId must be a bounded string`);
 	if (typeof input.objective !== "string" || input.objective.trim().length === 0 || input.objective.length > MAX_TEXT_LENGTH) throw new Error(`units[${index}].objective must be a bounded non-blank string`);
-	const dependencyIds = input.dependencyIds === undefined ? [] : input.dependencyIds;
-	if (!Array.isArray(dependencyIds) || dependencyIds.length > MAX_PLAN_UNITS || dependencyIds.some(item => typeof item !== "string")) throw new Error(`units[${index}].dependencyIds must be a bounded array of strings`);
+	const dependencyUnitIndexes = input.dependencyUnitIndexes === undefined ? [] : input.dependencyUnitIndexes;
+	if (!Array.isArray(dependencyUnitIndexes) || dependencyUnitIndexes.length > MAX_PLAN_UNITS || dependencyUnitIndexes.some(item => typeof item !== "number" || !Number.isInteger(item) || item < 0 || item >= MAX_PLAN_UNITS || item === index)) throw new Error(`units[${index}].dependencyUnitIndexes must contain integer indexes in range and not self`);
+	if (new Set(dependencyUnitIndexes).size !== dependencyUnitIndexes.length) throw new Error(`units[${index}].dependencyUnitIndexes must contain unique indexes`);
 	if (input.isolation !== undefined && input.isolation !== "patch" && input.isolation !== "worktree") throw new Error(`units[${index}].isolation must be patch or worktree`);
 	const ownedPaths = nonEmptyStrings(input.ownedPaths, `units[${index}].ownedPaths`);
 	const validationCommands = nonEmptyStrings(input.validationCommands, `units[${index}].validationCommands`);
+	if (ownedPaths.some(value => value.length > MAX_TEXT_LENGTH) || validationCommands.some(value => value.length > MAX_TEXT_LENGTH)) throw new Error(`units[${index}] contains an overlong path or command`);
 	if (ownedPaths.length > MAX_UNIT_PATHS) throw new Error(`units[${index}].ownedPaths exceeds ${MAX_UNIT_PATHS}`);
 	if (validationCommands.length > MAX_VALIDATION_COMMANDS) throw new Error(`units[${index}].validationCommands exceeds ${MAX_VALIDATION_COMMANDS}`);
-	if (ownedPaths.some(value => value.length > MAX_TEXT_LENGTH) || validationCommands.some(value => value.length > MAX_TEXT_LENGTH)) throw new Error(`units[${index}] contains an overlong path or command`);
-	return {
-		unitId: input.unitId,
-		objective: input.objective,
-		ownedPaths,
-		dependencyIds: dependencyIds as readonly string[],
-		validationCommands,
-		isolation: input.isolation ?? "patch",
-	};
+	return { objective: input.objective, ownedPaths, dependencyUnitIndexes: dependencyUnitIndexes as readonly number[], validationCommands, isolation: input.isolation ?? "patch" };
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -163,11 +148,11 @@ export class BatchPlanTool implements AgentTool<typeof batchPlanSchema, BatchPla
 		const callDigest = createHash("sha256").update(toolCallId, "utf8").digest("hex").slice(0, 32);
 		const changePlanId = createChangePlanId(`change_plan_${callDigest}`);
 		const operationId = createOperationId(`op_${callDigest}`);
-		const units = inputs.map<ChangeUnit>(input => ({
-			unitId: createChangeUnitId(input.unitId),
+		const units = inputs.map<ChangeUnit>((input, index) => ({
+			unitId: createChangeUnitId(`change_unit_${String(index).padStart(4, "0")}`),
 			objective: input.objective,
 			ownedPaths: input.ownedPaths,
-			dependencyIds: input.dependencyIds.map(createChangeUnitId),
+			dependencyIds: input.dependencyUnitIndexes.map(dependencyIndex => createChangeUnitId(`change_unit_${String(dependencyIndex).padStart(4, "0")}`)),
 			validationCommands: input.validationCommands,
 			isolation: input.isolation,
 		}));

@@ -209,7 +209,7 @@ export class BatchWriteTool implements AgentTool<typeof batchWriteSchema, BatchW
 	readonly description = batchWriteDescription;
 	readonly parameters = batchWriteSchema;
 	readonly strict = true;
-
+	readonly lenientArgValidation = true;
 	readonly approval = (): "write" => "write";
 
 	readonly formatApprovalDetails = (args: unknown): string[] => {
@@ -239,6 +239,27 @@ export class BatchWriteTool implements AgentTool<typeof batchWriteSchema, BatchW
 		_onUpdate?: AgentToolUpdateCallback<BatchWriteDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<BatchWriteDetails>> {
+ 		const raw = params as unknown;
+ 		const requestIssues: ManifestIssue[] = [];
+ 		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+ 			requestIssues.push({ code: "schema_invalid", message: "batch write arguments must be an object" });
+ 		} else {
+ 			const request = raw as Record<string, unknown>;
+ 			if (Object.keys(request).some(key => key !== "artifactUri" && key !== "manifest")) requestIssues.push({ code: "schema_invalid", message: "batch write arguments must contain only artifactUri and manifest" });
+ 			if (typeof request.artifactUri !== "string" || request.artifactUri.trim().length === 0) requestIssues.push({ code: "schema_invalid", message: "artifactUri must be a non-blank string" });
+ 			const manifest = request.manifest;
+ 			if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) requestIssues.push({ code: "schema_invalid", message: "manifest must be an object" });
+ 			else {
+ 				const m = manifest as Record<string, unknown>;
+ 				if (Object.keys(m).some(key => !["schemaVersion", "operationId", "changePlanId", "planDigest", "entries"].includes(key))) requestIssues.push({ code: "schema_invalid", message: "manifest must contain only schemaVersion, operationId, changePlanId, planDigest, and entries" });
+ 				if (!("entries" in m) || !Array.isArray(m.entries)) requestIssues.push({ code: "schema_invalid", message: "entries must be a non-empty array" });
+ 			}
+ 		}
+ 		if (requestIssues.length > 0) {
+			const details: BatchWriteDetails = { status: "preflight_rejected", waves: [], patches: [], states: [], appliedPaths: [], pendingPaths: [], issues: requestIssues };
+			const example = `Example: { artifactUri: "local://plan.json", manifest: { schemaVersion: "1", operationId: "op_example", changePlanId: "change_plan_example", planDigest: "<sha256>", entries: [] } }`;
+			return toolResult<BatchWriteDetails>(details).text([...requestIssues.map(item => `${item.code}: ${item.message}`), example].join("\n")).error().done();
+ 		}
 		const invalidArtifact = (message: string): AgentToolResult<BatchWriteDetails> => toolResult<BatchWriteDetails>({
 			status: "preflight_rejected",
 			waves: [],

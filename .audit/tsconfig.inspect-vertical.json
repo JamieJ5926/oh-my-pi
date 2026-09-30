@@ -1,0 +1,12 @@
+{
+  "extends": "../packages/coding-agent/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "../packages/coding-agent/src/capability/job-executor.ts",
+    "../packages/coding-agent/src/capability/contracts/**/*.ts",
+    "../packages/coding-agent/src/capability/inspect/**/*.ts",
+    "../packages/coding-agent/test/capability/inspect/**/*.ts"
+  ]
+}

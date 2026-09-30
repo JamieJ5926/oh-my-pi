@@ -26,6 +26,8 @@ Validates an implementer-authored write manifest against a structural plan artif
 
 Every plan unit needs exactly one manifest entry and at least one write. Paths must be workspace-relative, safe, and owned by the matching unit. Validation happens before any workspace write. The validated manifest is content-addressed and published before application.
 
+Start from the `batchWriteRequestTemplate` that `batch_plan` returned. Copy `artifactUri`, `operationId`, `changePlanId`, `planDigest`, and every `unitId` verbatim from the template and fill in only the `writes` arrays. Never retype these values; a single transposed character in `artifactUri` makes the plan artifact unresolvable.
+
 Writes run sequentially by plan wave, unit ID, and normalized path. A failure stops later work. The result distinguishes intended patches from paths that actually completed.
 
 ## Returns

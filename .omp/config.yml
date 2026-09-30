@@ -1,0 +1,12 @@
+roleProfiles:
+  basic-jcode:
+    agents:
+      - basic-jcode
+    tools:
+      - read
+    model_role: default
+    minimalPrompt: true
+    softRequestBudget: 8
+    restrictToolNames: true
+    execution_backend: jcode
+    jcode_provider: openai

@@ -1,0 +1,539 @@
+From 18f749bcc5b15a89715b4c04e3ea9c23282a53ea Mon Sep 17 00:00:00 2001
+From: Jamie <jamie@Jamies-MacBook-Pro.local>
+Date: Sat, 29 Aug 2026 17:45:55 +1200
+Subject: [PATCH] feat: roleProfiles spawns/restrictToolNames + read tool
+ empty-path guard
+
+---
+ .../test/read-malformed-call-recovery.test.ts | 99 +++++++++++++++++++
+ .../src/config/settings-schema.ts             | 14 +++
+ .../src/task/structured-subagent.ts           | 80 +++++++++++++--
+ packages/coding-agent/src/tools/read.ts       |  3 +
+ .../test/task/role-profiles.test.ts           | 92 +++++++++++++++++
+ .../test/task/structured-subagent.test.ts     | 21 ++++
+ .../test/tools/read-empty-path-guard.test.ts  | 61 ++++++++++++
+ 7 files changed, 364 insertions(+), 6 deletions(-)
+
+diff --git a/packages/agent/test/read-malformed-call-recovery.test.ts b/packages/agent/test/read-malformed-call-recovery.test.ts
+new file mode 100644
+index 0000000000..c78229bc0a
+--- /dev/null
++++ b/packages/agent/test/read-malformed-call-recovery.test.ts
+@@ -0,0 +1,99 @@
++import { describe, expect, it } from "bun:test";
++import { type } from "@oh-my-pi/omptype";
++import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
++import type { AgentContext, AgentEvent, AgentLoopConfig, AgentTool } from "@oh-my-pi/pi-agent-core/types";
++import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
++import { createUserMessage } from "./helpers";
++
++function identityConverter(messages: unknown[]): unknown[] {
++	return (messages as Array<{ role: string }>).filter(
++		m => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
++	);
++}
++
++describe("malformed read({}) tool call recovery", () => {
++	it("returns an isError tool result when read is called with empty arguments, then the model retries", async () => {
++		const readSchema = type({ path: "string" });
++		const executions: string[] = [];
++		const tool: AgentTool<typeof readSchema, { path: string }> = {
++			name: "read",
++			label: "Read",
++			description: "Read files",
++			parameters: readSchema,
++			async execute(_id, params) {
++				executions.push(params.path);
++				return { content: [{ type: "text" as const, text: `contents of ${params.path}` }] };
++			},
++		};
++
++		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [tool] };
++
++		const mock = createMockModel({
++			responses: [
++				// Turn 1: model sends read with empty args (the Gemini bug)
++				{
++					content: [
++						{ type: "toolCall", id: "tc-1", name: "read", arguments: {} },
++					],
++				},
++				// Turn 2: model retries with correct args after receiving error
++				{
++					content: [
++						{ type: "toolCall", id: "tc-2", name: "read", arguments: { path: "src/main.ts" } },
++					],
++				},
++				// Turn 3: model responds with final answer
++				{ content: ["Done reading the file."] },
++			],
++		});
++
++		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter as AgentLoopConfig["convertToLlm"] };
++		const events: AgentEvent[] = [];
++		const stream = agentLoop([createUserMessage("read src/main.ts")], context, config, undefined, mock.stream);
++
++		for await (const event of stream) {
++			events.push(event);
++		}
++
++		// The first call should have produced a validation error (isError: true)
++		const toolEnds = events.filter(e => e.type === "tool_execution_end");
++		expect(toolEnds.length).toBe(2);
++
++		const firstEnd = toolEnds[0];
++		if (firstEnd.type !== "tool_execution_end") throw new Error("unexpected");
++		expect(firstEnd.isError).toBe(true);
++
++		const errorContent = firstEnd.result.content;
++		const errorText = errorContent
++			.filter((c: { type: string }): c is { type: "text"; text: string } => c.type === "text")
++			.map((c: { type: "text"; text: string }) => c.text)
++			.join("\n");
++		expect(errorText).toContain("path");
++
++		// The second call should succeed
++		const secondEnd = toolEnds[1];
++		if (secondEnd.type !== "tool_execution_end") throw new Error("unexpected");
++		expect(secondEnd.isError).toBe(false);
++		const successContent = secondEnd.result.content;
++		const successText = successContent
++			.filter((c: { type: string }): c is { type: "text"; text: string } => c.type === "text")
++			.map((c: { type: "text"; text: string }) => c.text)
++			.join("\n");
++		expect(successText).toContain("contents of src/main.ts");
++
++		// execute was called only once (the valid call), not for the malformed one
++		expect(executions).toEqual(["src/main.ts"]);
++
++		// The model got a third turn to produce the final answer
++		const messages = await stream.result();
++		const lastMsg = messages[messages.length - 1];
++		expect(lastMsg.role).toBe("assistant");
++		if (lastMsg.role === "assistant") {
++			const finalText = (lastMsg.content as Array<{ type: string; text?: string }>)
++				.filter((c): c is { type: "text"; text: string } => c.type === "text")
++				.map(c => c.text)
++				.join("");
++			expect(finalText).toBe("Done reading the file.");
++		}
++	});
++});
+diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
+index 3276224769..6f8a400bd5 100644
+--- a/packages/coding-agent/src/config/settings-schema.ts
++++ b/packages/coding-agent/src/config/settings-schema.ts
+@@ -86,6 +86,17 @@ import {
+ 
+ export type ModelRoleStorage = "global" | "project";
+ 
++/** Per-role runtime profile: tools, model role, prompt/budget overrides. */
++export interface RoleProfileConfig {
++	agents: string[];
++	tools: string[];
++	model_role: string;
++	minimalPrompt: boolean;
++	softRequestBudget: number;
++	restrictToolNames?: boolean;
++}
++
++
+ const BUILTIN_BLOB_DESTINATION_METADATA: readonly BlobDestinationMetadata<BlobDestinationId>[] =
+ 	Object.values(BUILTIN_BLOB_DESTINATIONS);
+ 
+@@ -398,6 +409,7 @@ const EMPTY_NUMBER_RECORD: Record<string, number> = {};
+ const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
+ const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
+ const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
++const EMPTY_ROLE_PROFILES: Record<string, RoleProfileConfig> = {};
+ const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
+ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
+ 	{
+@@ -664,6 +676,8 @@ export const SETTINGS_SCHEMA = {
+ 
+ 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
+ 
++	roleProfiles: { type: "record", default: EMPTY_ROLE_PROFILES },
++
+ 	modelProviderOrder: { type: "array", default: EMPTY_STRING_ARRAY },
+ 
+ 	cycleOrder: { type: "array", default: DEFAULT_CYCLE_ORDER },
+diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
+index e9b818c757..4ca7fe4354 100644
+--- a/packages/coding-agent/src/task/structured-subagent.ts
++++ b/packages/coding-agent/src/task/structured-subagent.ts
+@@ -9,6 +9,8 @@ import * as os from "node:os";
+ import path from "node:path";
+ import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+ import { resolveAgentModelSelection } from "../config/model-resolver";
++import type { RoleProfileConfig } from "../config/settings-schema";
++import type { ExecutionBackendRegistry } from "../bridge/index";
+ import type { LocalProtocolOptions } from "../internal-urls";
+ import { registerArtifactsDir } from "../internal-urls/registry-helpers";
+ import { MCPManager } from "../mcp/manager";
+@@ -114,6 +116,10 @@ export interface StructuredSubagentRequest {
+ 	maxRuntimeMs?: number;
+ 	signal?: AbortSignal;
+ 	onProgress?: (progress: AgentProgress) => void;
++	/** Execution backend selector; defaults to local. */
++	executionBackend?: "local" | "pi" | "jcode";
++	/** Optional backend registry supplied by the caller. */
++	executionBackendRegistry?: ExecutionBackendRegistry;
+ }
+ 
+ /** A normalized preflight result, reusable by tests and adapters. */
+@@ -133,6 +139,12 @@ export interface EffectiveSubagentPolicy {
+ 	applyChanges: boolean;
+ 	enableLsp: boolean;
+ 	enableIrc: boolean;
++	/** True when this agent uses the stripped subagent prompt. */
++	minimalPrompt: boolean;
++	/** Profile-level soft request budget; undefined keeps executor fallback. */
++	softRequestBudget?: number;
++	/** Profile-level opt-in to suppress auto-added tools. */
++	restrictToolNames?: boolean;
+ }
+ 
+ /** Settled child execution plus data needed by the frontends' own rendering. */
+@@ -198,6 +210,46 @@ function createPlanModeAgent(agent: AgentDefinition): AgentDefinition {
+ 	};
+ }
+ 
++/**
++ * Agents that receive a minimal system prompt: no skills catalog, no rules,
++ * no workspace tree, no extra context files (AGENTS.md etc). Keeps tool
++ * schemas, role brief, yield schema. SYSTEM.md and APPEND_SYSTEM.md are
++ * preserved because they load through customSystemPrompt/resolvedCustomPrompt,
++ * not contextFiles. Scoped to read-only leaf roles only; managers/synthesizers/
++ * reviewers keep the full prompt. Vibe mode is unaffected (separate builder).
++ */
++const MINIMAL_PROMPT_AGENTS: Record<string, true> = {
++	explorer: true,
++	researcher: true,
++	watcher: true,
++	"research-gemini": true,
++	"research-grok": true,
++	"research-luna": true,
++};
++
++export function findRoleProfile(
++	profiles: Record<string, RoleProfileConfig> | undefined,
++	agentName: string,
++): RoleProfileConfig | undefined {
++	if (!profiles) return undefined;
++	for (const profile of Object.values(profiles)) {
++		if (profile?.agents?.includes(agentName)) return profile;
++	}
++	return undefined;
++}
++
++export function applyRoleProfile(agent: AgentDefinition, profile: RoleProfileConfig): AgentDefinition {
++	const modelRole = profile.model_role?.trim();
++	const profiled: AgentDefinition & { restrictToolNames: boolean } = {
++		...agent,
++		tools: [...profile.tools],
++		...(modelRole ? { model: [`@${modelRole.replace(/^@/, "")}`] } : {}),
++		spawns: profile.tools.includes("task") ? agent.spawns : undefined,
++		restrictToolNames: profile.restrictToolNames ?? false,
++	};
++	return profiled;
++}
++
+ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode: boolean): void {
+ 	if (!planMode) return;
+ 	const isolation = request.isolation;
+@@ -269,7 +321,10 @@ export async function resolveEffectiveSubagentPolicy(
+ 		);
+ 	}
+ 
+-	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
++	const roleProfiles = request.session.settings.get("roleProfiles") as Record<string, RoleProfileConfig> | undefined;
++	const roleProfile = findRoleProfile(roleProfiles, agentName);
++	const profiledAgent = roleProfile ? applyRoleProfile(agent, roleProfile) : agent;
++	const effectiveAgent = planMode ? createPlanModeAgent(profiledAgent) : profiledAgent;
+ 	const schema = resolveSchema(request, effectiveAgent);
+ 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
+ 		const { error } = buildOutputValidator(schema.schema);
+@@ -324,6 +379,9 @@ export async function resolveEffectiveSubagentPolicy(
+ 			(request.enableIrc ??
+ 				(request.session.enableIrc !== false &&
+ 					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
++		minimalPrompt: roleProfile?.minimalPrompt ?? MINIMAL_PROMPT_AGENTS[agentName] === true,
++		softRequestBudget: roleProfile?.softRequestBudget,
++		restrictToolNames: roleProfile?.restrictToolNames === true,
+ 	};
+ }
+ 
+@@ -371,6 +429,7 @@ function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
+ 	return { skills, autoloadSkills };
+ }
+ 
++
+ function buildExecutorOptions(
+ 	request: StructuredSubagentRequest,
+ 	policy: EffectiveSubagentPolicy,
+@@ -378,12 +437,16 @@ function buildExecutorOptions(
+ 	id: string,
+ ): ExecutorOptions {
+ 	const { session } = request;
+-	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
++	const minimal = policy.minimalPrompt;
++	const { skills, autoloadSkills } = minimal
++		? { skills: [], autoloadSkills: [] }
++		: resolveAutoloadSkills(session, policy.agent);
+ 	const localProtocolOptions: LocalProtocolOptions = session.localProtocolOptions ?? {
+ 		getArtifactsDir: session.getArtifactsDir ?? (() => null),
+ 		getSessionId: session.getSessionId ?? (() => null),
+ 	};
+-	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
++	const restrictToolNames =
++		policy.planMode || session.restrictToolNames === true || policy.restrictToolNames === true;
+ 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+ 	return {
+ 		cwd: session.cwd,
+@@ -433,12 +496,14 @@ function buildExecutorOptions(
+ 		settings: session.settings,
+ 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
+ 		enableMCP,
+-		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
++		contextFiles: minimal
++			? []
++			: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
+ 		skills,
+ 		autoloadSkills,
+-		workspaceTree: session.workspaceTree,
++		workspaceTree: minimal ? undefined : session.workspaceTree,
+ 		promptTemplates: session.promptTemplates,
+-		rules: session.rules,
++		rules: minimal ? [] : session.rules,
+ 		// Root policy and module paths have separate jobs: the live policy drives
+ 		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
+ 		// parent-bound extension instances while constructing the child.
+@@ -450,10 +515,13 @@ function buildExecutorOptions(
+ 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
+ 		parentHindsightSessionState: session.getHindsightSessionState?.(),
+ 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
++		executionBackend: request.executionBackend ?? "local",
++		executionBackendRegistry: request.executionBackendRegistry,
+ 		parentTelemetry: session.getTelemetry?.(),
+ 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
+ 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
+ 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
++		softRequestBudget: policy.softRequestBudget,
+ 	};
+ }
+ 
+diff --git a/packages/coding-agent/src/tools/read.ts b/packages/coding-agent/src/tools/read.ts
+index c98a637616..edcbe452a5 100644
+--- a/packages/coding-agent/src/tools/read.ts
++++ b/packages/coding-agent/src/tools/read.ts
+@@ -1069,6 +1069,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
+ 		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
+ 		toolContext?: AgentToolContext,
+ 	): Promise<AgentToolResult<ReadToolDetails>> {
++		if (typeof params?.path !== "string" || params.path.trim().length === 0) {
++			throw new ToolError("Missing required parameter 'path'. Provide a local path, internal URI, or URL.");
++		}
+ 		const result = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
+ 		appendRepeatReadHint(this.session, params.path, result);
+ 		return result;
+diff --git a/packages/coding-agent/test/task/role-profiles.test.ts b/packages/coding-agent/test/task/role-profiles.test.ts
+new file mode 100644
+index 0000000000..a978c0591e
+--- /dev/null
++++ b/packages/coding-agent/test/task/role-profiles.test.ts
+@@ -0,0 +1,92 @@
++import { describe, expect, it } from "bun:test";
++import type { RoleProfileConfig } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
++import { applyRoleProfile, findRoleProfile } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
++import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
++
++type AppliedRoleProfileAgent = AgentDefinition & { restrictToolNames: boolean };
++
++const leafProfile: RoleProfileConfig = {
++	agents: ["explorer", "researcher"],
++	tools: ["read", "grep", "glob"],
++	model_role: "explorer",
++	minimalPrompt: true,
++	softRequestBudget: 8,
++};
++
++const managerProfile: RoleProfileConfig = {
++	agents: ["manager"],
++	tools: ["read", "task", "yield"],
++	model_role: "@manager",
++	minimalPrompt: false,
++	softRequestBudget: 20,
++};
++
++const profiles: Record<string, RoleProfileConfig> = {
++	leaf: leafProfile,
++	manager: managerProfile,
++};
++
++const spawningAgent: AgentDefinition = {
++	name: "explorer",
++	description: "test agent",
++	systemPrompt: "test",
++	source: "bundled",
++	tools: ["read", "write", "task"],
++	spawns: ["scout"],
++	model: ["anthropic/opus"],
++};
++
++describe("findRoleProfile", () => {
++	it("returns the profile whose agents list includes the known agent", () => {
++		expect(findRoleProfile(profiles, "explorer")).toBe(leafProfile);
++		expect(findRoleProfile(profiles, "manager")).toBe(managerProfile);
++	});
++
++	it("returns undefined for an unknown agent", () => {
++		expect(findRoleProfile(profiles, "unknown-agent")).toBeUndefined();
++		expect(findRoleProfile(undefined, "explorer")).toBeUndefined();
++		expect(findRoleProfile({}, "explorer")).toBeUndefined();
++	});
++});
++
++describe("applyRoleProfile", () => {
++	it("sets tools from the profile, not the agent definition", () => {
++		const applied = applyRoleProfile(spawningAgent, leafProfile);
++		expect(applied.tools).toEqual(["read", "grep", "glob"]);
++		expect(applied.tools).not.toBe(leafProfile.tools);
++	});
++
++	it("clears spawns when task is not in profile.tools", () => {
++		const applied = applyRoleProfile(spawningAgent, leafProfile);
++		expect(leafProfile.tools.includes("task")).toBe(false);
++		expect(applied.spawns).toBeUndefined();
++	});
++
++	it("preserves spawns when task is in profile.tools", () => {
++		const applied = applyRoleProfile(spawningAgent, managerProfile);
++		expect(managerProfile.tools.includes("task")).toBe(true);
++		expect(applied.spawns).toEqual(["scout"]);
++	});
++
++	it("sets model from model_role as an @model reference", () => {
++		expect(applyRoleProfile(spawningAgent, leafProfile).model).toEqual(["@explorer"]);
++		expect(applyRoleProfile(spawningAgent, managerProfile).model).toEqual(["@manager"]);
++	});
++
++	it("passes restrictToolNames true through to the applied agent", () => {
++		const restricted: RoleProfileConfig = { ...leafProfile, restrictToolNames: true };
++		const applied = applyRoleProfile(spawningAgent, restricted) as AppliedRoleProfileAgent;
++		expect(applied.restrictToolNames).toBe(true);
++	});
++
++	it("defaults omitted restrictToolNames to false on the applied agent", () => {
++		expect(leafProfile.restrictToolNames).toBeUndefined();
++		const omitted = applyRoleProfile(spawningAgent, leafProfile) as AppliedRoleProfileAgent;
++		expect(omitted.restrictToolNames).toBe(false);
++		const explicitFalse = applyRoleProfile(spawningAgent, {
++			...leafProfile,
++			restrictToolNames: false,
++		}) as AppliedRoleProfileAgent;
++		expect(explicitFalse.restrictToolNames).toBe(false);
++	});
++});
+diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
+index 1930a89077..a9693ccb3b 100644
+--- a/packages/coding-agent/test/task/structured-subagent.test.ts
++++ b/packages/coding-agent/test/task/structured-subagent.test.ts
+@@ -167,6 +167,27 @@ describe("structured subagent primitive", () => {
+ 		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
+ 		expect(discover).not.toHaveBeenCalled();
+ 	});
++
++	it("reads restrictToolNames from the matching roleProfiles setting at the policy layer", async () => {
++		mockDiscovery();
++		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
++		childSession.settings.override("roleProfiles", {
++			restricted_worker: {
++				agents: ["worker"],
++				tools: ["read", "yield"],
++				model_role: "reviewer",
++				minimalPrompt: true,
++				softRequestBudget: 4,
++				restrictToolNames: true,
++			},
++		});
++
++		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
++
++		expect(policy.restrictToolNames).toBe(true);
++		expect(policy.effectiveAgent.tools).toEqual(["read", "yield"]);
++		expect(policy.effectiveAgent.spawns).toBeUndefined();
++	});
+ 	it("reloads model roles before resolving an agent added during the session", async () => {
+ 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
+ 		const projectDir = path.join(root, "project");
+diff --git a/packages/coding-agent/test/tools/read-empty-path-guard.test.ts b/packages/coding-agent/test/tools/read-empty-path-guard.test.ts
+new file mode 100644
+index 0000000000..31a2a04d2b
+--- /dev/null
++++ b/packages/coding-agent/test/tools/read-empty-path-guard.test.ts
+@@ -0,0 +1,61 @@
++import { beforeEach, describe, expect, it } from "bun:test";
++import * as os from "node:os";
++import * as path from "node:path";
++import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
++import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
++
++function makeSession(cwd: string): ToolSession {
++	return {
++		cwd,
++		hasUI: false,
++		getSessionFile: () => path.join(cwd, "session.jsonl"),
++		getSessionSpawns: () => "*",
++		getArtifactsDir: () => path.join(cwd, "session"),
++		settings: Settings.isolated(),
++	};
++}
++
++describe("ReadTool.execute empty/missing path guard", () => {
++	let tool: ReadTool;
++
++	beforeEach(() => {
++		tool = new ReadTool(makeSession(os.tmpdir()));
++	});
++
++	it("rejects undefined path", async () => {
++		await expect(tool.execute("t1", {} as unknown as Parameters<typeof tool.execute>[1])).rejects.toThrow(
++			"Missing required parameter 'path'",
++		);
++	});
++
++	it("rejects empty string path", async () => {
++		await expect(tool.execute("t2", { path: "" } as unknown as Parameters<typeof tool.execute>[1])).rejects.toThrow(
++			"Missing required parameter 'path'",
++		);
++	});
++
++	it("rejects whitespace-only path", async () => {
++		await expect(tool.execute("t3", { path: "   " } as unknown as Parameters<typeof tool.execute>[1])).rejects.toThrow(
++			"Missing required parameter 'path'",
++		);
++	});
++
++	it("rejects tab/newline path", async () => {
++		await expect(tool.execute("t4", { path: "\t\n" } as unknown as Parameters<typeof tool.execute>[1])).rejects.toThrow(
++			"Missing required parameter 'path'",
++		);
++	});
++
++	it("rejects null path", async () => {
++		await expect(tool.execute("t5", { path: null } as unknown as Parameters<typeof tool.execute>[1])).rejects.toThrow(
++			"Missing required parameter 'path'",
++		);
++	});
++
++	it("rejects numeric path", async () => {
++		await expect(tool.execute("t6", { path: 42 } as unknown as Parameters<typeof tool.execute>[1])).rejects.toThrow(
++			"Missing required parameter 'path'",
++		);
++	});
++});
+-- 
+2.55.0
+

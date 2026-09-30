@@ -1,0 +1,2 @@
+ts	phase	decision	why	evidence	result
+2026-09-01T00:00:00Z	implement	Widen inspect_many exclusions to full ScopeSelector including repository	CAPABILITY InspectManyRequest.exclusions is readonly ScopeSelector[]; ScopeSelector is path|glob|package|module|repository via parseSelector	packages/coding-agent/src/capability/contracts/manifest.ts:14-19 packages/coding-agent/src/capability/inspect/inspect-many.ts:100	schema+prompt aligned

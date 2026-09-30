@@ -10,12 +10,12 @@ The planner describes intent, ownership, dependencies, and validation. It does n
 {
   objective: string;
   units: Array<{
-    unitId: string;
     objective: string;
     ownedPaths: string[];
-    dependencyIds?: string[];
+    dependencyUnitIndexes?: number[];
     validationCommands: string[];
     isolation?: "patch" | "worktree";
+Each array position mints a stable `change_unit_0000`-style ID. Dependencies use zero-based `dependencyUnitIndexes`; indexes must be unique, in range, and non-self.
   }>;
 }
 ```

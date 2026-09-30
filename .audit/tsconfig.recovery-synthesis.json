@@ -1,0 +1,11 @@
+{
+  "extends": "../packages/coding-agent/tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  "include": [
+    "../packages/coding-agent/src/capability/contracts/**/*.ts",
+    "../packages/coding-agent/src/capability/recovery/**/*.ts",
+    "../packages/coding-agent/src/capability/synthesis/**/*.ts",
+    "../packages/coding-agent/test/capability/recovery/**/*.ts",
+    "../packages/coding-agent/test/capability/synthesis/**/*.ts"
+  ]
+}

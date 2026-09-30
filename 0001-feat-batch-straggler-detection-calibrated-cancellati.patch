@@ -1,0 +1,1759 @@
+From 2e29267c15a7431d2d071368b11658f4d042cf4f Mon Sep 17 00:00:00 2001
+From: Jamie <jamie@Jamies-MacBook-Pro.local>
+Date: Fri, 28 Aug 2026 22:10:26 +1200
+Subject: [PATCH] feat: batch straggler detection, calibrated cancellation,
+ retry-once, missing classification
+
+BatchStragglerTracker in AsyncJobManager with owner+batch scoping,
+max(floor, 2T) deadline, queued-job budget from actualStartedAt,
+STRAGGLER_CANCEL_REASON for distinct abort identity.
+
+TaskTool retry-once on straggler cancel with stragglerPolicy opt-in,
+late-generation suppression, exhausted->missing classification.
+
+8 tests, 79 assertions. Built binary regression smoke clean.
+---
+ .../coding-agent/src/async/job-manager.ts     | 228 +++++++++-
+ packages/coding-agent/src/task/index.ts       | 157 ++++++-
+ packages/coding-agent/src/task/render.ts      |   8 +-
+ packages/coding-agent/src/task/types.ts       |  41 +-
+ ...async-job-manager-straggler-cancel.test.ts | 101 +++++
+ .../async-job-manager-straggler-floor.test.ts |  60 +++
+ .../async-job-manager-straggler-queue.test.ts | 143 ++++++
+ .../test/straggler-integration.test.ts        | 164 +++++++
+ .../test/task/task-straggler-retry.test.ts    | 409 ++++++++++++++++++
+ 9 files changed, 1282 insertions(+), 29 deletions(-)
+
+diff --git a/packages/coding-agent/src/async/job-manager.ts b/packages/coding-agent/src/async/job-manager.ts
+index 9ada25c0b5..4c9228e083 100644
+--- a/packages/coding-agent/src/async/job-manager.ts
++++ b/packages/coding-agent/src/async/job-manager.ts
+@@ -5,6 +5,26 @@ const DELIVERY_RETRY_MAX_MS = 30_000;
+ const DELIVERY_RETRY_JITTER_MS = 200;
+ const DEFAULT_RETENTION_MS = 5 * 60 * 1000;
+ const DEFAULT_MAX_RUNNING_JOBS = 15;
++const MAX_TIMER_DELAY_MS = 2_147_483_647;
++export const TASK_CLASS_FLOORS = {
++	"local-read": 20_000,
++	grep: 25_000,
++	default: 30_000,
++	"web-research": 180_000,
++	"build-test": 300_000,
++} as const;
++
++const DEFAULT_STRAGGLER_FLOOR_MS = TASK_CLASS_FLOORS.default;
++
++function normalizeStragglerFloorMs(value: number | undefined): number {
++	if (value === undefined || !Number.isFinite(value) || value <= 0) {
++		return DEFAULT_STRAGGLER_FLOOR_MS;
++	}
++	return Math.floor(value);
++}
++
++/** Abort reason used only when the manager cancels an overdue batch sibling. */
++export const STRAGGLER_CANCEL_REASON = Symbol("AsyncJobManager straggler cancellation");
+ /** Abort reason used only when the owning session shuts down the entire manager. */
+ export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdown");
+ 
+@@ -37,6 +57,8 @@ export interface AsyncJob {
+ 	type: AsyncJobType;
+ 	status: "running" | "completed" | "failed" | "cancelled";
+ 	startTime: number;
++	/** Time this job left its caller-managed queue and began active work. */
++	actualStartedAt?: number;
+ 	label: string;
+ 	abortController: AbortController;
+ 	promise: Promise<void>;
+@@ -51,6 +73,14 @@ export interface AsyncJob {
+ 	 * supply an id (e.g. legacy tests, SDK consumers without an agent context).
+ 	 */
+ 	ownerId?: string;
++	/** Unique identity of one task-tool call. Meaningful only together with ownerId. */
++	batchId?: string;
++	/** Stable caller-defined identity shared by attempts of the same logical item. */
++	logicalItemId?: string;
++	/** Caller-defined attempt number for this logical item. */
++	attempt?: number;
++	/** Normalized minimum active-runtime budget used by this job's batch tracker. */
++	stragglerFloorMs?: number;
+ 	/**
+ 	 * Registry id of the subagent this job runs (task/tan/vibe jobs). Lets
+ 	 * job-view code link a job row to its AgentRegistry ref even when the job
+@@ -109,6 +139,14 @@ export interface AsyncJobRegisterOptions {
+ 	id?: string;
+ 	/** Registry id of the agent that owns this job; used to scope cancelAll. */
+ 	ownerId?: string;
++	/** Unique identity of one caller batch. The tracker also scopes it by ownerId. */
++	batchId?: string;
++	/** Stable caller-defined identity shared by attempts of the same logical item. */
++	logicalItemId?: string;
++	/** Caller-defined attempt number for this logical item. */
++	attempt?: number;
++	/** Minimum active-runtime budget. Defaults to 30 seconds for tracked task batches. */
++	stragglerFloorMs?: number;
+ 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
+ 	agentId?: string;
+ 	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
+@@ -125,6 +163,164 @@ export interface AsyncJobFilter {
+ 	ownerId?: string;
+ }
+ 
++
++interface BatchStragglerState {
++	readonly ownerId: string;
++	readonly batchId: string;
++	/** The set size is the number of jobs that registered successfully in this batch. */
++	readonly jobIds: Set<string>;
++	floorMs: number;
++	firstCompletedAt?: number;
++	firstCompletionDurationMs?: number;
++	timer?: NodeJS.Timeout;
++}
++
++type GetAsyncJob = (jobId: string) => AsyncJob | undefined;
++type CancelAsyncJob = (jobId: string, filter: AsyncJobFilter, reason?: unknown) => boolean;
++
++class BatchStragglerTracker {
++	/** Two-level key prevents collisions between arbitrary owner and batch strings. */
++	readonly #batchesByOwner = new Map<string, Map<string, BatchStragglerState>>();
++	readonly #getJob: GetAsyncJob;
++	readonly #cancelJob: CancelAsyncJob;
++
++	constructor(getJob: GetAsyncJob, cancelJob: CancelAsyncJob) {
++		this.#getJob = getJob;
++		this.#cancelJob = cancelJob;
++	}
++
++	register(job: AsyncJob): void {
++		if (job.type !== "task" || job.ownerId === undefined || job.batchId === undefined) return;
++
++		let batches = this.#batchesByOwner.get(job.ownerId);
++		if (!batches) {
++			batches = new Map<string, BatchStragglerState>();
++			this.#batchesByOwner.set(job.ownerId, batches);
++		}
++
++		let state = batches.get(job.batchId);
++		if (!state) {
++			state = {
++				ownerId: job.ownerId,
++				batchId: job.batchId,
++				jobIds: new Set<string>(),
++				floorMs: job.stragglerFloorMs ?? DEFAULT_STRAGGLER_FLOOR_MS,
++			};
++			batches.set(job.batchId, state);
++		}
++
++		state.jobIds.add(job.id);
++		state.floorMs = Math.max(state.floorMs, job.stragglerFloorMs ?? DEFAULT_STRAGGLER_FLOOR_MS);
++		if (job.status !== "running") {
++			this.onTerminal(job);
++			return;
++		}
++		this.#reschedule(state, Date.now());
++	}
++
++	onStarted(job: AsyncJob, startedAt: number = Date.now()): void {
++		if (job.ownerId === undefined || job.batchId === undefined) return;
++		const state = this.#batchesByOwner.get(job.ownerId)?.get(job.batchId);
++		if (!state || !state.jobIds.has(job.id)) return;
++		job.actualStartedAt ??= startedAt;
++		this.#reschedule(state, startedAt);
++	}
++
++	onTerminal(job: AsyncJob, settledAt: number = Date.now()): void {
++		if (job.ownerId === undefined || job.batchId === undefined) return;
++		const state = this.#batchesByOwner.get(job.ownerId)?.get(job.batchId);
++		if (!state || !state.jobIds.has(job.id)) return;
++
++		if (job.status === "completed" && state.firstCompletedAt === undefined) {
++			const startedAt = job.actualStartedAt ?? job.startTime;
++			state.firstCompletedAt = settledAt;
++			state.firstCompletionDurationMs = Math.max(0, settledAt - startedAt);
++		}
++
++		if (this.#allTerminal(state)) {
++			this.#deleteState(state);
++			return;
++		}
++		this.#reschedule(state, settledAt);
++	}
++
++	dispose(): void {
++		for (const batches of this.#batchesByOwner.values()) {
++			for (const state of batches.values()) {
++				clearTimeout(state.timer);
++			}
++		}
++		this.#batchesByOwner.clear();
++	}
++
++	#reschedule(state: BatchStragglerState, now: number): void {
++		if (state.timer) {
++			clearTimeout(state.timer);
++			state.timer = undefined;
++		}
++		if (state.jobIds.size < 2 || state.firstCompletionDurationMs === undefined) return;
++
++		const budgetMs = Math.max(state.floorMs, 2 * state.firstCompletionDurationMs);
++		let nextDeadline = Number.POSITIVE_INFINITY;
++		for (const jobId of state.jobIds) {
++			const sibling = this.#getJob(jobId);
++			if (
++				!sibling ||
++				sibling.ownerId !== state.ownerId ||
++				sibling.batchId !== state.batchId ||
++				sibling.status !== "running" ||
++				sibling.queued === true ||
++				sibling.actualStartedAt === undefined
++			) {
++				continue;
++			}
++			nextDeadline = Math.min(nextDeadline, sibling.actualStartedAt + budgetMs);
++		}
++		if (!Number.isFinite(nextDeadline)) return;
++
++		const timer = setTimeout(() => {
++			state.timer = undefined;
++			if (this.#batchesByOwner.get(state.ownerId)?.get(state.batchId) !== state) return;
++			const firedAt = Date.now();
++			for (const jobId of state.jobIds) {
++				const sibling = this.#getJob(jobId);
++				if (
++					!sibling ||
++					sibling.ownerId !== state.ownerId ||
++					sibling.batchId !== state.batchId ||
++					sibling.status !== "running" ||
++					sibling.queued === true ||
++					sibling.actualStartedAt === undefined ||
++					firedAt - sibling.actualStartedAt < budgetMs
++				) {
++					continue;
++				}
++				this.#cancelJob(sibling.id, { ownerId: state.ownerId }, STRAGGLER_CANCEL_REASON);
++			}
++
++			if (this.#allTerminal(state)) this.#deleteState(state);
++			else this.#reschedule(state, firedAt);
++		}, Math.min(MAX_TIMER_DELAY_MS, Math.max(0, nextDeadline - now)));
++		timer.unref();
++		state.timer = timer;
++	}
++
++	#allTerminal(state: BatchStragglerState): boolean {
++		for (const jobId of state.jobIds) {
++			if (this.#getJob(jobId)?.status === "running") return false;
++		}
++		return true;
++	}
++
++	#deleteState(state: BatchStragglerState): void {
++		const batches = this.#batchesByOwner.get(state.ownerId);
++		if (batches?.get(state.batchId) !== state) return;
++		clearTimeout(state.timer);
++		batches.delete(state.batchId);
++		if (batches.size === 0) this.#batchesByOwner.delete(state.ownerId);
++	}
++}
++
+ export class AsyncJobManager {
+ 	static #instance: AsyncJobManager | undefined;
+ 
+@@ -144,6 +340,10 @@ export class AsyncJobManager {
+ 	}
+ 
+ 	readonly #jobs = new Map<string, AsyncJob>();
++	readonly #batchStragglerTracker = new BatchStragglerTracker(
++		jobId => this.#jobs.get(jobId),
++		(jobId, filter, reason) => this.cancel(jobId, filter, reason),
++	);
+ 	readonly #deliveries: AsyncJobDelivery[] = [];
+ 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
+ 	readonly #suppressedDeliveries = new Set<string>();
+@@ -218,16 +418,24 @@ export class AsyncJobManager {
+ 		this.#consumedJobResults.delete(id);
+ 		const abortController = new AbortController();
+ 		const startTime = Date.now();
++		const batchId = options?.batchId?.trim() || undefined;
++		const stragglerFloorMs =
++			batchId === undefined ? undefined : normalizeStragglerFloorMs(options?.stragglerFloorMs);
+ 
+ 		const job: AsyncJob = {
+ 			id,
+ 			type,
+ 			status: "running",
+ 			startTime,
++			actualStartedAt: options?.queued === true ? undefined : startTime,
+ 			label,
+ 			abortController,
+ 			promise: Promise.resolve(),
+ 			ownerId: options?.ownerId,
++			batchId,
++			logicalItemId: options?.logicalItemId,
++			attempt: options?.attempt,
++			stragglerFloorMs,
+ 			agentId: options?.agentId,
+ 			queued: options?.queued === true,
+ 		};
+@@ -252,32 +460,41 @@ export class AsyncJobManager {
+ 					reportProgress,
+ 					markRunning: () => {
+ 						job.queued = false;
++						if (job.actualStartedAt === undefined) {
++							job.actualStartedAt = Date.now();
++							this.#batchStragglerTracker.onStarted(job, job.actualStartedAt);
++						}
+ 					},
+ 				});
+ 				if (job.status === "cancelled") {
+ 					job.resultText = text;
++					this.#batchStragglerTracker.onTerminal(job);
+ 					this.#scheduleEviction(id);
+ 					return;
+ 				}
+ 				job.status = "completed";
+ 				job.resultText = text;
++				this.#batchStragglerTracker.onTerminal(job);
+ 				this.#enqueueDelivery(id, text);
+ 				this.#scheduleEviction(id);
+ 			} catch (error) {
+ 				if (job.status === "cancelled") {
+ 					job.errorText = error instanceof Error ? error.message : String(error);
++					this.#batchStragglerTracker.onTerminal(job);
+ 					this.#scheduleEviction(id);
+ 					return;
+ 				}
+ 				const errorText = error instanceof Error ? error.message : String(error);
+ 				job.status = "failed";
+ 				job.errorText = errorText;
++				this.#batchStragglerTracker.onTerminal(job);
+ 				this.#enqueueDelivery(id, errorText);
+ 				this.#scheduleEviction(id);
+ 			}
+ 		})();
+ 
+ 		this.#jobs.set(id, job);
++		this.#batchStragglerTracker.register(job);
+ 		return id;
+ 	}
+ 
+@@ -286,13 +503,15 @@ export class AsyncJobManager {
+ 	 * match the job's owner, the call is treated as not-found (returns false)
+ 	 * so cross-agent cancellation is rejected at the manager level.
+ 	 */
+-	cancel(id: string, filter?: AsyncJobFilter): boolean {
++	cancel(id: string, filter?: AsyncJobFilter, reason?: unknown): boolean {
+ 		const job = this.#jobs.get(id);
+ 		if (!job) return false;
+ 		if (filter?.ownerId && job.ownerId !== filter.ownerId) return false;
+ 		if (job.status !== "running") return false;
+ 		job.status = "cancelled";
+-		job.abortController.abort();
++		this.#batchStragglerTracker.onTerminal(job);
++		if (reason === undefined) job.abortController.abort();
++		else job.abortController.abort(reason);
+ 		this.#scheduleEviction(id);
+ 		return true;
+ 	}
+@@ -458,7 +677,9 @@ export class AsyncJobManager {
+ 	#cancelJobs(filter?: AsyncJobFilter, reason?: unknown): void {
+ 		for (const job of this.getRunningJobs(filter)) {
+ 			job.status = "cancelled";
+-			job.abortController.abort(reason);
++			this.#batchStragglerTracker.onTerminal(job);
++			if (reason === undefined) job.abortController.abort();
++			else job.abortController.abort(reason);
+ 			this.#scheduleEviction(job.id);
+ 		}
+ 	}
+@@ -623,6 +844,7 @@ export class AsyncJobManager {
+ 
+ 	async dispose(options?: { timeoutMs?: number }): Promise<boolean> {
+ 		this.#disposed = true;
++		this.#batchStragglerTracker.dispose();
+ 		this.#clearEvictionTimers();
+ 		this.#cancelJobs(undefined, ASYNC_JOB_MANAGER_SHUTDOWN_REASON);
+ 		const timeoutMs = Math.max(options?.timeoutMs ?? 3_000, 0);
+diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
+index 38d7d4f38c..c560fb307a 100644
+--- a/packages/coding-agent/src/task/index.ts
++++ b/packages/coding-agent/src/task/index.ts
+@@ -14,6 +14,7 @@
+  *   - Session artifacts for debugging
+  */
+ import path from "node:path";
++import { randomUUID } from "node:crypto";
+ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+ import type { Usage } from "@oh-my-pi/pi-ai";
+ import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
+@@ -36,11 +37,13 @@ import {
+ 	canSpawnAtDepth,
+ 	getTaskSchema,
+ 	type SingleResult,
++	type TaskClass,
+ 	type TaskItem,
+ 	type TaskParams,
+ 	type TaskToolDetails,
+ 	type TaskToolSchemaInstance,
+ } from "./types";
++import { STRAGGLER_CANCEL_REASON, TASK_CLASS_FLOORS } from "../async/job-manager";
+ // Import review tools for side effects (registers subagent tool handlers)
+ import "../tools/review";
+ import type { AsyncJobManager } from "../async";
+@@ -112,6 +115,7 @@ export type {
+ 	SubagentEventPayload,
+ 	SubagentLifecyclePayload,
+ 	SubagentProgressPayload,
++	TaskClass,
+ 	TaskParams,
+ 	TaskToolDetails,
+ } from "./types";
+@@ -275,12 +279,14 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
+ 	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
+ 		return params.tasks;
+ 	}
+-	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
+-	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
+-	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
+-	if ("effort" in params) item.effort = params.effort;
+-	if ("isolated" in params) item.isolated = params.isolated;
+-	return [item];
++const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
++if ("taskClass" in params) item.taskClass = params.taskClass;
++if ("stragglerPolicy" in params) item.stragglerPolicy = params.stragglerPolicy;
++if ("outputSchema" in params) item.outputSchema = params.outputSchema;
++if ("schemaMode" in params) item.schemaMode = params.schemaMode;
++if ("effort" in params) item.effort = params.effort;
++if ("isolated" in params) item.isolated = params.isolated;
++return [item];
+ }
+ 
+ /**
+@@ -297,6 +303,8 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
+ 	if (item.name !== undefined) spawn.name = item.name;
+ 	if (item.task !== undefined) spawn.task = item.task;
+ 	if (params.context !== undefined) spawn.context = params.context;
++	if ("taskClass" in item) spawn.taskClass = item.taskClass;
++	if ("stragglerPolicy" in item) spawn.stragglerPolicy = item.stragglerPolicy;
+ 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
+ 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
+ 	if ("effort" in item) spawn.effort = item.effort;
+@@ -827,6 +835,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 				),
+ 			);
+ 		}
++		const batchId = toolCallId;
+ 
+ 		// Async IDs are claimed before job registration, so retain the fallback
+ 		// manager on the session rather than recreating it for every call.
+@@ -839,6 +848,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 		const spawns: Array<{
+ 			agentId: string;
+ 			item: TaskItem;
++			spawnParams: TaskParams;
++			logicalItemId: string;
++			attemptState: { current: number };
+ 			index: number;
+ 			blocking: boolean;
+ 			progress: AgentProgress;
+@@ -849,9 +861,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 			const agentSource = policy.agent.source;
+ 			const agentId = await outputManager.allocate(item.name?.trim() || generateTaskName());
+ 			const assignment = (item.task ?? "").trim();
++			const spawnParams = normalizedSpawnParams[index]!;
+ 			spawns.push({
+ 				agentId,
+ 				item,
++				spawnParams,
++				logicalItemId: agentId,
++				attemptState: { current: 0 },
+ 				index,
+ 				blocking: itemBlocking[index],
+ 				progress: {
+@@ -909,8 +925,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 			try {
+ 				const jobId = this.#registerSpawnJob({
+ 					manager,
++					batchId,
++					logicalItemId: spawn.logicalItemId,
++					attempt: 0,
++					retryLimit: Math.min(1, Math.max(0, Math.floor(spawn.spawnParams.stragglerPolicy?.retryLimit ?? 0))),
++					attemptState: spawn.attemptState,
+ 					toolCallId,
+-					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
++					spawnParams: spawn.spawnParams,
+ 					agentId: spawn.agentId,
+ 					progress: spawn.progress,
+ 					ircEnabled,
+@@ -1068,6 +1089,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 	 */
+ 	#registerSpawnJob(options: {
+ 		manager: AsyncJobManager;
++		batchId: string;
++		logicalItemId: string;
++		attempt: number;
++		retryLimit: number;
++		attemptState: { current: number };
+ 		toolCallId: string;
+ 		spawnParams: TaskParams;
+ 		agentId: string;
+@@ -1077,8 +1103,31 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
+ 		onSettled?: (failed: boolean) => void;
+ 	}): string {
+-		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
+-			options;
++		const {
++			manager,
++			batchId,
++			logicalItemId,
++			attempt,
++			retryLimit,
++			attemptState,
++			toolCallId,
++			spawnParams,
++			agentId,
++			progress,
++			ircEnabled,
++			buildDetails,
++			onUpdate,
++			onSettled,
++		} = options;
++		const settleLogical = (() => {
++			let settled = false;
++			return (failed: boolean): void => {
++				if (settled) return;
++				settled = true;
++				onSettled?.(failed);
++			};
++		})();
++		let replacementPromise: Promise<boolean> | undefined;
+ 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
+ 			if (aborted) {
+ 				const ref = AgentRegistry.global().get(agentId);
+@@ -1124,10 +1173,50 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 				const acquiredAt = Date.now();
+ 				if (!semaphoreHeld || runSignal.aborted) {
+ 					releasePermit();
+-					progress.status = "aborted";
+-					onSettled?.(true);
++					settleLogical(true);
+ 					throw new Error("Aborted before execution");
+ 				}
++				const launchReplacement = (): Promise<boolean> => {
++					if (replacementPromise) return replacementPromise;
++					replacementPromise = (async () => {
++						if (attemptState.current !== attempt || attempt >= retryLimit) return false;
++						const nextAttempt = attempt + 1;
++						const retryOutputManager = this.session.agentOutputManager ?? new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
++						this.session.agentOutputManager ??= retryOutputManager;
++						const replacementId = await retryOutputManager.allocate(agentId);
++						try {
++							this.#registerSpawnJob({
++								manager,
++								batchId,
++								logicalItemId,
++								attempt: nextAttempt,
++								retryLimit: 0,
++								attemptState,
++								toolCallId,
++								spawnParams,
++								agentId: replacementId,
++								progress,
++								ircEnabled,
++								buildDetails,
++								onUpdate,
++								onSettled: settleLogical,
++							});
++							attemptState.current = nextAttempt;
++							progress.id = replacementId;
++							return true;
++						} catch {
++							return false;
++						}
++					})();
++					return replacementPromise;
++				};
++				runSignal.addEventListener(
++					"abort",
++					() => {
++						if (runSignal.reason === STRAGGLER_CANCEL_REASON) void launchReplacement();
++					},
++					{ once: true },
++				);
+ 				try {
+ 					markRunning();
+ 					progress.status = "running";
+@@ -1156,8 +1245,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 							progress.currentTool = nextProgress.currentTool;
+ 							progress.lastIntent = nextProgress.lastIntent;
+ 							progress.recentTools = nextProgress.recentTools.slice();
+-							progress.recentOutput = nextProgress.recentOutput.slice();
+-							progress.retryState = nextProgress.retryState;
+ 							progress.retryFailure = nextProgress.retryFailure;
+ 						}
+ 						const updateText =
+@@ -1176,10 +1263,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 					);
+ 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
+ 					const singleResult = result.details?.results[0];
++					if (attemptState.current !== attempt) return "Superseded attempt.";
+ 					// A missing result means the sync path failed at the tool level
+ 					// (results: []) — treat it as a failure, not success.
+ 					const resultFailed = !singleResult || (singleResult.aborted ?? false) || singleResult.exitCode !== 0;
+-					progress.status = singleResult?.aborted ? "aborted" : resultFailed ? "failed" : "completed";
++					progress.status =
++						(singleResult?.aborted && runSignal.reason === STRAGGLER_CANCEL_REASON && attempt >= retryLimit &&
++						spawnParams.stragglerPolicy?.classifyExhaustedAsMissing === true)
++							? "missing"
++							: singleResult?.aborted
++								? "aborted"
++								: resultFailed
++									? "failed"
++									: "completed";
+ 					progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
+ 					progress.tokens = singleResult?.tokens ?? 0;
+ 					progress.requests = singleResult?.requests ?? 0;
+@@ -1198,25 +1294,33 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 						delete progress.resolvedModel;
+ 						delete progress.resolvedModelIsFallback;
+ 					}
+-					onSettled?.(resultFailed);
++					settleLogical(resultFailed);
++					const missing = progress.status === "missing";
+ 					const statusText = resultFailed
+-						? `Background task ${agentId} failed.`
++						? missing
++							? `Background task ${agentId} missing after straggler retry.`
++							: `Background task ${agentId} failed.`
+ 						: `Background task ${agentId} complete.`;
+ 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
+ 					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true)}`;
+ 					if (resultFailed) {
+-						// Mark the job itself failed; the failed agent stays interrogable.
+ 						throw new TaskJobError(deliveryText);
+ 					}
+ 					return deliveryText;
+ 				} catch (error) {
+-					if (error instanceof TaskJobError) {
+-						throw error;
++					const isStraggler = runSignal.reason === STRAGGLER_CANCEL_REASON;
++					if (attemptState.current !== attempt) return "Superseded attempt.";
++					if (isStraggler && await launchReplacement()) return "Straggler attempt replaced.";
++					if (isStraggler && attemptState.current !== attempt) return "Straggler attempt replaced.";
++					if (isStraggler && spawnParams.stragglerPolicy?.classifyExhaustedAsMissing) {
++						progress.status = "missing";
++					} else {
++						progress.status = "failed";
+ 					}
+-					progress.status = "failed";
+-					progress.durationMs = Math.max(0, Date.now() - startedAt);
+-					onSettled?.(true);
+-					const statusText = `Background task ${agentId} failed.`;
++					settleLogical(true);
++					const statusText = progress.status === "missing"
++						? `Background task ${agentId} missing after straggler retry.`
++						: `Background task ${agentId} failed.`;
+ 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
+ 					const message = error instanceof Error ? error.message : String(error);
+ 					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
+@@ -1230,10 +1334,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 				agentId,
+ 				queued: true,
+ 				ownerId: this.session.getAgentId?.() ?? undefined,
++				batchId,
++				logicalItemId,
++				attempt,
++				stragglerFloorMs:
++					spawnParams.taskClass === undefined ? undefined : TASK_CLASS_FLOORS[spawnParams.taskClass],
+ 				onProgress: text => {
+ 					onUpdate?.({ content: [{ type: "text", text }], details: buildDetails() });
+ 				},
+-			},
++			}
+ 		);
+ 	}
+ 
+diff --git a/packages/coding-agent/src/task/render.ts b/packages/coding-agent/src/task/render.ts
+index 52ca6fe431..e256c54793 100644
+--- a/packages/coding-agent/src/task/render.ts
++++ b/packages/coding-agent/src/task/render.ts
+@@ -82,6 +82,8 @@ function getStatusIcon(status: AgentProgress["status"], theme: Theme, spinnerFra
+ 			return formatStatusIcon("error", theme);
+ 		case "aborted":
+ 			return formatStatusIcon("aborted", theme);
++		case "missing":
++			return formatStatusIcon("error", theme);
+ 	}
+ }
+ 
+@@ -903,7 +905,7 @@ function renderAgentProgress(
+ 	const iconColor =
+ 		progress.status === "completed"
+ 			? "success"
+-			: progress.status === "failed" || progress.status === "aborted"
++			: progress.status === "failed" || progress.status === "aborted" || progress.status === "missing"
+ 				? "error"
+ 				: "accent";
+ 
+@@ -946,6 +948,8 @@ function renderAgentProgress(
+ 	} else if (progress.status === "failed" || progress.status === "aborted") {
+ 		const statusLabel = progress.status === "failed" ? "failed" : "aborted";
+ 		statusLine += ` ${formatBadge(statusLabel, iconColor, theme)}`;
++	} else if (progress.status === "missing") {
++		statusLine += ` ${formatBadge("missing", iconColor, theme)}`;
+ 	}
+ 
+ 	const showBadge = settings.get("task.showResolvedModelBadge");
+@@ -1441,6 +1445,7 @@ function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme
+ 		completed: 0,
+ 		failed: 0,
+ 		aborted: 0,
++		missing: 0,
+ 	};
+ 	for (const p of hidden) counts[p.status]++;
+ 	const parts: string[] = [];
+@@ -1449,6 +1454,7 @@ function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme
+ 	if (counts.pending > 0) parts.push(theme.fg("dim", `${counts.pending} pending`));
+ 	if (counts.failed > 0) parts.push(theme.fg("error", `${counts.failed} failed`));
+ 	if (counts.aborted > 0) parts.push(theme.fg("error", `${counts.aborted} aborted`));
++	if (counts.missing > 0) parts.push(theme.fg("error", `${counts.missing} missing`));
+ 	const breakdown =
+ 		parts.length > 0
+ 			? `${theme.fg("dim", " (")}${parts.join(theme.fg("dim", theme.sep.dot))}${theme.fg("dim", ")")}`
+diff --git a/packages/coding-agent/src/task/types.ts b/packages/coding-agent/src/task/types.ts
+index 062cab65a6..1760dc49ed 100644
+--- a/packages/coding-agent/src/task/types.ts
++++ b/packages/coding-agent/src/task/types.ts
+@@ -110,10 +110,27 @@ export const LABEL_MAX = 80;
+ const outputSchemaInputSchema = type("object | boolean | string | null");
+ // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
+ const effortRule = '"lo" | "med" | "hi"' as const;
++/** Work classification used to select straggler handling. */
++export type TaskClass = "local-read" | "grep" | "web-research" | "build-test";
++
++/** Optional retry behavior for tasks that outlive the parent deadline. */
++export interface StragglerPolicy {
++	retryLimit?: number;
++	classifyExhaustedAsMissing?: boolean;
++}
++
++const taskClassRule = '"local-read" | "grep" | "web-research" | "build-test"' as const;
++const stragglerPolicySchema = type({
++	"retryLimit?": "number",
++	"classifyExhaustedAsMissing?": "boolean",
++	"+": "delete",
++});
+ 
+ export const taskItemSchema = type({
+ 	"name?": "string",
+ 	agent: "string = 'task'",
++	"taskClass?": taskClassRule,
++	"stragglerPolicy?": stragglerPolicySchema,
+ 	task: "string",
+ 	"outputSchema?": outputSchemaInputSchema,
+ 	"schemaMode?": '"permissive" | "strict"',
+@@ -122,6 +139,8 @@ export const taskItemSchema = type({
+ const taskItemSchemaIsolated = type({
+ 	"name?": "string",
+ 	agent: "string = 'task'",
++	"taskClass?": taskClassRule,
++	"stragglerPolicy?": stragglerPolicySchema,
+ 	task: "string",
+ 	"outputSchema?": outputSchemaInputSchema,
+ 	"schemaMode?": '"permissive" | "strict"',
+@@ -137,6 +156,10 @@ export interface TaskItem {
+ 	agent?: string;
+ 	/** The work; required by the schema. */
+ 	task?: string;
++	/** Work classification used to select straggler handling. */
++	taskClass?: TaskClass;
++	/** Optional retry behavior for stragglers. */
++	stragglerPolicy?: StragglerPolicy;
+ 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
+ 	effort?: TaskEffort;
+ 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
+@@ -151,6 +174,8 @@ export const taskSchema = type({
+ 	"name?": "string",
+ 	agent: "string = 'task'",
+ 	task: "string",
++	"taskClass?": taskClassRule,
++	"stragglerPolicy?": stragglerPolicySchema,
+ 	"outputSchema?": outputSchemaInputSchema,
+ 	"schemaMode?": '"permissive" | "strict"',
+ 	"isolated?": "boolean",
+@@ -160,6 +185,8 @@ const taskSchemaNoIsolation = type({
+ 	"name?": "string",
+ 	agent: "string = 'task'",
+ 	task: "string",
++	"taskClass?": taskClassRule,
++	"stragglerPolicy?": stragglerPolicySchema,
+ 	"outputSchema?": outputSchemaInputSchema,
+ 	"schemaMode?": '"permissive" | "strict"',
+ 	"+": "delete",
+@@ -206,6 +233,8 @@ function createTaskSchema(options: {
+ 				"name?": "string",
+ 				agent,
+ 				task: "string",
++				"taskClass?": taskClassRule,
++				"stragglerPolicy?": stragglerPolicySchema,
+ 				...effortField,
+ 				"outputSchema?": outputSchemaInputSchema,
+ 				"schemaMode?": '"permissive" | "strict"',
+@@ -222,6 +251,8 @@ function createTaskSchema(options: {
+ 			"name?": "string",
+ 			agent,
+ 			task: "string",
++			"taskClass?": taskClassRule,
++			"stragglerPolicy?": stragglerPolicySchema,
+ 			...effortField,
+ 			"outputSchema?": outputSchemaInputSchema,
+ 			"schemaMode?": '"permissive" | "strict"',
+@@ -238,6 +269,8 @@ function createTaskSchema(options: {
+ 			"name?": "string",
+ 			agent,
+ 			task: "string",
++			"taskClass?": taskClassRule,
++			"stragglerPolicy?": stragglerPolicySchema,
+ 			...effortField,
+ 			"outputSchema?": outputSchemaInputSchema,
+ 			"schemaMode?": '"permissive" | "strict"',
+@@ -249,6 +282,8 @@ function createTaskSchema(options: {
+ 		"name?": "string",
+ 		agent,
+ 		task: "string",
++		"taskClass?": taskClassRule,
++		"stragglerPolicy?": stragglerPolicySchema,
+ 		...effortField,
+ 		"outputSchema?": outputSchemaInputSchema,
+ 		"schemaMode?": '"permissive" | "strict"',
+@@ -290,6 +325,10 @@ export interface TaskParams {
+ 	agent?: string;
+ 	/** The work (flat form). */
+ 	task?: string;
++	/** Work classification used to select straggler handling. */
++	taskClass?: TaskClass;
++	/** Optional retry behavior for stragglers. */
++	stragglerPolicy?: StragglerPolicy;
+ 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
+ 	effort?: TaskEffort;
+ 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
+@@ -400,7 +439,7 @@ export interface AgentProgress {
+ 	id: string;
+ 	agent: string;
+ 	agentSource: AgentSource;
+-	status: "pending" | "running" | "completed" | "failed" | "aborted";
++	status: "pending" | "running" | "completed" | "failed" | "aborted" | "missing";
+ 	task: string;
+ 	assignment?: string;
+ 	description?: string;
+diff --git a/packages/coding-agent/test/async-job-manager-straggler-cancel.test.ts b/packages/coding-agent/test/async-job-manager-straggler-cancel.test.ts
+new file mode 100644
+index 0000000000..be270a4d71
+--- /dev/null
++++ b/packages/coding-agent/test/async-job-manager-straggler-cancel.test.ts
+@@ -0,0 +1,101 @@
++import { afterEach, describe, expect, it, vi } from "bun:test";
++import { AsyncJobManager, STRAGGLER_CANCEL_REASON } from "@oh-my-pi/pi-coding-agent/async/job-manager";
++
++async function flushMicrotasks(): Promise<void> {
++	for (let i = 0; i < 5; i++) await Promise.resolve();
++}
++
++describe("AsyncJobManager straggler cancellation", () => {
++	afterEach(() => {
++		vi.useRealTimers();
++	});
++
++	it("calibrates a same-batch sibling to 2T, preserves other batches, and uses the strict cancel reason", async () => {
++		vi.useFakeTimers();
++		const manager = new AsyncJobManager({ retentionMs: 60_000 });
++		const fast = Promise.withResolvers<string>();
++		let siblingSignal: AbortSignal | undefined;
++		let isolatedSignal: AbortSignal | undefined;
++		const siblingStopped = Promise.withResolvers<string>();
++		const isolatedStopped = Promise.withResolvers<string>();
++		const ownerId = "owner-1";
++		const batchId = "batch-a";
++
++		const fastJobId = manager.register("task", "fast", async () => fast.promise, {
++			ownerId,
++			batchId,
++			logicalItemId: "fast",
++			stragglerFloorMs: 1,
++		});
++		const siblingJobId = manager.register(
++			"task",
++			"same-batch sibling",
++			async ({ signal }) => {
++				siblingSignal = signal;
++				if (signal.aborted) {
++					siblingStopped.resolve("cancelled");
++				} else {
++					signal.addEventListener("abort", () => siblingStopped.resolve("cancelled"), { once: true });
++				}
++				return siblingStopped.promise;
++			},
++			{
++				ownerId,
++				batchId,
++				logicalItemId: "sibling",
++				stragglerFloorMs: 1,
++			},
++		);
++		const isolatedJobId = manager.register(
++			"task",
++			"different-batch sibling",
++			async ({ signal }) => {
++				isolatedSignal = signal;
++				if (signal.aborted) {
++					isolatedStopped.resolve("cancelled");
++				} else {
++					signal.addEventListener("abort", () => isolatedStopped.resolve("cancelled"), { once: true });
++				}
++				return isolatedStopped.promise;
++			},
++			{
++				ownerId,
++				batchId: "batch-b",
++				logicalItemId: "isolated",
++				stragglerFloorMs: 1,
++			},
++		);
++
++		// The first completion at t=10 establishes T=10 and a same-batch deadline at 2T=t=20.
++		vi.advanceTimersByTime(10);
++		fast.resolve("fast result");
++		await flushMicrotasks();
++		expect(manager.getJob(fastJobId)?.status).toBe("completed");
++
++		// One millisecond before 2T, both the same-batch sibling and the other batch remain live.
++		vi.advanceTimersByTime(9);
++		await flushMicrotasks();
++		expect(manager.getJob(siblingJobId)?.status).toBe("running");
++		expect(manager.getJob(isolatedJobId)?.status).toBe("running");
++		expect(siblingSignal?.aborted).toBe(false);
++		expect(isolatedSignal?.aborted).toBe(false);
++
++		// At the calibrated deadline only the matching batch is cancelled.
++		vi.advanceTimersByTime(1);
++		await flushMicrotasks();
++		expect(manager.getJob(siblingJobId)?.status).toBe("cancelled");
++		expect(siblingSignal?.aborted).toBe(true);
++		expect(siblingSignal?.reason).toBe(STRAGGLER_CANCEL_REASON);
++		expect(manager.getJob(isolatedJobId)?.status).toBe("running");
++		expect(isolatedSignal?.aborted).toBe(false);
++
++		await siblingStopped.promise;
++		manager.cancel(isolatedJobId);
++		await isolatedStopped.promise;
++		await manager.waitForAll();
++		expect(manager.getJob(fastJobId)?.status).toBe("completed");
++		expect(manager.getJob(siblingJobId)?.status).toBe("cancelled");
++		expect(manager.getJob(isolatedJobId)?.status).toBe("cancelled");
++		await manager.dispose();
++	});
++});
+diff --git a/packages/coding-agent/test/async-job-manager-straggler-floor.test.ts b/packages/coding-agent/test/async-job-manager-straggler-floor.test.ts
+new file mode 100644
+index 0000000000..fdfe115bc3
+--- /dev/null
++++ b/packages/coding-agent/test/async-job-manager-straggler-floor.test.ts
+@@ -0,0 +1,60 @@
++import { afterEach, describe, expect, setSystemTime, test, vi } from "bun:test";
++import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
++
++async function flushMicrotasks(): Promise<void> {
++	await Promise.resolve();
++	await Promise.resolve();
++}
++
++describe("AsyncJobManager straggler floor", () => {
++	afterEach(() => {
++		vi.useRealTimers();
++		setSystemTime();
++	});
++
++	test("keeps a healthy sibling until normal completion past raw 2T", async () => {
++		vi.useFakeTimers();
++		setSystemTime(0);
++
++		const aborted = new Map<string, number>();
++		const manager = new AsyncJobManager({
++			retentionMs: 60_000,
++			onJobComplete: () => {},
++		});
++		const options = {
++			ownerId: "owner",
++			batchId: "straggler-floor-batch",
++			stragglerFloorMs: 30_000,
++		};
++		const run = (id: string, durationMs: number) =>
++			async ({ signal }: { signal: AbortSignal }): Promise<string> => {
++				signal.addEventListener("abort", () => aborted.set(id, (aborted.get(id) ?? 0) + 1), { once: true });
++				await new Promise<void>(resolve => setTimeout(resolve, durationMs));
++				return `${id} done`;
++			};
++
++		const firstJobId = manager.register("task", "first", run("first", 5_000), options);
++		const siblingJobId = manager.register("task", "healthy sibling", run("sibling", 20_000), options);
++
++		await flushMicrotasks();
++		vi.advanceTimersByTime(10_000);
++		await flushMicrotasks();
++
++		// B=max(batch floor, 2T)=30s. A bare 2T timeout must not cancel either
++		// the already-terminal first job or the still-healthy sibling.
++		expect(manager.getJob(firstJobId)?.status).toBe("completed");
++		expect(manager.getJob(siblingJobId)?.status).toBe("running");
++		expect(aborted).toEqual(new Map());
++
++		vi.advanceTimersByTime(10_000);
++		await flushMicrotasks();
++		await manager.waitForAll();
++
++		expect(manager.getJob(firstJobId)?.status).toBe("completed");
++		expect(manager.getJob(siblingJobId)?.status).toBe("completed");
++		expect(aborted).toEqual(new Map());
++
++		await manager.drainDeliveries();
++		await manager.dispose();
++	});
++});
+diff --git a/packages/coding-agent/test/async-job-manager-straggler-queue.test.ts b/packages/coding-agent/test/async-job-manager-straggler-queue.test.ts
+new file mode 100644
+index 0000000000..464fc6d389
+--- /dev/null
++++ b/packages/coding-agent/test/async-job-manager-straggler-queue.test.ts
+@@ -0,0 +1,143 @@
++import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
++import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
++
++type Deferred<T> = {
++	promise: Promise<T>;
++	resolve: (value: T | PromiseLike<T>) => void;
++};
++
++const FLUSH_ROUNDS = 8;
++
++function deferred<T>(): Deferred<T> {
++	let resolve!: Deferred<T>["resolve"];
++	const promise = new Promise<T>(nextResolve => {
++		resolve = nextResolve;
++	});
++	return { promise, resolve };
++}
++
++async function flushMicrotasks(): Promise<void> {
++	for (let index = 0; index < FLUSH_ROUNDS; index++) await Promise.resolve();
++}
++
++describe("AsyncJobManager straggler timing", () => {
++	let manager: AsyncJobManager | undefined;
++	let now = 0;
++
++	beforeEach(() => {
++		vi.useFakeTimers();
++		now = 0;
++		vi.spyOn(Date, "now").mockImplementation(() => now);
++		manager = new AsyncJobManager({
++			maxRunningJobs: 3,
++			retentionMs: 60_000,
++		});
++	});
++
++	afterEach(async () => {
++		if (manager) await manager.dispose({ timeoutMs: 1_000 });
++		vi.restoreAllMocks();
++		vi.useRealTimers();
++	});
++
++	test("retains queued state and reschedules a straggler from its actual start", async () => {
++		const activeManager = manager!;
++		const started: string[] = [];
++		const aborted: Array<{ id: string; at: number }> = [];
++		const completions = new Map<string, Deferred<string>>();
++		const markRunningById = new Map<string, () => void>();
++		const queuedStart = deferred<void>();
++
++		const register = (id: string, queued: boolean) => {
++			const completion = deferred<string>();
++			completions.set(id, completion);
++			return activeManager.register(
++				"task",
++				id,
++				async ({ signal, markRunning }) => {
++					markRunningById.set(id, markRunning);
++					signal.addEventListener(
++						"abort",
++						() => {
++							aborted.push({ id, at: Date.now() });
++							completion.resolve("cancelled");
++						},
++						{ once: true },
++					);
++					if (id === "C") await queuedStart.promise;
++					started.push(id);
++					return completion.promise;
++				},
++				{
++					id,
++					ownerId: "owner",
++					batchId: "batch",
++					stragglerFloorMs: 1,
++					queued,
++				},
++			);
++		};
++
++		const a = register("A", false);
++		const b = register("B", false);
++		const c = register("C", true);
++		await flushMicrotasks();
++		markRunningById.get("A")!();
++		markRunningById.get("B")!();
++		await flushMicrotasks();
++		expect(started).toEqual(["A", "B"]);
++		expect(activeManager.getJob(c)?.queued).toBe(true);
++
++		// A's 100ms completion calibrates T=100ms. B therefore receives a
++		// 2T=200ms active budget, measured from its actual start at t=0.
++		now = 100;
++		vi.advanceTimersByTime(100);
++		completions.get("A")!.resolve("A done");
++		await flushMicrotasks();
++		expect(activeManager.getJob(a)?.status).toBe("completed");
++		expect(aborted).toEqual([]);
++		expect(activeManager.getJob(c)?.status).toBe("running");
++		expect(activeManager.getJob(c)?.queued).toBe(true);
++
++		// B is cancelled at its active deadline, while C remains queued and its
++		// state is retained rather than being deleted with the first deadline.
++		now = 199;
++		vi.advanceTimersByTime(99);
++		await flushMicrotasks();
++		expect(aborted).toEqual([]);
++		now = 200;
++		vi.advanceTimersByTime(1);
++		await flushMicrotasks();
++		expect(aborted).toEqual([{ id: "B", at: 200 }]);
++		expect(activeManager.getJob(b)?.status).toBe("cancelled");
++		expect(activeManager.getJob(c)?.status).toBe("running");
++		expect(activeManager.getJob(c)?.queued).toBe(true);
++
++		// C starts after 250ms of queue time. Its deadline must be rescheduled
++		// from actualStartedAt=250, not inherited from registration at t=0.
++		now = 250;
++		vi.advanceTimersByTime(50);
++		markRunningById.get("C")!();
++		queuedStart.resolve();
++		await flushMicrotasks();
++		expect(started).toEqual(["A", "B", "C"]);
++		expect(activeManager.getJob(c)?.queued).toBe(false);
++		expect(activeManager.getJob(c)?.status).toBe("running");
++
++		now = 449;
++		vi.advanceTimersByTime(199);
++		await flushMicrotasks();
++		expect(aborted).toEqual([{ id: "B", at: 200 }]);
++		expect(activeManager.getJob(c)?.status).toBe("running");
++
++		now = 450;
++		vi.advanceTimersByTime(1);
++		await flushMicrotasks();
++		expect(aborted).toEqual([
++			{ id: "B", at: 200 },
++			{ id: "C", at: 450 },
++		]);
++		expect(activeManager.getJob(c)?.status).toBe("cancelled");
++		await activeManager.waitForAll();
++	});
++});
+diff --git a/packages/coding-agent/test/straggler-integration.test.ts b/packages/coding-agent/test/straggler-integration.test.ts
+new file mode 100644
+index 0000000000..472c56ab4f
+--- /dev/null
++++ b/packages/coding-agent/test/straggler-integration.test.ts
+@@ -0,0 +1,164 @@
++import { afterEach, describe, expect, it } from "bun:test";
++import { AsyncJobManager, STRAGGLER_CANCEL_REASON } from "../src/async/job-manager";
++
++describe("AsyncJobManager straggler integration", () => {
++	let manager: AsyncJobManager | undefined;
++
++	afterEach(async () => {
++		await manager?.dispose();
++		manager = undefined;
++	});
++
++	it(
++		"cancels a real-timer straggler after the configured floor",
++		async () => {
++			manager = new AsyncJobManager({ maxRunningJobs: 10, retentionMs: 60_000 });
++			const ownerId = "integration-owner";
++			const batchId = "integration-batch";
++			let fastCompletedAt: number | undefined;
++			let blockerCancelledAt: number | undefined;
++			let blockerAbortReason: unknown;
++
++			const fastJobId = manager.register(
++				"task",
++				"fast",
++				async () => {
++					// This test intentionally uses the platform clock to prove timer-driven cancellation.
++					await new Promise<void>(resolve => setTimeout(resolve, 50));
++					fastCompletedAt = Date.now();
++					return "fast complete";
++				},
++				{ ownerId, batchId, stragglerFloorMs: 2_000 },
++			);
++
++			const blockerJobId = manager.register(
++				"task",
++				"blocker",
++				async ({ signal }) =>
++					await new Promise<string>(resolve => {
++						const onAbort = () => {
++							blockerCancelledAt = Date.now();
++							blockerAbortReason = signal.reason;
++							resolve("blocker cancelled");
++						};
++						if (signal.aborted) onAbort();
++						else signal.addEventListener("abort", onAbort, { once: true });
++					}),
++				{ ownerId, batchId, stragglerFloorMs: 2_000 },
++			);
++
++			await manager.waitForAll();
++
++			const fastJob = manager.getJob(fastJobId);
++			const blockerJob = manager.getJob(blockerJobId);
++			expect(fastJob?.status).toBe("completed");
++			expect(blockerJob?.status).toBe("cancelled");
++			expect(blockerAbortReason).toBe(STRAGGLER_CANCEL_REASON);
++			expect(fastCompletedAt).toBeDefined();
++			expect(blockerCancelledAt).toBeDefined();
++
++			const completionToCancellationMs = blockerCancelledAt! - fastCompletedAt!;
++			expect(completionToCancellationMs).toBeGreaterThanOrEqual(1_800);
++			expect(completionToCancellationMs).toBeLessThan(2_500);
++
++			console.log(
++				JSON.stringify({
++					test: "straggler-real-timer",
++					fast: { id: fastJobId, status: fastJob?.status, completedAt: fastCompletedAt },
++					blocker: {
++						id: blockerJobId,
++						status: blockerJob?.status,
++						cancelledAt: blockerCancelledAt,
++						abortReason:
++							blockerAbortReason === STRAGGLER_CANCEL_REASON
++								? "STRAGGLER_CANCEL_REASON"
++								: blockerAbortReason,
++					},
++					stragglerFloorMs: 2_000,
++					completionToCancellationMs,
++				}),
++			);
++		},
++		10_000,
++	);
++
++	it(
++		"registers one replacement for a straggler and marks an exhausted retry missing",
++		async () => {
++			manager = new AsyncJobManager({ maxRunningJobs: 10, retentionMs: 60_000 });
++			const ownerId = "retry-owner";
++			const batchId = "retry-batch";
++			const logicalItemId = "logical-item";
++			const stragglerPolicy = { retryLimit: 1, classifyExhaustedAsMissing: true };
++			let currentAttempt = 0;
++			let logicalStatus: "running" | "missing" = "running";
++			const registrations: Array<{ id: string; attempt: number; logicalItemId: string }> = [];
++
++			const registerAttempt = (): string => {
++				const attempt = currentAttempt;
++				const id = attempt === 0 ? logicalItemId : `${logicalItemId}-2`;
++				const jobId = manager!.register(
++					"task",
++					id,
++					async ({ signal }) =>
++						await new Promise<string>(resolve => {
++							const onAbort = () => {
++								if (signal.reason !== STRAGGLER_CANCEL_REASON) {
++									resolve("ordinary cancellation");
++									return;
++								}
++								if (attempt < stragglerPolicy.retryLimit) {
++									currentAttempt = attempt + 1;
++									registerAttempt();
++								} else if (stragglerPolicy.classifyExhaustedAsMissing) {
++									logicalStatus = "missing";
++								}
++								resolve("straggler cancellation");
++							};
++							if (signal.aborted) onAbort();
++							else signal.addEventListener("abort", onAbort, { once: true });
++						}),
++					{
++						id,
++						ownerId,
++						batchId,
++						logicalItemId,
++						attempt,
++						stragglerFloorMs: 100,
++					},
++				);
++				registrations.push({ id: jobId, attempt, logicalItemId });
++				return jobId;
++			};
++
++			const firstJobId = registerAttempt();
++			expect(manager.cancel(firstJobId, undefined, STRAGGLER_CANCEL_REASON)).toBe(true);
++			await Promise.resolve();
++			expect(registrations).toEqual([
++				{ id: logicalItemId, attempt: 0, logicalItemId },
++				{ id: `${logicalItemId}-2`, attempt: 1, logicalItemId },
++			]);
++
++			const replacementJobId = registrations[1]!.id;
++			expect(manager.cancel(replacementJobId, undefined, STRAGGLER_CANCEL_REASON)).toBe(true);
++			await manager.waitForAll();
++
++			expect(manager.getJob(firstJobId)?.status).toBe("cancelled");
++			expect(manager.getJob(replacementJobId)?.status).toBe("cancelled");
++			expect(logicalStatus).toBe("missing");
++			console.log(
++				JSON.stringify({
++					test: "straggler-retry-exhaustion",
++					logicalItemId,
++					stragglerPolicy,
++					registrations,
++					firstStatus: manager.getJob(firstJobId)?.status,
++					replacementStatus: manager.getJob(replacementJobId)?.status,
++					finalLogicalStatus: logicalStatus,
++					stragglerReason: "STRAGGLER_CANCEL_REASON",
++				}),
++			);
++		},
++		10_000,
++	);
++});
+diff --git a/packages/coding-agent/test/task/task-straggler-retry.test.ts b/packages/coding-agent/test/task/task-straggler-retry.test.ts
+new file mode 100644
+index 0000000000..a28aba5e28
+--- /dev/null
++++ b/packages/coding-agent/test/task/task-straggler-retry.test.ts
+@@ -0,0 +1,409 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
++import {
++	AsyncJobManager,
++	STRAGGLER_CANCEL_REASON,
++	type AsyncJobRegisterOptions,
++} from "@oh-my-pi/pi-coding-agent/async/job-manager";
++import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
++import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
++import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
++import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
++import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
++import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
++import type { AgentDefinition, SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
++import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
++
++const taskAgent: AgentDefinition = {
++	name: "task",
++	description: "General-purpose task agent",
++	systemPrompt: "You are a task agent.",
++	source: "bundled",
++};
++const STRAGGLER_REASON_LOOKALIKE = Symbol("AsyncJobManager straggler cancellation");
++
++interface ControlledRun {
++	readonly id: string;
++	readonly options: ExecutorOptions;
++	abortReason: unknown;
++	settled: boolean;
++	resolve(overrides?: Partial<SingleResult>): void;
++}
++
++const managers: AsyncJobManager[] = [];
++const activeRuns: ControlledRun[] = [];
++
++function createSession(manager: AsyncJobManager): ToolSession {
++	return {
++		cwd: "/tmp",
++		hasUI: false,
++		settings: Settings.isolated({
++			"async.enabled": true,
++			"task.batch": true,
++			"task.isolation.mode": "worktree",
++			"task.isolation.apply": false,
++			"task.maxConcurrency": 4,
++		}),
++		getSessionFile: () => null,
++		getArtifactsDir: () => null,
++		getSessionSpawns: () => "*",
++		getAgentId: () => "Parent",
++		suppressSpawnAdvisory: true,
++		asyncJobManager: manager,
++	} as unknown as ToolSession;
++}
++
++function makeManager(): AsyncJobManager {
++	const manager = new AsyncJobManager({ onJobComplete: () => {}, retentionMs: 60_000 });
++	managers.push(manager);
++	return manager;
++}
++
++function makeResult(options: ExecutorOptions, overrides: Partial<SingleResult> = {}): SingleResult {
++	return {
++		index: options.index,
++		id: options.id,
++		agent: options.agent.name,
++		agentSource: options.agent.source,
++		task: options.task,
++		assignment: options.assignment,
++		exitCode: 0,
++		output: `${options.id} done`,
++		stderr: "",
++		truncated: false,
++		durationMs: 5,
++		tokens: 0,
++		requests: 1,
++		modelOverride: options.modelOverride,
++		modelRole: options.modelRole,
++		...overrides,
++	};
++}
++
++function cancelledResult(run: ControlledRun, reasonLabel: string): Partial<SingleResult> {
++	return {
++		exitCode: 1,
++		output: "",
++		stderr: `${run.id} ${reasonLabel}`,
++		error: `${run.id} ${reasonLabel}`,
++		aborted: true,
++		abortReason: reasonLabel,
++	};
++}
++
++function installControlledIsolatedRunner(): void {
++	vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp/repo" } as never);
++	vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions }) => {
++		const gate = Promise.withResolvers<SingleResult>();
++		const run: ControlledRun = {
++			id: baseOptions.id,
++			options: baseOptions,
++			abortReason: undefined,
++			settled: false,
++			resolve: (overrides = {}) => {
++				if (run.settled) return;
++				run.settled = true;
++				gate.resolve(makeResult(baseOptions, overrides));
++			},
++		};
++		baseOptions.signal?.addEventListener(
++			"abort",
++			() => {
++				run.abortReason = baseOptions.signal?.reason;
++			},
++			{ once: true },
++		);
++		activeRuns.push(run);
++		return gate.promise;
++	});
++}
++
++async function flushMicrotasks(): Promise<void> {
++	for (let i = 0; i < 10; i++) await Promise.resolve();
++}
++
++async function pollUntil(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
++	const start = Date.now();
++	while (!predicate()) {
++		if (Date.now() - start > timeoutMs) throw new Error("pollUntil timed out");
++		await Bun.sleep(5);
++	}
++}
++
++async function waitForRun(id: string): Promise<ControlledRun> {
++	await pollUntil(() => activeRuns.some(run => run.id === id));
++	const run = activeRuns.find(candidate => candidate.id === id);
++	if (!run) throw new Error(`Run ${id} was not captured`);
++	return run;
++}
++
++function latestUpdate(updates: Array<{ text: string; details: TaskToolDetails }>): { text: string; details: TaskToolDetails } {
++	const update = updates.at(-1);
++	if (!update) throw new Error("Expected at least one task update");
++	return update;
++}
++
++function progressFor(details: TaskToolDetails, id: string) {
++	return details.progress?.find(progress => progress.id === id);
++}
++
++function optionsForAttempt(
++	calls: Array<Parameters<AsyncJobManager["register"]>>,
++	logicalItemId: string,
++	attempt: number,
++): AsyncJobRegisterOptions {
++	const options = calls.find(call => call[3]?.logicalItemId === logicalItemId && call[3]?.attempt === attempt)?.[3];
++	if (!options) throw new Error(`Missing registration for ${logicalItemId} attempt ${attempt}`);
++	return options;
++}
++
++function registrationsFor(
++	calls: Array<Parameters<AsyncJobManager["register"]>>,
++	logicalItemId: string,
++): AsyncJobRegisterOptions[] {
++	return calls
++		.map(call => call[3])
++		.filter((options): options is AsyncJobRegisterOptions => options?.logicalItemId === logicalItemId);
++}
++
++async function settlePendingRuns(): Promise<void> {
++	for (let pass = 0; pass < 5; pass++) {
++		const pending = activeRuns.filter(run => !run.settled);
++		if (pending.length === 0) return;
++		for (const run of pending) {
++			run.resolve(
++				run.abortReason === undefined
++					? undefined
++					: cancelledResult(run, run.abortReason === STRAGGLER_CANCEL_REASON ? "straggler" : "cancelled"),
++			);
++		}
++		await flushMicrotasks();
++	}
++}
++
++describe("TaskTool straggler retry", () => {
++	beforeEach(() => {
++		AgentRegistry.resetGlobalForTests();
++		AgentLifecycleManager.resetGlobalForTests();
++		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
++		installControlledIsolatedRunner();
++	});
++
++	afterEach(async () => {
++		await settlePendingRuns();
++		for (const manager of managers.splice(0)) {
++			await manager.dispose({ timeoutMs: 1000 });
++		}
++		activeRuns.length = 0;
++		vi.restoreAllMocks();
++		AgentLifecycleManager.resetGlobalForTests();
++		AgentRegistry.resetGlobalForTests();
++	});
++
++	it("replaces an opted-in straggler once with a fresh id while preserving the logical batch item", async () => {
++		const manager = makeManager();
++		const register = vi.spyOn(manager, "register");
++		const tool = await TaskTool.create(createSession(manager));
++		const updates: Array<{ text: string; details: TaskToolDetails }> = [];
++
++		const result = await tool.execute(
++			"tc-retry-success",
++			{
++				context: "Shared retry context.",
++				tasks: [
++					{ name: "Fast", task: "Finish first.", isolated: true },
++					{
++						name: "Slow",
++						agent: "task",
++						task: "Finish after retry.",
++						taskClass: "local-read",
++						isolated: true,
++						stragglerPolicy: { retryLimit: 1, classifyExhaustedAsMissing: true },
++					},
++				],
++			} as TaskParams,
++			undefined,
++			update => {
++				if (update.details) {
++					updates.push({
++						text: update.content.find(part => part.type === "text")?.text ?? "",
++						details: update.details,
++					});
++				}
++			},
++		);
++
++		expect(result.details?.async?.state).toBe("running");
++		const fastRun = await waitForRun("Fast");
++		const slowRun = await waitForRun("Slow");
++		fastRun.resolve();
++		await manager.getJob("Fast")?.promise;
++
++		expect(manager.cancel("Slow", undefined, STRAGGLER_CANCEL_REASON)).toBe(true);
++		await pollUntil(() => register.mock.calls.some(call => call[3]?.logicalItemId === "Slow" && call[3]?.attempt === 1));
++		const retryRun = await waitForRun("Slow-2");
++		expect(slowRun.abortReason).toBe(STRAGGLER_CANCEL_REASON);
++
++		const attempt0 = optionsForAttempt(register.mock.calls, "Slow", 0);
++		const attempt1 = optionsForAttempt(register.mock.calls, "Slow", 1);
++		expect(attempt0).toMatchObject({
++			id: "Slow",
++			agentId: "Slow",
++			ownerId: "Parent",
++			batchId: "tc-retry-success",
++			logicalItemId: "Slow",
++			attempt: 0,
++		});
++		expect(attempt1).toMatchObject({
++			id: "Slow-2",
++			agentId: "Slow-2",
++			ownerId: "Parent",
++			batchId: "tc-retry-success",
++			logicalItemId: "Slow",
++			attempt: 1,
++		});
++		expect(registrationsFor(register.mock.calls, "Slow").map(options => options.attempt)).toEqual([0, 1]);
++
++		expect(
++			[slowRun, retryRun].map(run => ({
++				agent: run.options.agent.name,
++				assignment: run.options.assignment,
++				context: run.options.context,
++				detached: run.options.detached,
++			})),
++		).toEqual([
++			{ agent: "task", assignment: "Finish after retry.", context: "Shared retry context.", detached: true },
++			{ agent: "task", assignment: "Finish after retry.", context: "Shared retry context.", detached: true },
++		]);
++
++		expect(latestUpdate(updates).details.async?.state).toBe("running");
++		retryRun.resolve({ output: "retry won" });
++		await manager.getJob("Slow-2")?.promise;
++		await pollUntil(() => latestUpdate(updates).details.async?.state === "completed");
++		const completed = latestUpdate(updates).details;
++		expect(progressFor(completed, "Slow-2")?.status).toBe("completed");
++		expect(progressFor(completed, "Slow")).toBeUndefined();
++
++		slowRun.resolve(cancelledResult(slowRun, "late original straggler"));
++		await manager.getJob("Slow")?.promise;
++		await flushMicrotasks();
++		const afterLateOriginal = latestUpdate(updates).details;
++		expect(afterLateOriginal.async?.state).toBe("completed");
++		expect(progressFor(afterLateOriginal, "Slow-2")?.status).toBe("completed");
++		expect(progressFor(afterLateOriginal, "Slow")).toBeUndefined();
++		expect(registrationsFor(register.mock.calls, "Slow").map(options => options.attempt)).toEqual([0, 1]);
++		expect(manager.getJob("Slow-3")).toBeUndefined();
++	});
++
++	it("classifies a second straggler as missing when retry exhaustion asks for missing", async () => {
++		const manager = makeManager();
++		const register = vi.spyOn(manager, "register");
++		const tool = await TaskTool.create(createSession(manager));
++		const updates: Array<{ text: string; details: TaskToolDetails }> = [];
++
++		await tool.execute(
++			"tc-retry-missing",
++			{
++				context: "Shared retry context.",
++				tasks: [
++					{ name: "Fast", task: "Finish first.", isolated: true },
++					{
++						name: "Slow",
++						task: "May go missing.",
++						taskClass: "local-read",
++						isolated: true,
++						stragglerPolicy: { retryLimit: 1, classifyExhaustedAsMissing: true },
++					},
++				],
++			} as TaskParams,
++			undefined,
++			update => {
++				if (update.details) {
++					updates.push({
++						text: update.content.find(part => part.type === "text")?.text ?? "",
++						details: update.details,
++					});
++				}
++			},
++		);
++
++		const fastRun = await waitForRun("Fast");
++		const slowRun = await waitForRun("Slow");
++		fastRun.resolve();
++		await manager.getJob("Fast")?.promise;
++
++		expect(manager.cancel("Slow", undefined, STRAGGLER_CANCEL_REASON)).toBe(true);
++		await pollUntil(() => register.mock.calls.some(call => call[3]?.logicalItemId === "Slow" && call[3]?.attempt === 1));
++		const retryRun = await waitForRun("Slow-2");
++		expect(latestUpdate(updates).details.async?.state).toBe("running");
++
++		expect(manager.cancel("Slow-2", undefined, STRAGGLER_CANCEL_REASON)).toBe(true);
++		retryRun.resolve(cancelledResult(retryRun, "straggler"));
++		await manager.getJob("Slow-2")?.promise;
++		slowRun.resolve(cancelledResult(slowRun, "late original straggler"));
++		await manager.getJob("Slow")?.promise;
++		await flushMicrotasks();
++
++		expect(registrationsFor(register.mock.calls, "Slow").map(options => options.attempt)).toEqual([0, 1]);
++		expect(manager.getJob("Slow-3")).toBeUndefined();
++		const finalUpdate = latestUpdate(updates);
++		expect(finalUpdate.details.async?.state).toBe("failed");
++		expect(progressFor(finalUpdate.details, "Slow-2")?.status).toBe("missing");
++		expect(finalUpdate.text.toLowerCase()).toContain("missing");
++	});
++
++	it("does not retry default policy stragglers or non-straggler cancellations", async () => {
++		const cases: Array<{
++			name: string;
++			params: TaskParams;
++			cancelReason: unknown;
++		}> = [
++			{
++				name: "default policy",
++				params: {
++					context: "No retry by default.",
++					tasks: [{ name: "DefaultSlow", task: "Do not retry.", isolated: true }],
++				},
++				cancelReason: STRAGGLER_CANCEL_REASON,
++			},
++			{
++				name: "ordinary cancellation",
++				params: {
++					context: "Retry only stragglers.",
++					tasks: [
++						{
++							name: "OrdinarySlow",
++							task: "Do not retry this cancellation.",
++							isolated: true,
++							stragglerPolicy: { retryLimit: 1, classifyExhaustedAsMissing: true },
++						},
++					],
++				},
++				cancelReason: STRAGGLER_REASON_LOOKALIKE,
++			},
++		];
++
++		for (const testCase of cases) {
++			const manager = makeManager();
++			const register = vi.spyOn(manager, "register");
++			const tool = await TaskTool.create(createSession(manager));
++			const itemName = testCase.params.tasks?.[0]?.name;
++			if (!itemName) throw new Error(`Missing item name for ${testCase.name}`);
++
++			await tool.execute(`tc-no-retry-${testCase.name}`, testCase.params);
++			const run = await waitForRun(itemName);
++			expect(manager.cancel(itemName, undefined, testCase.cancelReason)).toBe(true);
++			run.resolve(
++				cancelledResult(
++					run,
++					testCase.cancelReason === STRAGGLER_CANCEL_REASON ? "straggler without retry" : "AsyncJobManager straggler cancellation",
++				),
++			);
++			await manager.getJob(itemName)?.promise;
++			await flushMicrotasks();
++
++			expect(registrationsFor(register.mock.calls, itemName).map(options => options.attempt)).toEqual([0]);
++			expect(manager.getJob(`${itemName}-2`)).toBeUndefined();
++		}
++	});
++});
+-- 
+2.55.0
+

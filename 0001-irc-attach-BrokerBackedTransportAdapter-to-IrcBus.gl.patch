@@ -1,0 +1,87 @@
+From 4dc32bb63ec18ed8e81243aa3bc208aa187ac116 Mon Sep 17 00:00:00 2001
+From: Jamie <jamie@Jamies-MacBook-Pro.local>
+Date: Thu, 3 Sep 2026 00:48:14 +1200
+Subject: [PATCH] irc: attach BrokerBackedTransportAdapter to IrcBus.global()
+ at interactive init (cross-session hub send)
+
+---
+ .../coding-agent/src/tools/hub/messaging.ts   | 39 ++++++++++++++++++-
+ 1 file changed, 37 insertions(+), 2 deletions(-)
+
+diff --git a/packages/coding-agent/src/tools/hub/messaging.ts b/packages/coding-agent/src/tools/hub/messaging.ts
+index e3e76bf87f..8e92d8065f 100644
+--- a/packages/coding-agent/src/tools/hub/messaging.ts
++++ b/packages/coding-agent/src/tools/hub/messaging.ts
+@@ -203,6 +203,31 @@ export async function executeList(
+ 		].filter(Boolean);
+ 		lines.push(`- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}] — ${extras.join(", ")}`);
+ 	}
++
++	// Cross-session peers from other omp processes on the shared project broker
++	const remotePeers = await bus.remotePeers();
++	if (remotePeers.length > 0) {
++		lines.push("");
++		lines.push("Cross-session peers (other omp processes in this project, addressable by session id):");
++		for (const address of remotePeers) {
++			lines.push(
++				`- ${address.session} [remote · ${address.backend} · running] — another omp process (pid ${address.process})`,
++			);
++		}
++		for (const address of remotePeers) {
++			peers.push({
++				id: address.session,
++				displayName: "remote session",
++				kind: "sub",
++				parentId: undefined,
++				status: "running",
++				unread: 0,
++				lastActivity: Date.now(),
++				activity: "cross-session peer (another omp process)",
++			});
++		}
++	}
++
+ 	if (counts.parked > 0) {
+ 		lines.push("");
+ 		lines.push(
+@@ -263,6 +288,7 @@ export async function executeSend(
+ 	}
+ 
+ 	const bus = IrcBus.global();
++	const targetIsLocal = registry.get(to) !== undefined;
+ 	let waited: IrcMessage | null | undefined;
+ 	const timeoutMs = params.await ? resolveMessageTimeoutMs(settings, params.timeoutMs) : undefined;
+ 	const awaitAbort = params.await ? new AbortController() : undefined;
+@@ -272,7 +298,7 @@ export async function executeSend(
+ 		? bus
+ 				.wait(senderId, { from: to }, timeoutMs ?? DEFAULT_IRC_TIMEOUT_MS, awaitAbort?.signal, {
+ 					drainPending: false,
+-					awaitTarget: { registry, target: to },
++					...(targetIsLocal ? { awaitTarget: { registry, target: to } } : {}),
+ 				})
+ 				.then(
+ 					message => ({ message, error: null as Error | null }),
+@@ -401,10 +427,19 @@ export async function executeMessageWait(
+ ): Promise<AgentToolResult<CoordinationDetails>> {
+ 	const { registry, senderId, settings } = deps;
+ 	const from = params.from?.trim() || undefined;
++	// Liveness: abort when all peers stop. Valid only when from is local
++	// (remote peers are invisible to the lifecycle manager) or when bare wait
++	// has at least one local peer (no false "no running peers" with only remote).
++	let liveness: { registry: AgentRegistry; senderId: string } | undefined = { registry, senderId };
++	if (from !== undefined && registry.get(from) === undefined) {
++		liveness = undefined;
++	} else if (from === undefined && registry.listVisibleTo(senderId).length === 0 && (await IrcBus.global().remotePeers()).length > 0) {
++		liveness = undefined;
++	}
+ 	const timeoutMs = resolveMessageTimeoutMs(settings, params.timeoutMs);
+ 	try {
+ 		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
+-			liveness: { registry, senderId },
++			...(liveness ? { liveness } : {}),
+ 		});
+ 		if (!waited) {
+ 			const filterNote = from ? ` from ${from}` : "";
+-- 
+2.55.0
+

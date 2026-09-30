@@ -4,14 +4,22 @@ import { inspectMany, type InspectManyRequest, type InspectManyResult } from "..
 import { AsyncJobManagerJobExecutor, type JobExecutionSubstrate } from "../capability/job-executor";
 import { createOperationId } from "../capability/contracts/ids";
 import type { ToolSession } from "./index";
-import { runStructuredSubagent, type StructuredSubagentInput } from "../task/structured-subagent";
+import { runStructuredSubagent, type StructuredSubagentRequest } from "../task/structured-subagent";
 import inspectManyDescription from "../prompts/tools/inspect_many.md" with { type: "text" };
+
+const inspectExclusionSchema = type({ kind: "'repository'" })
+	.or({ kind: "'path'", path: "string" })
+	.or({ kind: "'glob'", pattern: "string" })
+	.or({ kind: "'package'", name: "string" })
+	.or({ kind: "'module'", name: "string" });
 
 const inspectManySchema = type({
 	objective: type("string").describe("What you're investigating (e.g., 'map all API endpoints')"),
 	"repositoryRoot?": type("string").describe("Repository root (defaults to project directory)"),
 	"selectors?": type("string[]").describe("Scope: repository (all), path, or glob pattern (omit for full repo)"),
-	"exclusions?": type("string[]").describe("Exclusion patterns"),
+	"exclusions?": inspectExclusionSchema
+		.array()
+		.describe("Drop matching files from the generated manifest before read. Same ScopeSelector forms as capability exclusions."),
 	"maxFilesPerChunk?": type("number").describe("Max files per reader chunk"),
 	"targetSourceTokensPerChunk?": type("number").describe("Target tokens per chunk"),
 	"maxConcurrency?": type("number").describe("Max concurrent reader jobs (default: 4)"),
@@ -49,7 +57,13 @@ export class InspectManyTool implements AgentTool<typeof inspectManySchema, Insp
 			objective: string;
 			repositoryRoot?: string;
 			selectors?: Array<{ kind: "repository" } | { kind: "path"; path: string } | { kind: "glob"; pattern: string }>;
-			exclusions?: Array<{ kind: "path"; path: string } | { kind: "glob"; pattern: string }>;
+			exclusions?: Array<
+				| { kind: "repository" }
+				| { kind: "path"; path: string }
+				| { kind: "glob"; pattern: string }
+				| { kind: "package"; name: string }
+				| { kind: "module"; name: string }
+			>;
 			maxFilesPerChunk?: number;
 			targetSourceTokensPerChunk?: number;
 			maxConcurrency?: number;
@@ -73,17 +87,18 @@ export class InspectManyTool implements AgentTool<typeof inspectManySchema, Insp
 		// Create substrate that dispatches reader jobs via runStructuredSubagent
 		const substrate: JobExecutionSubstrate = {
 			execute: async (job, context) => {
-				const subagentInput: StructuredSubagentInput = {
+				const subagentRequest: StructuredSubagentRequest = {
+					session: this.session,
+					invocationKind: "task",
+					assignment: job.objective,
 					agent: job.agent.name,
-					agentSource: job.agent.source,
-					task: job.objective,
 					outputSchema: job.outputSchema,
 					signal: context.signal,
 				};
 
 				try {
-					const result = await runStructuredSubagent(subagentInput, this.session);
-					return result.data ?? result.output;
+					const result = await runStructuredSubagent(subagentRequest);
+					return result.result;
 				} catch (error) {
 					throw new Error(
 						`Reader job ${job.jobId} failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -96,9 +111,11 @@ export class InspectManyTool implements AgentTool<typeof inspectManySchema, Insp
 			manager: this.session.asyncJobManager,
 			substrate,
 		});
-
 		const repositoryRoot = input.repositoryRoot ?? this.session.cwd;
-		const selectors = input.selectors ?? [{ kind: "repository" as const }];
+		const defaultSelector = { kind: "repository" as const };
+		const selectors: InspectManyRequest["selectors"] = input.selectors?.length
+			? (input.selectors as unknown as InspectManyRequest["selectors"])
+			: [defaultSelector];
 
 		const request: InspectManyRequest = {
 			objective: input.objective,
@@ -124,9 +141,10 @@ export class InspectManyTool implements AgentTool<typeof inspectManySchema, Insp
 			const result: InspectManyResult = await inspectMany(request, { executor });
 
 			const statusText = result.status.kind === "complete" ? "Complete" : result.status.kind;
-			const coverageText = result.coverage.complete
-				? "✓ Complete coverage"
-				: `Partial: ${result.coverage.processedCount}/${result.coverage.requiredCount} entries`;
+			const coverageComplete = result.coverage.gapIds.length === 0;
+			const coverageText = coverageComplete
+				? "Complete coverage"
+				: `Partial: ${result.coverage.gapIds.length} gaps`;
 
 			const text = [
 				`**${statusText}** — ${coverageText}`,
@@ -147,7 +165,7 @@ export class InspectManyTool implements AgentTool<typeof inspectManySchema, Insp
 					manifestEntryCount: result.manifest.entries.length,
 					chunkCount: result.chunkPlan.chunks.length,
 					findingCount: result.findings.length,
-					coverageComplete: result.coverage.complete,
+					coverageComplete,
 					status: result.status.kind,
 				},
 			};

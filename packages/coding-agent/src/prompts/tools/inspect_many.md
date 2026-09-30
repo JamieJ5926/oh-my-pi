@@ -9,6 +9,13 @@ Generates a manifest of files in scope, chunks them by module/package, dispatche
 - `{ kind: "path", path: "src" }` — specific directory or file
 - `{ kind: "glob", pattern: "**/*.test.ts" }` — glob pattern
 
+**Exclusions:** optional array of the same ScopeSelector objects the capability contract accepts (`InspectManyRequest.exclusions` / `generateManifest`). Dropped paths never enter the manifest. Accepted forms:
+- `{ kind: "repository" }` — exclude everything (empty manifest)
+- `{ kind: "path", path: "dist" }` — exclude a directory or file
+- `{ kind: "glob", pattern: "**/*.generated.ts" }` — exclude by glob
+- `{ kind: "package", name: "foo" }` — exclude a package name
+- `{ kind: "module", name: "bar" }` — exclude a module name
+
 **Constraints:**
 - `maxFilesPerChunk` — limit files per reader job (default: unlimited)
 - `targetSourceTokensPerChunk` — target tokens per chunk (default: unlimited)
