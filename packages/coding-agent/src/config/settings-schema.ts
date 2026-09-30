@@ -5173,6 +5173,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.rustLeaf.binaryPath": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Rust Leaf Binary",
+			description:
+				"Configured executable path for the opt-in Rust leaf driver (AgentDefinition.leaf). Empty means unconfigured: an explicit per-call binaryPath wins, PI_RUST_LEAF_CMD is a last-resort fallback, otherwise the spawn fails closed. No settings toggle participates: explicit leaf selection alone gates.",
+		},
+	},
+
 	"task.maxRecursionDepth": {
 		type: "number",
 		default: 2,

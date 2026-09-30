@@ -165,6 +165,9 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"advisor.immuneTurns",
 	"advisor.maxNotesPerUpdate",
 	"tier.advisor",
+	// Opt-in Rust leaf driver executable (frozen slice v2). Config VALUE only:
+	// no settings toggle participates, explicit AgentDefinition.leaf alone gates.
+	"task.rustLeaf.binaryPath",
 ];
 
 const RPC_BACKGROUND_DEFAULTED_SETTING_PATHS: SettingPath[] = [

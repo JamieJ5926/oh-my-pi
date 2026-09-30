@@ -27,6 +27,8 @@ import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
 import type { MCPRequestIdFormat } from "../mcp/types";
+import { validateLeafSelection } from "../task/rust-leaf-driver";
+import type { LeafRequest, LeafSelection } from "../task/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
@@ -299,6 +301,57 @@ export interface ParsedAgentFields {
 	prewalk?: boolean | string;
 	/** `true` = advise with the default advisor-role model; string = advise with that model pattern. */
 	advisor?: boolean | string;
+	/** Explicit Rust-leaf routing: a Task agent carrying this block selects the leaf driver. */
+	leaf?: LeafRequest;
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(entry => typeof entry === "string");
+}
+
+/**
+ * Parse the `leaf` frontmatter block into a {@link LeafRequest}, or null
+ * when absent or malformed. Fail-closed: an unknown runtime, a missing
+ * endpoint, or a selection that fails the driver shape validator returns
+ * null (the caller rejects the agent), never a silent drop to the host
+ * path on explicit opt-in.
+ */
+function parseFrontmatterLeaf(value: unknown): LeafRequest | null {
+	if (value === undefined) return null;
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+	const record = value as Record<string, unknown>;
+	const runtime = record["runtime"];
+	if (runtime !== undefined && runtime !== "host" && runtime !== "rust") return null;
+	const endpoint = record["endpoint"];
+	if (typeof endpoint !== "string" || !endpoint.trim()) return null;
+	const selectionValue = record["selection"];
+	if (typeof selectionValue !== "object" || selectionValue === null) return null;
+	const layers = selectionValue as Record<string, unknown>;
+	for (const key of ["system", "role", "subrole"] as const) {
+		const layer = layers[key];
+		if (typeof layer !== "object" || layer === null) return null;
+		const layerRecord = layer as Record<string, unknown>;
+		if (typeof layerRecord["enabled"] !== "boolean") return null;
+		if (typeof layerRecord["name"] !== "string") return null;
+		if (!isStringArray(layerRecord["shared"])) return null;
+	}
+	const selection = selectionValue as LeafSelection;
+	try {
+		validateLeafSelection(selection);
+	} catch {
+		return null;
+	}
+	const leaf: LeafRequest = {
+		selection,
+		endpoint,
+	};
+	if (runtime === "host" || runtime === "rust") leaf.runtime = runtime;
+	if (typeof record["binaryPath"] === "string") leaf.binaryPath = record["binaryPath"];
+	if (typeof record["eventsPath"] === "string") leaf.eventsPath = record["eventsPath"];
+	if (typeof record["maxToolCalls"] === "number") leaf.maxToolCalls = record["maxToolCalls"];
+	if (typeof record["wallSecs"] === "number") leaf.wallSecs = record["wallSecs"];
+	if (typeof record["loadPath"] === "string") leaf.loadPath = record["loadPath"];
+	return leaf;
 }
 
 /**
@@ -379,6 +432,14 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
+	// Leaf routing: a present `leaf` block must parse cleanly; a malformed
+	// block fails the whole agent closed (null), never a silent drop.
+	let leaf: LeafRequest | undefined;
+	if (frontmatter["leaf"] !== undefined) {
+		const parsed = parseFrontmatterLeaf(frontmatter["leaf"]);
+		if (parsed === null) return null;
+		leaf = parsed;
+	}
 	return {
 		name,
 		description,
@@ -392,6 +453,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		readSummarize,
 		prewalk,
 		advisor,
+		leaf,
 	};
 }
 

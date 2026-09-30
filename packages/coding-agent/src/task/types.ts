@@ -390,8 +390,18 @@ export interface AgentDefinition {
 	prewalk?: boolean | string;
 	/** Advisor for spawned sessions of this agent: `true` = advise with the default advisor-role model, string = advise with that model pattern (optional `:level` suffix). Absent/`false` = no advisor. */
 	advisor?: boolean | string;
-	source: AgentSource;
+	/**
+	 * Explicit Rust-leaf routing for this agent (frozen slice v2). A Task
+	 * agent carrying this block selects the leaf driver: `runSubprocess`
+	 * resolves `agent.leaf`, and `runtime: "rust"` routes
+	 * the spawn through `driveRustLeaf` — even with every selection layer
+	 * off. This is a visible agent-file surface, never a hidden field.
+	 * Frontmatter parsing populates it via `parseAgentFields`.
+	 */
+	leaf?: LeafRequest;
+	/** Filesystem path the agent definition was loaded from, when discovered from disk. */
 	filePath?: string;
+	source: AgentSource;
 }
 
 /** Details extracted from a subagent `yield` tool call for final-result assembly and task rendering. */
@@ -585,4 +595,54 @@ export interface TaskToolDetails {
 		jobId: string;
 		type: "task";
 	};
+}
+
+/**
+ * Leaf executor runtime selector (frozen slice v2).
+ * `host` preserves the default in-process path byte-for-byte; `rust`
+ * routes the spawn through the read-only Rust leaf driver. The union is
+ * closed: unknown values never silently fall back to `host` (the driver
+ * throws before spawn on explicit opt-in failure).
+ */
+export type LeafRuntime = "host" | "rust";
+
+/**
+ * One F6 selection layer, mirroring `LayerSel` in
+ * `pi_track_agent::instructions` exactly: enable flag, profile name, and
+ * explicit ordered shared-ref rel paths. No top-level shared list exists —
+ * a disabled layer omits its refs with it. The model travels separately
+ * through the existing `modelOverride` path, never inside this struct.
+ */
+export interface LeafSelectionLayer {
+	enabled: boolean;
+	name: string;
+	shared: string[];
+}
+
+/**
+ * F6 forward-struct (frozen slice v2), mirroring `ProfileSel` exactly:
+ * system, role, subrole, no top-level shared. OMP validates shape only
+ * before spawn and never renders instruction text: names+enables are
+ * translated to the consumed `--instructions-*` CLI flags and Rust owns
+ * assembly, ordering, confinement, and frontmatter. System name is fixed
+ * `'default'`. All-off (every layer disabled) runs the leaf with every
+ * layer off when `runtime: "rust"` is explicit; all-off falls through to
+ * the legacy OMP path ONLY with no explicit leaf (`leaf` absent or
+ * `runtime: "host"`). The model travels separately through the existing
+ * `modelOverride` path, never inside this struct.
+ */
+export interface LeafSelection {
+	system: LeafSelectionLayer;
+	role: LeafSelectionLayer;
+	subrole: LeafSelectionLayer;
+}
+export interface LeafRequest {
+	runtime?: LeafRuntime;
+	selection: LeafSelection;
+	endpoint: string;
+	binaryPath?: string;
+	eventsPath?: string;
+	maxToolCalls?: number;
+	wallSecs?: number;
+	loadPath?: string;
 }

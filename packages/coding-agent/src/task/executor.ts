@@ -13,7 +13,7 @@ import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-m
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import { ModelRegistry } from "../config/model-registry";
+import { ModelRegistry, isAuthenticated } from "../config/model-registry";
 import {
 	formatModelSelectorValue,
 	formatModelStringWithRouting,
@@ -72,11 +72,13 @@ import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
+import { driveRustLeaf, isLeafRunId, leafRevivalUnsupportedResult } from "./rust-leaf-driver";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
 	type AgentProgress,
+	type LeafRequest,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
 	type SingleResult,
@@ -1068,12 +1070,16 @@ interface SubagentRunMonitor {
 	takeActiveSession(): AgentSession | null;
 	/** Subscribe the monitor to a session's events. Returns the unsubscribe function. */
 	attach(session: AgentSession): () => void;
+	/** Feed one native agent event (e.g. a Rust leaf display record) straight into the reducer. */
+	ingestAgentEvent(event: AgentEvent): void;
 	/** Best-effort capture of the last assistant text for cancelled-run salvage. */
 	captureSalvage(session: AgentSession): void;
 	lastAssistantSalvageText(): string | undefined;
 	/** Final raw output: end-of-run assistant text when available, else accumulated chunks. */
 	rawOutput(): string;
 	scheduleProgress(flush?: boolean): void;
+	/** Pin the settled identity for sessionless runs (Rust leaf): no session ever attaches, so the serving-model publish never fires. Never marks fallback. */
+	setResolvedIdentity(identity: { selector: string; modelIdentity: string }): void;
 	/** Stop processing events and clear listeners/timers. Call once the run settled. */
 	finish(): void;
 }
@@ -1928,10 +1934,28 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			return session;
 		},
 		attach,
+	ingestAgentEvent: event => {
+		pushLoopPhase(`subagent:${id}`);
+		try {
+			processEvent(event);
+		} catch (err) {
+			logger.error("Subagent event processing failed", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+			requestAbort("terminate");
+		} finally {
+			popLoopPhase();
+		}
+	},
 		captureSalvage,
 		lastAssistantSalvageText: () => lastAssistantSalvageText,
 		rawOutput: () => (finalOutputChunks.length > 0 ? finalOutputChunks.join("") : outputChunks.join("")),
 		scheduleProgress,
+		setResolvedIdentity: identity => {
+			progress.resolvedModel = identity.selector;
+			progress.resolvedModelIdentity = identity.modelIdentity;
+			scheduleProgress(true);
+		},
 		finish: () => {
 			resolved = true;
 			listenerController.abort();
@@ -2862,6 +2886,24 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
 	const startTime = Date.now();
+	// Leaf-id own path: a follow-up addressing a leaf id never reaches
+	// ensureLive (which would throw the accidental unknown-agent error).
+	// It returns the named unsupported-revival result instead.
+	// Durable recognition: the in-memory Set covers this process; the
+	// stable per-run native events artifact covers prior processes
+	// (cross-process revival). Never infer Date.now tmpdir names.
+	let recognizedLeafRun = isLeafRunId(id);
+	if (!recognizedLeafRun && options.artifactsDir) {
+		try {
+			await fs.stat(path.join(options.artifactsDir, `${id}.rust-leaf-events.jsonl`));
+			recognizedLeafRun = true;
+		} catch {
+			recognizedLeafRun = false;
+		}
+	}
+	if (recognizedLeafRun) {
+		return leafRevivalUnsupportedResult({ index, id, agentName: agent.name, agentSource: agent.source });
+	}
 	let session = await AgentLifecycleManager.global().ensureLive(id);
 	// Acquire turn ownership before mutating the shared yield contract: installing
 	// pooled items under a running ordinary wake would reject its in-flight tool
@@ -3049,6 +3091,203 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			aborted: true,
 			abortReason: "Cancelled before start",
 		};
+	}
+
+	// Frozen slice v2: explicit `leaf` selection alone gates the Rust leaf
+	// driver (ROOT CUTS 2026-09-13, no settings toggle). Caller chain:
+	// TaskTool.execute (`task/index.ts:678`) → spawnParamsFor
+	// (`task/index.ts:288`) → resolveEffectiveSubagentPolicy
+	// (`task/structured-subagent.ts:262`, discovery via
+	// `task/discovery.ts:82` ← loadAgentsFromDir `discovery.ts:49` +
+	// loadBundledAgents `task/agents.ts:131`, getAgent `discovery.ts:166`,
+	// unknown-agent `structured-subagent.ts:276`) → buildExecutorOptions
+	// (`structured-subagent.ts:391`) → runSubprocess (`structured-subagent.ts:613`).
+	// Wiring: the resolved Task agent selects the leaf through its visible
+	// `AgentDefinition.leaf` block (frontmatter `leaf`, parsed by
+	// `parseAgentFields` in `discovery/helpers.ts`). `runtime: "rust"` runs
+	// the leaf even with every selection layer off; all-off falls through
+	// to the legacy OMP path ONLY with no explicit leaf. A live leaf
+	// selection throws before spawn on failure and never falls back to the
+	// host loop. The leaf model resolves from the existing executor
+	// selection (`modelOverride ?? agent.model`, as at `modelPatterns`
+	// below), never inside `leaf.selection`. This branch returns before
+	// createAgentSession and the SessionManager.open-based revival closure,
+	// and never touches the AgentRegistry: leaf runs are explicitly
+	// non-revivable (LEAF_REVIVAL_UNSUPPORTED).
+	const leaf = agent.leaf;
+	if (leaf?.runtime === "rust") {
+		const configuredBinaryPath = options.settings?.get("task.rustLeaf.binaryPath");
+		// Stable per-run native events path under the owned artifact root:
+		// an explicit per-drive override so revival recognition never infers
+		// Date.now tmpdir names. Native R display records only, never the
+		// OMP session jsonl.
+		const leafWithEventsPath =
+			options.artifactsDir !== undefined
+				? { ...leaf, eventsPath: path.join(options.artifactsDir, `${id}.rust-leaf-events.jsonl`) }
+				: leaf;
+	// Join the existing monitor/finalize path: a real SubagentRunMonitor
+	// from the existing factory, leaf display records ingested as real
+	// AgentEvents through the existing processEvent reducer (deltas stream
+	// as message_end into outputChunks, the terminal turn closes as
+	// agent_end into finalOutputChunks read by rawOutput), the done pair
+	// mapped from the caller signal plus the Rust terminal state, then the
+	// existing finalizeRunResult (yield, salvage, truncation, artifact
+	// write, lifecycle end). No new finalizer; the settled SingleResult
+	// shape is never passed off as monitor input.
+		const leafSettings = options.settings ?? Settings.isolated();
+		// Real message provenance for adapted leaf assistant events: the same
+		// `modelOverride ?? agent.model` patterns resolved through the existing
+		// registry. Absent on miss (opaque gate literals) — the driver then
+		// attributes by the actual serving endpoint and `--model` flag.
+		if (options.modelRegistry === undefined) {
+			throw new Error(
+				"Rust leaf requested but options.modelRegistry is missing: leaf model provenance resolves through the session registry, refusing quiet undefined provenance",
+			);
+		}
+		const leafResolved = resolveModelOverride(
+			normalizeModelPatterns(modelOverride ?? agent.model),
+			options.modelRegistry,
+			leafSettings,
+		);
+		const leafResolvedModel = leafResolved.model;
+		// Host effort rule, mirrored (see the non-leaf resolution below):
+		// caller effort > explicit `:level` suffix > caller thinkingLevel >
+		// pattern-derived default. The leaf binary has no effort surface (no
+		// CLI flag, no ProviderReq field), so any effective level rejects
+		// pre-spawn instead of silently running different inference than
+		// requested.
+		const leafEffortCeiling = options.effort !== undefined ? leafSettings.get("task.maxEffort") : undefined;
+		const leafEffortLevel =
+			options.effort !== undefined
+				? resolveTaskEffortLevel(leafResolvedModel, options.effort, leafEffortCeiling)
+				: undefined;
+		const leafEffectiveLevel =
+			leafEffortLevel ??
+			(leafResolved.explicitThinkingLevel
+				? leafResolved.thinkingLevel
+				: (options.thinkingLevel ?? leafResolved.thinkingLevel));
+		if (leafEffectiveLevel !== undefined) {
+			let leafEffortSource = "pattern-derived default";
+			if (options.effort !== undefined) leafEffortSource = "task effort";
+			else if (leafResolved.explicitThinkingLevel) leafEffortSource = "explicit :level suffix";
+			else if (options.thinkingLevel !== undefined) leafEffortSource = "caller thinkingLevel";
+			const leafRawFirst = normalizeModelPatterns(modelOverride ?? agent.model)[0] ?? "(no model pattern)";
+			const leafWho =
+				leafResolvedModel !== undefined ? `${leafResolvedModel.provider}/${leafResolvedModel.id}` : leafRawFirst;
+			throw new Error(
+				`rust-leaf-effort-unsupported: requested ${leafEffectiveLevel} (${leafEffortSource}) for ${leafWho}; Rust leaf has no effort transport`,
+			);
+		}
+		const leafModelProvenance =
+			leafResolvedModel === undefined
+				? undefined
+				: {
+						api: leafResolvedModel.api,
+						provider: leafResolvedModel.provider,
+						model: leafResolvedModel.id,
+					};
+		// Caller-registry credential for the resolved provider route: the same
+		// resolution result that yields api/provider/id above resolves auth via
+		// the session registry. Authenticated keys forward as PI_TRACK_API_KEY;
+		// absent, blank, or keyless (kNoAuth) keeps inherit spawn byte-identical.
+		const leafApiKey = leafResolvedModel === undefined ? undefined : await options.modelRegistry.getApiKey(leafResolvedModel);
+		const leafProxyCredential = leafApiKey !== undefined && isAuthenticated(leafApiKey) ? leafApiKey : undefined;
+		// Forced-tool-choice support from the ACTUAL override-merged resolution
+		// (never a raw catalog search): the same leafResolvedModel that yields
+		// api/provider/id above. Models that reject forced tool_choice still
+		// accept tools with the default auto selector (host precedent
+		// openai-completions.ts:1771); unknown compat keeps the historical
+		// required-with-tools behavior.
+		const leafCompat = leafResolvedModel?.compat;
+		const leafForceToolChoice =
+			leafCompat !== undefined && "supportsForcedToolChoice" in leafCompat
+				? (leafCompat.supportsForcedToolChoice ?? true)
+				: true;
+		const leafSessionFile =
+			options.artifactsDir !== undefined ? path.join(options.artifactsDir, `${id}.jsonl`) : undefined;
+		const leafMonitor = createSubagentRunMonitor({
+			index,
+			id,
+			agent,
+			task,
+			assignment,
+			description: options.description,
+			modelRegistry: options.modelRegistry,
+			settings: leafSettings,
+			modelOverride,
+			modelRole,
+			signal,
+			onProgress,
+			eventBus: options.eventBus,
+			subagentEventBus: options.subagentEventBus,
+			parentToolCallId: options.parentToolCallId,
+			detached: options.detached,
+			sessionFile: leafSessionFile,
+			softRequestBudget: 0,
+			softRequestBudgetNotice: false,
+			maxRuntimeMs: Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? 0) || 0)),
+		});
+	const outcome = await driveRustLeaf({
+		index,
+		id,
+		agentName: agent.name,
+		agentSource: agent.source,
+		task,
+		assignment,
+		description: options.description,
+		cwd,
+		leaf: leafWithEventsPath,
+		configuredBinaryPath,
+		modelOverride,
+		agentModel: agent.model,
+		modelRole,
+		signal: leafMonitor.abortSignal,
+		modelProvenance: leafModelProvenance,
+		proxyCredential: leafProxyCredential,
+		forceToolChoice: leafForceToolChoice,
+		onAgentEvent: event => leafMonitor.ingestAgentEvent(event),
+	});
+	const leafSignalAborted = Boolean(signal?.aborted);
+	const leafAborted = leafSignalAborted || outcome.aborted === true;
+	// P2 cancel normalization: a cooperative Cancelled turn exits 0 with no
+	// yield tool, so the generic no-yield branch would invent three yield
+	// reminders. A cancelled outcome stays truthful here instead: nonzero
+	// exit plus the actual reason, partial output/provenance preserved.
+	const leafCancelReason = leafSignalAborted ? "signal" : (outcome.abortReason ?? outcome.error ?? "cancelled");
+	const done = {
+		exitCode: leafAborted ? (outcome.exitCode !== 0 ? outcome.exitCode : 1) : outcome.exitCode,
+		error: leafAborted ? (outcome.error ?? leafCancelReason) : outcome.error,
+		aborted: leafAborted,
+		abortReason: leafAborted ? leafCancelReason : outcome.abortReason,
+		durationMs: outcome.durationMs,
+	};
+	if (leafResolvedModel !== undefined) {
+		const leafIdentity = formatModelStringWithRouting(leafResolvedModel);
+		leafMonitor.setResolvedIdentity({ selector: leafIdentity, modelIdentity: leafIdentity });
+	}
+		leafMonitor.finish();
+		return finalizeRunResult({
+			monitor: leafMonitor,
+			done,
+			index,
+			id,
+			agent,
+			task,
+			assignment,
+			modelOverride,
+			modelRole,
+			outputSchema,
+			outputSchemaMode: options.outputSchemaMode,
+			outputSchemaSource: options.outputSchemaSource,
+			signal,
+			artifactsDir: options.artifactsDir,
+			eventBus: options.eventBus,
+			subagentEventBus: options.subagentEventBus,
+			parentToolCallId: options.parentToolCallId,
+			detached: options.detached,
+			sessionFile: leafSessionFile,
+			startTime,
+		});
 	}
 
 	// Set up artifact paths and write input file upfront if artifacts dir provided
