@@ -88,12 +88,42 @@ import {
 } from "./types";
 import { arrayValuedLabels, assembleYieldResult } from "./yield-assembly";
 
-import type { FrankEvent, FrankWorkerBudgets, FrankWorkerHandle, FrankWorkerResult, SpawnFrankWorkerOptions, StartFrankWorkerOptions } from "./frank-worker";
+import type {
+	FrankEvent,
+	FrankWorkerBudgets,
+	FrankWorkerHandle,
+	FrankWorkerResult,
+	SpawnFrankWorkerOptions,
+	StartFrankWorkerOptions,
+} from "./frank-worker";
 import { spawnFrankWorker, startFrankWorker } from "./frank-worker";
 import { FrankWorkerExitError, extractFrankYieldItems } from "./frank-worker-fold";
 import type { FrankHostToolService } from "./frank-host-tools";
 
-export interface FrankExecutorOptions extends Pick<ExecutorOptions, "agent" | "task" | "assignment" | "index" | "id" | "description" | "modelOverride" | "modelRole" | "signal" | "onProgress" | "eventBus" | "subagentEventBus" | "parentToolCallId" | "detached" | "artifactsDir" | "outputSchema" | "outputSchemaMode" | "outputSchemaSource" | "keepAlive" | "frankTransport" | "parentAgentId"> {
+export interface FrankExecutorOptions extends Pick<
+	ExecutorOptions,
+	| "agent"
+	| "task"
+	| "assignment"
+	| "index"
+	| "id"
+	| "description"
+	| "modelOverride"
+	| "modelRole"
+	| "signal"
+	| "onProgress"
+	| "eventBus"
+	| "subagentEventBus"
+	| "parentToolCallId"
+	| "detached"
+	| "artifactsDir"
+	| "outputSchema"
+	| "outputSchemaMode"
+	| "outputSchemaSource"
+	| "keepAlive"
+	| "frankTransport"
+	| "parentAgentId"
+> {
 	cwd: string;
 	exe: string;
 	endpoint: string;
@@ -130,13 +160,17 @@ function createFrankEventForwarder(
 	eventBus?: EventBus,
 	subagentEventBus?: EventBus,
 ): (event: FrankEvent) => void {
-	return event => emitSubagentFrame(eventBus, subagentEventBus, TASK_SUBAGENT_EVENT_CHANNEL, {
-		id,
-		event: event.event,
-	});
+	return event =>
+		emitSubagentFrame(eventBus, subagentEventBus, TASK_SUBAGENT_EVENT_CHANNEL, {
+			id,
+			event: event.event,
+		});
 }
 
-function finalizeFrankTerminal(result: FrankWorkerResult, monitor: SubagentRunMonitor): { exitCode: number; error?: string; aborted: boolean; abortReason?: string } {
+function finalizeFrankTerminal(
+	result: FrankWorkerResult,
+	monitor: SubagentRunMonitor,
+): { exitCode: number; error?: string; aborted: boolean; abortReason?: string } {
 	switch (result.terminal.terminal) {
 		case "Answer":
 			if (result.exitCode !== 0) throw new FrankWorkerExitError(result.exitCode, result.text);
@@ -774,14 +808,9 @@ function recoverDeliveredPayload(error: unknown): string | undefined {
 	// be a success token. A single ISSUES/BLOCKED/FAIL/ERROR on the resolution chain — the
 	// PASS/ISSUES contradiction, a top-level ISSUES beside a nested child PASS — keeps the payload
 	// on the abort path; so does the absence of any success token (a genuine cancel, a plain error).
-	const tokens = [
-		data?.status,
-		data?.verdict,
-		result?.status,
-		result?.verdict,
-		parsed.status,
-		parsed.verdict,
-	].filter((token): token is string => typeof token === "string");
+	const tokens = [data?.status, data?.verdict, result?.status, result?.verdict, parsed.status, parsed.verdict].filter(
+		(token): token is string => typeof token === "string",
+	);
 	if (tokens.length === 0) return undefined;
 	return tokens.every(token => Object.hasOwn(SUCCESS_OUTCOME_TOKENS, token.toLowerCase())) ? text : undefined;
 }
@@ -2849,9 +2878,11 @@ async function runRetainedFrankFollowUpTurn(
 			const abortedTurn = Symbol("aborted");
 			const abortPromise = signal
 				? new Promise<typeof abortedTurn>(resolve => {
-					onAbort = () => { void abort().then(() => resolve(abortedTurn)); };
-					signal.addEventListener("abort", onAbort, { once: true });
-				})
+						onAbort = () => {
+							void abort().then(() => resolve(abortedTurn));
+						};
+						signal.addEventListener("abort", onAbort, { once: true });
+					})
 				: undefined;
 			const result = abortPromise
 				? await Promise.race([worker.handle.runTurn(message), abortPromise])
@@ -2863,7 +2894,7 @@ async function runRetainedFrankFollowUpTurn(
 			}
 		}
 	} catch (caught) {
-		error = caught instanceof Error ? caught.stack ?? caught.message : String(caught);
+		error = caught instanceof Error ? (caught.stack ?? caught.message) : String(caught);
 		if (signal?.aborted) await abort();
 		else await closeRetainedFrankWorker(id, worker);
 	} finally {
@@ -3070,14 +3101,19 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			// so the same skill bodies ride in that file. Measured 2026-09-26: Frank
 			// pots spent 20-40 s reading skill files one call at a time before dispatching.
 			const autoloaded = await Promise.all(
-				(options.autoloadSkills ?? []).map(async skill => (await buildSkillPromptMessage(skill, "", "autoload")).message),
+				(options.autoloadSkills ?? []).map(
+					async skill => (await buildSkillPromptMessage(skill, "", "autoload")).message,
+				),
 			);
 			const rolePrompt = [options.agent.systemPrompt.trim(), ...autoloaded].filter(Boolean).join("\n\n");
 			if (rolePrompt && options.artifactsDir) {
 				const root = path.join(options.artifactsDir, `${id}.frank-profiles`);
 				const name = options.agent.name.replace(/[^A-Za-z0-9_-]/g, "-");
 				await Bun.write(path.join(root, "roles", name, "instructions", `${name}.md`), `${rolePrompt}\n`);
-				await Bun.write(path.join(root, "system", "instructions", "default.md"), "Use the provided role instructions.\n");
+				await Bun.write(
+					path.join(root, "system", "instructions", "default.md"),
+					"Use the provided role instructions.\n",
+				);
 				role = { root, name };
 			}
 			const workerOptions: StartFrankWorkerOptions = {
@@ -3092,7 +3128,9 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				apiKeyEnv: options.apiKeyEnv,
 				apiKey: options.apiKey,
 				hostTools: hostToolService?.toolNames() ?? [],
-				onToolRequest: hostToolService ? req => hostToolService.handle(req.name, req.args, String(req.call_id)) : undefined,
+				onToolRequest: hostToolService
+					? req => hostToolService.handle(req.name, req.args, String(req.call_id))
+					: undefined,
 				signal,
 				onEvent: event => {
 					events.push(event);
@@ -3109,21 +3147,26 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 				transport: options.transport ?? "process",
 				...(options.artifactsDir ? { sessionId: id } : {}),
 			};
+			const firstPrompt = options.parentAgentId
+				? `${options.text}\n\nYour OMP parent agent ID is ${options.parentAgentId}. Use this exact ID as the recipient value when messaging your parent with hub.`
+				: options.text;
 			let result: FrankWorkerResult;
 			if (options.transport === "daemon" && !(options.keepAlive && !options.runWorker)) {
-				result = await spawnFrankWorker({ ...workerOptions, text: options.text });
+				result = await spawnFrankWorker({ ...workerOptions, text: firstPrompt });
 			} else if (options.keepAlive && !options.runWorker) {
 				const handle = await startFrankWorker(workerOptions);
 				retainedWorker = {
 					handle,
 					spawnOptions: workerOptions,
 					closed: false,
-					setOnEvent: callback => { forwardEvent = callback; },
+					setOnEvent: callback => {
+						forwardEvent = callback;
+					},
 				};
 				retainedFrankWorkers.set(id, retainedWorker);
-				result = await handle.runTurn(options.text);
+				result = await handle.runTurn(firstPrompt);
 			} else {
-				result = await (options.runWorker ?? spawnFrankWorker)({ ...workerOptions, text: options.text });
+				result = await (options.runWorker ?? spawnFrankWorker)({ ...workerOptions, text: firstPrompt });
 			}
 			rawOutput = result.text;
 			monitor.progress.extractedToolData = monitor.progress.extractedToolData ?? {};
@@ -3161,7 +3204,7 @@ export async function runFrankSubagent(options: FrankExecutorOptions): Promise<S
 			error = caught.message;
 			rawOutput = caught.foldedText;
 		} else {
-			error = caught instanceof Error ? caught.stack ?? caught.message : String(caught);
+			error = caught instanceof Error ? (caught.stack ?? caught.message) : String(caught);
 		}
 		if (signal?.aborted) {
 			aborted = true;
