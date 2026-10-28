@@ -105,6 +105,7 @@ fn format_via_uucore(
 	// Keep going until we've exhausted all format arguments. Also make sure to run
 	// at least once even if there's no format arguments.
 	while format_args.is_empty() || !format_args_wrapper.is_exhausted() {
+		let first_arg = format_args_wrapper.peek_arg();
 		// Process all format items, in order. We'll bail when we're told to stop.
 		for item in &format_items {
 			let control_flow =
@@ -124,12 +125,12 @@ fn format_via_uucore(
 			}
 		}
 
-		// Start next batch if not exhausted
-		if !format_args_wrapper.is_exhausted() {
-			format_args_wrapper.start_next_batch();
-		}
-
-		if format_args.is_empty() {
+		format_args_wrapper.start_next_batch();
+		if match (first_arg, format_args_wrapper.peek_arg()) {
+			(Some(before), Some(after)) => std::ptr::eq(before, after),
+			(None, None) => true,
+			_ => false,
+		} {
 			break;
 		}
 	}
@@ -181,6 +182,17 @@ mod tests {
 
 		assert_eq!(sprintf_via_uucore("xyz", empty.iter())?, "xyz");
 		assert_eq!(sprintf_via_uucore("%s|", empty.iter())?, "|");
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_sprintf_literal_ignores_extra_arguments() -> Result<()> {
+		let mut buffer = [0; 9];
+		let mut output = buffer.as_mut_slice();
+		format_via_uucore("## Alpha\n", ["extra"].iter(), &mut output)?;
+		assert!(output.is_empty());
+		assert_eq!(&buffer, b"## Alpha\n");
 
 		Ok(())
 	}
