@@ -372,6 +372,18 @@ describe("eval tool description await markers", () => {
 				expect(actual).toEqual(Object.fromEntries(documented));
 			});
 		}
+
+		it("names a JS spelling for the judge helper that the JS runtime defines when both runtimes are on", async () => {
+			const judgeLine = getEvalToolDescription({ py: true, js: true })
+				.split("\n")
+				.find(line => line.startsWith("- `judge`,"));
+			const jsHelper = judgeLine?.match(/`(\w+)` \(JS\)/)?.[1];
+			expect(jsHelper).toBeDefined();
+			const defined = JSON.parse(
+				(await runtime.run(`JSON.stringify(typeof globalThis[${JSON.stringify(jsHelper)}])`, undefined, hooks)) as string,
+			);
+			expect(defined).toBe("function");
+		});
 	});
 
 	describe("Python", () => {
