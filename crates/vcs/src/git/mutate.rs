@@ -2217,7 +2217,11 @@ fn set_executable_bit(path: &Path, executable: bool) -> std::io::Result<()> {
 		return Ok(());
 	}
 	let mode = meta.permissions().mode();
-	let wanted = if executable { mode | 0o111 } else { mode & !0o111 };
+	let wanted = if executable {
+		mode | 0o111
+	} else {
+		mode & !0o111
+	};
 	if wanted != mode {
 		fs::set_permissions(path, fs::Permissions::from_mode(wanted))?;
 	}
