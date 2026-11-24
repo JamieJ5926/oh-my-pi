@@ -1102,8 +1102,9 @@ impl GitRepo {
 				.checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
 				.map_err(|err| Error::backend("git worktree add", err))?;
 			checkout_options.overwrite_existing = true;
-			// Git writes each entry's executable bit on checkout whatever core.filemode
-			// says; gix takes its capability from core.filemode and drops the bit when off.
+			// Git writes each entry's executable bit on checkout whatever
+			// core.filemode says; gix takes its capability from core.filemode and
+			// drops the bit when off.
 			#[cfg(unix)]
 			{
 				checkout_options.fs.executable_bit = true;
@@ -1143,9 +1144,20 @@ impl GitRepo {
 			{
 				entry.stat = written.stat;
 			} else {
-				let metadata = gix::index::fs::Metadata::from_path_no_follow(
-					&path.join(entry_path.to_path_lossy()),
-				)?;
+				let full = path.join(entry_path.to_path_lossy());
+				// A clean file keeps the disk mode its clone copied. With
+				// core.filemode off git ignores that mode, so take the bit its
+				// index entry records.
+				#[cfg(unix)]
+				{
+					let mode = entry.mode;
+					if mode == gix::index::entry::Mode::FILE
+						|| mode == gix::index::entry::Mode::FILE_EXECUTABLE
+					{
+						set_executable_bit(&full, mode == gix::index::entry::Mode::FILE_EXECUTABLE)?;
+					}
+				}
+				let metadata = gix::index::fs::Metadata::from_path_no_follow(&full)?;
 				entry.stat = gix::index::entry::Stat::from_fs(&metadata)
 					.map_err(|err| Error::backend("git worktree add", err))?;
 			}
@@ -1998,7 +2010,8 @@ fn checkout_tree(
 		.map_err(|e| Error::backend("git checkout", e))?;
 	opts.overwrite_existing = true;
 	// Git writes each entry's executable bit on checkout whatever core.filemode
-	// says; gix takes its capability from core.filemode and drops the bit when off.
+	// says; gix takes its capability from core.filemode and drops the bit when
+	// off.
 	#[cfg(unix)]
 	{
 		opts.fs.executable_bit = true;
@@ -2176,8 +2189,8 @@ fn index_diff_paths(left: &gix::index::File, right: &gix::index::File) -> BTreeS
 /// Point the stat cache of every index entry outside `dirty` at the file now
 /// under `root`, so entries whose content matches the index read as clean.
 /// A clean regular file also takes the executable bit its entry records: with
-/// `core.filemode` off git ignores exec-bit edits, so the disk bit a clone copied
-/// can disagree with the index.
+/// `core.filemode` off git ignores exec-bit edits, so the disk bit a clone
+/// copied can disagree with the index.
 fn refresh_clean_index_stats(
 	index: &mut gix::index::File,
 	root: &Path,
@@ -2205,8 +2218,8 @@ fn refresh_clean_index_stats(
 	Ok(())
 }
 
-/// Set or clear the executable bit of a regular file. A missing file or any other
-/// kind is left alone, as the stat refresh leaves it.
+/// Set or clear the executable bit of a regular file. A missing file or any
+/// other kind is left alone, as the stat refresh leaves it.
 #[cfg(unix)]
 fn set_executable_bit(path: &Path, executable: bool) -> std::io::Result<()> {
 	use std::os::unix::fs::PermissionsExt;
@@ -3796,6 +3809,43 @@ mod tests {
 				"a failed clone attempt must surface its reason"
 			);
 		}
+		let _ = repo.worktree_remove(&linked, true);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn clone_first_worktree_takes_each_index_exec_bit_when_filemode_is_off() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let (temp, _) = fixture();
+		fs::write(temp.path().join("run.sh"), "#!/bin/sh\necho ok\n").unwrap();
+		fs::set_permissions(temp.path().join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+		git(temp.path(), &["add", "run.sh"]);
+		git(temp.path(), &["commit", "-qm", "run"]);
+		// Git ignores exec-bit edits with core.filemode off, so the tree reads
+		// clean while the disk disagrees with the index: run.sh is 100755 there
+		// but 0644 on disk, a is 100644 there but 0755 on disk.
+		git(temp.path(), &["config", "core.filemode", "false"]);
+		fs::set_permissions(temp.path().join("run.sh"), fs::Permissions::from_mode(0o644)).unwrap();
+		fs::set_permissions(temp.path().join("a"), fs::Permissions::from_mode(0o755)).unwrap();
+		let repo = GitRepo::require(temp.path()).unwrap();
+
+		let linked = temp.path().join("../linked-exec-bits");
+		let _ = fs::remove_dir_all(&linked);
+		repo
+			.worktree_add(&linked, "HEAD", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.unwrap();
+
+		let exec_bit = |name: &str| {
+			let meta = fs::metadata(linked.join(name)).unwrap();
+			meta.permissions().mode() & 0o111
+		};
+		assert_eq!(exec_bit("a"), 0, "a is 100644 in the index");
+		assert_eq!(exec_bit("run.sh"), 0o111, "run.sh is 100755 in the index");
 		let _ = repo.worktree_remove(&linked, true);
 	}
 
