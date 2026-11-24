@@ -2230,10 +2230,15 @@ fn set_executable_bit(path: &Path, executable: bool) -> std::io::Result<()> {
 		return Ok(());
 	}
 	let mode = meta.permissions().mode();
-	let wanted = if executable {
-		mode | 0o111
-	} else {
+	// Git's executable test is the owner bit. An executable file the owner can
+	// already run keeps its mode. Otherwise each class that can read gets
+	// execute, as gix's checkout does, so a private 0700 file is not widened.
+	let wanted = if !executable {
 		mode & !0o111
+	} else if mode & 0o100 != 0 {
+		mode
+	} else {
+		mode | ((mode & 0o444) >> 2)
 	};
 	if wanted != mode {
 		fs::set_permissions(path, fs::Permissions::from_mode(wanted))?;
